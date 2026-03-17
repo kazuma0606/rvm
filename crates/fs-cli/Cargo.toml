@@ -1,0 +1,15 @@
+[package]
+name = "fs-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[dependencies]
+fs-parser = { path = "../fs-parser" }
+fs-compiler = { path = "../fs-compiler" }
+rvm-runtime = { path = "../rvm-runtime" }
+rvm-host = { path = "../rvm-host" }
+fs-repl = { path = "../fs-repl" }

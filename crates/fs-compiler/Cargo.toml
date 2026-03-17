@@ -1,0 +1,13 @@
+[package]
+name = "fs-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fs-ast = { path = "../fs-ast" }
+fs-bytecode = { path = "../fs-bytecode" }
+rvm-core = { path = "../rvm-core" }
+
+[dev-dependencies]
+fs-parser = { path = "../fs-parser" }
+test-utils = { path = "../test-utils" }

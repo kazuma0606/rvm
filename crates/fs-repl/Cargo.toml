@@ -1,0 +1,11 @@
+[package]
+name = "fs-repl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fs-parser = { path = "../fs-parser" }
+fs-compiler = { path = "../fs-compiler" }
+rvm-runtime = { path = "../rvm-runtime" }
+rvm-host = { path = "../rvm-host" }
+rvm-core = { path = "../rvm-core" }

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fs-ast",
+    "crates/fs-lexer",
+    "crates/fs-parser",
+    "crates/fs-bytecode",
+    "crates/fs-compiler",
+    "crates/rvm-core",
+    "crates/rvm-runtime",
+    "crates/rvm-host",
+    "crates/fs-cli", "crates/test-utils", "crates/e2e-tests", "crates/fs-repl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["RVM Contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# 共通の依存関係は必要に応じて追加
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.test]
+opt-level = 1
