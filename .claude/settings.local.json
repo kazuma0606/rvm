@@ -8,7 +8,8 @@
       "Bash(cargo test:*)",
       "Bash(mkdir -p /c/Users/yoshi/rvm/.claude/commands)",
       "Bash(cp /c/Users/yoshi/rvm/.claude/skills/*.md /c/Users/yoshi/rvm/.claude/commands/)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(cp:*)"
     ]
   }
 }

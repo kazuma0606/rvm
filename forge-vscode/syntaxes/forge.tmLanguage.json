@@ -1,0 +1,188 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ForgeScript",
+  "scopeName": "source.forge",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#boolean" },
+    { "include": "#function-def" },
+    { "include": "#variable-decl" },
+    { "include": "#keyword-control" },
+    { "include": "#keyword-binding" },
+    { "include": "#keyword-fn" },
+    { "include": "#type-name" },
+    { "include": "#builtin" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.double-slash.forge",
+      "match": "//.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.forge",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.forge" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.forge" }
+      },
+      "patterns": [
+        { "include": "#string-escape" },
+        { "include": "#string-interpolation" }
+      ]
+    },
+    "string-escape": {
+      "name": "constant.character.escape.forge",
+      "match": "\\\\[ntr\\\\\"{}]"
+    },
+    "string-interpolation": {
+      "name": "meta.interpolation.forge",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.interpolation.begin.forge" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.interpolation.end.forge" }
+      },
+      "contentName": "source.forge.embedded",
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#number" },
+        { "include": "#boolean" },
+        { "include": "#keyword-control" },
+        { "include": "#keyword-binding" },
+        { "include": "#keyword-fn" },
+        { "include": "#builtin" },
+        { "include": "#operator" }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.forge",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.forge",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "boolean": {
+      "name": "constant.language.boolean.forge",
+      "match": "\\b(true|false)\\b"
+    },
+    "function-def": {
+      "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.fn.forge" },
+        "2": { "name": "entity.name.function.forge" }
+      }
+    },
+    "variable-decl": {
+      "match": "\\b(let|state|const)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.binding.forge" },
+        "2": { "name": "variable.other.declaration.forge" }
+      }
+    },
+    "keyword-control": {
+      "patterns": [
+        {
+          "name": "keyword.control.conditional.forge",
+          "match": "\\b(if|else)\\b"
+        },
+        {
+          "name": "keyword.control.loop.forge",
+          "match": "\\b(for|in|while)\\b"
+        },
+        {
+          "name": "keyword.control.match.forge",
+          "match": "\\b(match)\\b"
+        }
+      ]
+    },
+    "keyword-binding": {
+      "name": "keyword.other.binding.forge",
+      "match": "\\b(let|state|const)\\b"
+    },
+    "keyword-fn": {
+      "name": "keyword.other.fn.forge",
+      "match": "\\b(fn|return)\\b"
+    },
+    "type-name": {
+      "patterns": [
+        {
+          "match": "(?<=:\\s*)(number|float|string|bool|list)\\b",
+          "captures": {
+            "1": { "name": "storage.type.forge" }
+          }
+        },
+        {
+          "match": "(?<=->\\s*)(number|float|string|bool|list)\\b",
+          "captures": {
+            "1": { "name": "storage.type.forge" }
+          }
+        }
+      ]
+    },
+    "builtin": {
+      "patterns": [
+        {
+          "name": "constant.language.forge",
+          "match": "\\b(none)\\b"
+        },
+        {
+          "name": "support.function.builtin.forge",
+          "match": "\\b(some|ok|err|print|println|string|number|float|len|type_of)\\b"
+        }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.forge",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.return-type.forge",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.range.forge",
+          "match": "\\.\\.(=)?"
+        },
+        {
+          "name": "keyword.operator.comparison.forge",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.forge",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.forge",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.assignment.forge",
+          "match": "(?<![=!<>])=(?!=)"
+        },
+        {
+          "name": "keyword.operator.question.forge",
+          "match": "\\?"
+        },
+        {
+          "name": "punctuation.separator.type.forge",
+          "match": "(?<![a-zA-Z0-9_]):"
+        }
+      ]
+    }
+  }
+}

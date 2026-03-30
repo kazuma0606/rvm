@@ -1,0 +1,27 @@
+{
+  "name": "forge-language",
+  "displayName": "ForgeScript",
+  "description": "Syntax highlighting for ForgeScript (.forge files)",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "forge",
+        "aliases": ["ForgeScript", "forge"],
+        "extensions": [".forge"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "forge",
+        "scopeName": "source.forge",
+        "path": "./syntaxes/forge.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -9,41 +9,41 @@
 
 ## S-1-A: ファイル雛形
 
-- [ ] `forge-vscode/` ディレクトリ作成
-- [ ] `forge-vscode/package.json` 作成
-  - [ ] 言語 ID `forge`、拡張子 `.forge` の登録
-  - [ ] grammar パス・scopeName の設定
-- [ ] `forge-vscode/language-configuration.json` 作成
-  - [ ] 括弧ペア `{}` `[]` `()`
-  - [ ] 行コメント `//`
-  - [ ] auto-closing pairs（`"`, `{`, `[`, `(`）
+- [x] `forge-vscode/` ディレクトリ作成
+- [x] `forge-vscode/package.json` 作成
+  - [x] 言語 ID `forge`、拡張子 `.forge` の登録
+  - [x] grammar パス・scopeName の設定
+- [x] `forge-vscode/language-configuration.json` 作成
+  - [x] 括弧ペア `{}` `[]` `()`
+  - [x] 行コメント `//`
+  - [x] auto-closing pairs（`"`, `{`, `[`, `(`）
 
 ## S-1-B: TextMate grammar 本体
 
-- [ ] `forge-vscode/syntaxes/forge.tmLanguage.json` 作成
-- [ ] コメント（`//`）
-- [ ] 文字列リテラル（エスケープ `\n` `\t` `\"` `\\` 含む）
-- [ ] 文字列補間（`{expr}` を別スコープで着色）
-- [ ] 数値リテラル（整数 `42` / アンダースコア区切り `1_000` / 浮動小数点 `3.14`）
-- [ ] 真偽値（`true` / `false`）
-- [ ] バインディングキーワード（`let` / `state` / `const`）
-- [ ] 関数キーワード（`fn` / `return`）
-- [ ] 制御フローキーワード（`if` / `else` / `for` / `in` / `while` / `match`）
-- [ ] Option / Result コンストラクタ（`some` / `none` / `ok` / `err`）
-- [ ] 組み込み関数（`print` / `println` / `string` / `number` / `float` / `len` / `type_of`）
-- [ ] 型名（`number` / `float` / `string` / `bool` / `list`）
-- [ ] 演算子（`=>` / `->` / `?` / `..` / `..=` / 算術 / 比較 / 論理）
-- [ ] 関数定義名（`fn NAME(...)` の `NAME` を強調）
+- [x] `forge-vscode/syntaxes/forge.tmLanguage.json` 作成
+- [x] コメント（`//`）
+- [x] 文字列リテラル（エスケープ `\n` `\t` `\"` `\\` 含む）
+- [x] 文字列補間（`{expr}` を別スコープで着色）
+- [x] 数値リテラル（整数 `42` / アンダースコア区切り `1_000` / 浮動小数点 `3.14`）
+- [x] 真偽値（`true` / `false`）
+- [x] バインディングキーワード（`let` / `state` / `const`）
+- [x] 関数キーワード（`fn` / `return`）
+- [x] 制御フローキーワード（`if` / `else` / `for` / `in` / `while` / `match`）
+- [x] Option / Result コンストラクタ（`some` / `none` / `ok` / `err`）
+- [x] 組み込み関数（`print` / `println` / `string` / `number` / `float` / `len` / `type_of`）
+- [x] 型名（`number` / `float` / `string` / `bool` / `list`）
+- [x] 演算子（`=>` / `->` / `?` / `..` / `..=` / 算術 / 比較 / 論理）
+- [x] 関数定義名（`fn NAME(...)` の `NAME` を強調）
 
 ## S-1-C: ローカル配置・動作確認
 
-- [ ] `forge-vscode/` を `~/.vscode/extensions/forge-language/` にコピー（またはシンボリックリンク）
-- [ ] VS Code を再起動
-- [ ] `fixtures/hello.forge` を開いて目視確認
-  - [ ] キーワードが着色されている
-  - [ ] 文字列補間 `{name}` が別色になっている
-  - [ ] `//` コメントが着色されている
-  - [ ] 型注釈（`: number`、`-> string`）が着色されている
+- [x] `forge-vscode/` を `~/.vscode/extensions/forge-language/` にコピー（またはシンボリックリンク）
+- [x] VS Code を再起動
+- [x] `fixtures/hello.forge` を開いて目視確認
+  - [x] キーワードが着色されている
+  - [x] 文字列補間 `{name}` が別色になっている
+  - [x] `//` コメントが着色されている
+  - [x] 型注釈（`: number`、`-> string`）が着色されている
 
 ---
 
