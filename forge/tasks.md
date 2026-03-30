@@ -181,55 +181,55 @@ print(msg)
 
 ### 2-B: インタプリタ
 
-- [ ] `forge-vm/src/interpreter/mod.rs` にツリーウォーカー実装
-  - [ ] `Env`（スコープチェーン）の実装
-  - [ ] `eval_literal()` — リテラルの評価
-  - [ ] `eval_binop()` — 二項演算
-  - [ ] `eval_unary()` — 単項演算
-  - [ ] `eval_let()` / `eval_state()` / `eval_const()`
-  - [ ] `eval_assign()` — `state` 変数への再代入
-  - [ ] `eval_if()` — if 式の評価
-  - [ ] `eval_while()`
-  - [ ] `eval_for()` — イテレータを消費してブロックを繰り返す
-  - [ ] `eval_match()` — パターンマッチの評価
-  - [ ] `eval_block()` — ブロック式の評価
-  - [ ] `eval_fn_def()` — 関数定義を環境に登録
-  - [ ] `eval_call()` — 関数・クロージャ呼び出し
-  - [ ] `eval_method_call()` — メソッド呼び出し（Phase 3 で本格実装）
-  - [ ] `eval_closure()` — クロージャの生成（環境のキャプチャ）
-  - [ ] `eval_question()` — `?` 演算子（Result 伝播）
-  - [ ] `eval_interpolation()` — 文字列補間
-  - [ ] `eval_range()` — 範囲をリストに展開
-  - [ ] `eval_list()` — リストリテラルの評価
-  - [ ] `RuntimeError` 型の定義（型エラー・未定義変数等）
+- [x] `forge-vm/src/interpreter/mod.rs` にツリーウォーカー実装
+  - [x] `Env`（スコープチェーン）の実装
+  - [x] `eval_literal()` — リテラルの評価
+  - [x] `eval_binop()` — 二項演算
+  - [x] `eval_unary()` — 単項演算
+  - [x] `eval_let()` / `eval_state()` / `eval_const()`
+  - [x] `eval_assign()` — `state` 変数への再代入
+  - [x] `eval_if()` — if 式の評価
+  - [x] `eval_while()`
+  - [x] `eval_for()` — イテレータを消費してブロックを繰り返す
+  - [x] `eval_match()` — パターンマッチの評価
+  - [x] `eval_block()` — ブロック式の評価
+  - [x] `eval_fn_def()` — 関数定義を環境に登録
+  - [x] `eval_call()` — 関数・クロージャ呼び出し
+  - [x] `eval_method_call()` — メソッド呼び出し（Phase 3 で本格実装）
+  - [x] `eval_closure()` — クロージャの生成（環境のキャプチャ）
+  - [x] `eval_question()` — `?` 演算子（Result 伝播）
+  - [x] `eval_interpolation()` — 文字列補間
+  - [x] `eval_range()` — 範囲をリストに展開
+  - [x] `eval_list()` — リストリテラルの評価
+  - [x] `RuntimeError` 型の定義（型エラー・未定義変数等）
 
 #### Phase 2-B 単体テスト（`forge-vm/src/interpreter/mod.rs` 内 `#[cfg(test)]`）
 
-- [ ] `test_eval_arithmetic` — `1 + 2 * 3` → `Int(7)`
-- [ ] `test_eval_string_concat` — `"foo" + "bar"` → `String("foobar")`
-- [ ] `test_eval_comparison` — `1 < 2` → `Bool(true)`
-- [ ] `test_eval_logical` — `true && false` → `Bool(false)`
-- [ ] `test_eval_let_binding` — `let x = 10; x` → `Int(10)`
-- [ ] `test_eval_state_reassign` — `state x = 0; x = 5; x` → `Int(5)`
-- [ ] `test_eval_let_immutable` — `let x = 1; x = 2` → `RuntimeError::Immutable`
-- [ ] `test_eval_if_expr` — `if true { 1 } else { 2 }` → `Int(1)`
-- [ ] `test_eval_if_else_chain` — else if チェーンが正しく評価される
-- [ ] `test_eval_while` — ループが正しく実行される
-- [ ] `test_eval_for_range` — `for i in [1..=3] { i }` が `[1, 2, 3]` を生成
-- [ ] `test_eval_block_expr` — ブロックの最後の式が戻り値になる
-- [ ] `test_eval_fn_call` — `fn add(a, b) { a + b }; add(1, 2)` → `Int(3)`
-- [ ] `test_eval_closure` — `let f = x => x * 2; f(5)` → `Int(10)`
-- [ ] `test_eval_closure_capture` — クロージャが外側の変数をキャプチャ
-- [ ] `test_eval_match_literal` — `match 2 { 1 => "one", 2 => "two", _ => "other" }` → `String("two")`
-- [ ] `test_eval_match_option_some` — `match some(42) { some(v) => v, none => 0 }` → `Int(42)`
-- [ ] `test_eval_match_option_none` — none パターンが正しくマッチする
-- [ ] `test_eval_match_result_ok` — `match ok(1) { ok(v) => v, err(e) => 0 }`
-- [ ] `test_eval_match_result_err` — err パターンが正しくマッチする
-- [ ] `test_eval_question_ok` — `?` が `ok(v)` を unwrap する
-- [ ] `test_eval_question_err` — `?` が `err(e)` で即 return する
-- [ ] `test_eval_string_interpolation` — `"Hello, {name}!"` が正しく展開される
-- [ ] `test_eval_shadowing` — 同名変数のシャドーイングが動作する
-- [ ] `test_eval_scope` — スコープ外の変数にアクセスしてエラー
+- [x] `test_eval_arithmetic` — `1 + 2 * 3` → `Int(7)`
+- [x] `test_eval_string_concat` — `"foo" + "bar"` → `String("foobar")`
+- [x] `test_eval_comparison` — `1 < 2` → `Bool(true)`
+- [x] `test_eval_logical` — `true && false` → `Bool(false)`
+- [x] `test_eval_let_binding` — `let x = 10; x` → `Int(10)`
+- [x] `test_eval_state_reassign` — `state x = 0; x = 5; x` → `Int(5)`
+- [x] `test_eval_let_immutable` — `let x = 1; x = 2` → `RuntimeError::Immutable`
+- [x] `test_eval_if_expr` — `if true { 1 } else { 2 }` → `Int(1)`
+- [x] `test_eval_if_else_chain` — else if チェーンが正しく評価される
+- [x] `test_eval_while` — ループが正しく実行される
+- [x] `test_eval_for_range` — `for i in [1..=3] { i }` が `[1, 2, 3]` を生成
+- [x] `test_eval_block_expr` — ブロックの最後の式が戻り値になる
+- [x] `test_eval_fn_call` — `fn add(a, b) { a + b }; add(1, 2)` → `Int(3)`
+- [x] `test_eval_closure` — `let f = x => x * 2; f(5)` → `Int(10)`
+- [x] `test_eval_closure_capture` — クロージャが外側の変数をキャプチャ
+- [x] `test_eval_match_literal` — `match 2 { 1 => "one", 2 => "two", _ => "other" }` → `String("two")`
+- [x] `test_eval_match_option_some` — `match some(42) { some(v) => v, none => 0 }` → `Int(42)`
+- [x] `test_eval_match_option_none` — none パターンが正しくマッチする
+- [x] `test_eval_match_result_ok` — `match ok(1) { ok(v) => v, err(e) => 0 }`
+- [x] `test_eval_match_result_err` — err パターンが正しくマッチする
+- [x] `test_eval_question_ok` — `?` が `ok(v)` を unwrap する
+- [x] `test_eval_question_err` — `?` が `err(e)` で即 return する
+- [x] `test_eval_string_interpolation` — `"Hello, {name}!"` が正しく展開される
+- [x] `test_eval_shadowing` — 同名変数のシャドーイングが動作する
+- [x] `test_eval_scope` — スコープ外の変数にアクセスしてエラー
 
 ### 2-C: 標準ライブラリ（ネイティブ関数）
 
@@ -377,7 +377,7 @@ print(msg)
 | Phase 1-B AST | [x] 完了   | 18 / 18 |
 | Phase 1-C Parser | [x] 完了   | 24 / 24 |
 | Phase 2-A Value | [x] 完了   | 9 / 9 |
-| Phase 2-B Interpreter | [ ] 未着手 | 0 / 24 |
+| Phase 2-B Interpreter | [x] 完了   | 24 / 24 |
 | Phase 2-C Stdlib | [ ] 未着手 | 0 / 8 |
 | Phase 2-D CLI | [ ] 未着手 | 0 / 4 |
 | Phase 3 Collections | [ ] 未着手 | 0 / 20 |
