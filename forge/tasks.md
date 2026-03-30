@@ -157,27 +157,27 @@ print(msg)
 
 ### 2-A: Value 型
 
-- [ ] `forge-vm/src/value.rs` に `Value` 定義
-  - [ ] `Int(i64)`, `Float(f64)`, `String(String)`, `Bool(bool)`
-  - [ ] `List(Rc<RefCell<Vec<Value>>>)`
-  - [ ] `Option(Option<Box<Value>>)`
-  - [ ] `Result(Result<Box<Value>, String>)`
-  - [ ] `Closure { params, body, env }`
-  - [ ] `NativeFunction(NativeFn)`
-  - [ ] `Unit`（表示なし）
-- [ ] `Value` に `Display` 実装（print 用）
-- [ ] `Value` に `type_name()` 実装
+- [x] `forge-vm/src/value.rs` に `Value` 定義
+  - [x] `Int(i64)`, `Float(f64)`, `String(String)`, `Bool(bool)`
+  - [x] `List(Rc<RefCell<Vec<Value>>>)`
+  - [x] `Option(Option<Box<Value>>)`
+  - [x] `Result(Result<Box<Value>, String>)`
+  - [x] `Closure { params, body, env }`
+  - [x] `NativeFunction(NativeFn)`
+  - [x] `Unit`（表示なし）
+- [x] `Value` に `Display` 実装（print 用）
+- [x] `Value` に `type_name()` 実装
 
 #### Phase 2-A 単体テスト（`forge-vm/src/value.rs` 内 `#[cfg(test)]`）
 
-- [ ] `test_value_display_int` — `Value::Int(42)` → `"42"`
-- [ ] `test_value_display_float` — `Value::Float(3.14)` → `"3.14"`
-- [ ] `test_value_display_bool` — `Value::Bool(true)` → `"true"`
-- [ ] `test_value_display_string` — `Value::String("hi")` → `"hi"`
-- [ ] `test_value_display_none` — `Value::Option(None)` → `"none"`
-- [ ] `test_value_display_some` — `Value::Option(Some(Int(1)))` → `"some(1)"`
-- [ ] `test_value_display_list` — `[1, 2, 3]` → `"[1, 2, 3]"`
-- [ ] `test_no_nil` — `Value` に `Nil` バリアントが存在しないことを確認（コンパイル確認）
+- [x] `test_value_display_int` — `Value::Int(42)` → `"42"`
+- [x] `test_value_display_float` — `Value::Float(3.14)` → `"3.14"`
+- [x] `test_value_display_bool` — `Value::Bool(true)` → `"true"`
+- [x] `test_value_display_string` — `Value::String("hi")` → `"hi"`
+- [x] `test_value_display_none` — `Value::Option(None)` → `"none"`
+- [x] `test_value_display_some` — `Value::Option(Some(Int(1)))` → `"some(1)"`
+- [x] `test_value_display_list` — `[1, 2, 3]` → `"[1, 2, 3]"`
+- [x] `test_no_nil` — `Value` に `Nil` バリアントが存在しないことを確認（コンパイル確認）
 
 ### 2-B: インタプリタ
 
@@ -376,7 +376,7 @@ print(msg)
 | Phase 1-A Lexer | [x] 完了   | 14 / 14 |
 | Phase 1-B AST | [x] 完了   | 18 / 18 |
 | Phase 1-C Parser | [x] 完了   | 24 / 24 |
-| Phase 2-A Value | [ ] 未着手 | 0 / 9 |
+| Phase 2-A Value | [x] 完了   | 9 / 9 |
 | Phase 2-B Interpreter | [ ] 未着手 | 0 / 24 |
 | Phase 2-C Stdlib | [ ] 未着手 | 0 / 8 |
 | Phase 2-D CLI | [ ] 未着手 | 0 / 4 |
