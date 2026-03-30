@@ -339,21 +339,21 @@ print(msg)
 
 ### 4-A: 型定義・型推論
 
-- [ ] `forge-compiler/src/typechecker/types.rs` に `Type` enum 定義
-- [ ] リテラルからの型推論
-- [ ] 関数シグネチャの型検査
-- [ ] `T?` の match 網羅性チェック（some/none 両方必須）
-- [ ] `T!` の match 網羅性チェック（ok/err 両方必須）
-- [ ] 型不一致エラーの生成（行番号付き）
+- [x] `forge-compiler/src/typechecker/types.rs` に `Type` enum 定義
+- [x] リテラルからの型推論
+- [x] 関数シグネチャの型検査
+- [x] `T?` の match 網羅性チェック（some/none 両方必須）
+- [x] `T!` の match 網羅性チェック（ok/err 両方必須）
+- [x] 型不一致エラーの生成（行番号付き）
 
 #### Phase 4 単体テスト
 
-- [ ] `test_type_infer_int` — `let x = 42` → `x: number`
-- [ ] `test_type_infer_float` — `let x = 3.14` → `x: float`
-- [ ] `test_type_check_binop` — `1 + "hello"` → 型エラー
-- [ ] `test_type_check_fn_return` — 戻り値型と実際の型の検査
-- [ ] `test_type_check_option_match` — none ケースなしで警告
-- [ ] `test_type_check_result_match` — err ケースなしで警告
+- [x] `test_type_infer_int` — `let x = 42` → `x: number`
+- [x] `test_type_infer_float` — `let x = 3.14` → `x: float`
+- [x] `test_type_check_binop` — `1 + "hello"` → 型エラー
+- [x] `test_type_check_fn_return` — 戻り値型と実際の型の検査
+- [x] `test_type_check_option_match` — none ケースなしで警告
+- [x] `test_type_check_result_match` — err ケースなしで警告
 
 ### 4-B: forge check コマンド
 
