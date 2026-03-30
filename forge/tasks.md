@@ -102,54 +102,54 @@ print(msg)
 
 ### 1-C: Parser
 
-- [ ] `forge-compiler/src/parser/mod.rs` に再帰降下パーサー実装
-  - [ ] `parse_module()` — 文のリストをパース
-  - [ ] `parse_stmt()` — 文のディスパッチ
-  - [ ] `parse_let()` / `parse_state()` / `parse_const()`
-  - [ ] `parse_fn()` — 関数定義
-  - [ ] `parse_return()`
-  - [ ] `parse_expr()` — 式（演算子優先順位対応）
-  - [ ] `parse_if()`
-  - [ ] `parse_while()`
-  - [ ] `parse_for()`
-  - [ ] `parse_match()`
-  - [ ] `parse_block()`
-  - [ ] `parse_closure()` — `x => expr` / `(x, y) => expr` / `() => expr`
-  - [ ] `parse_call()` / `parse_method_call()`
-  - [ ] `parse_list_literal()` / `parse_range_literal()`
-  - [ ] `parse_string_interpolation()`
-  - [ ] `parse_type_ann()` — 型注釈
-  - [ ] `parse_pattern()` — match パターン
+- [x] `forge-compiler/src/parser/mod.rs` に再帰降下パーサー実装
+  - [x] `parse_module()` — 文のリストをパース
+  - [x] `parse_stmt()` — 文のディスパッチ
+  - [x] `parse_let()` / `parse_state()` / `parse_const()`
+  - [x] `parse_fn()` — 関数定義
+  - [x] `parse_return()`
+  - [x] `parse_expr()` — 式（演算子優先順位対応）
+  - [x] `parse_if()`
+  - [x] `parse_while()`
+  - [x] `parse_for()`
+  - [x] `parse_match()`
+  - [x] `parse_block()`
+  - [x] `parse_closure()` — `x => expr` / `(x, y) => expr` / `() => expr`
+  - [x] `parse_call()` / `parse_method_call()`
+  - [x] `parse_list_literal()` / `parse_range_literal()`
+  - [x] `parse_string_interpolation()`
+  - [x] `parse_type_ann()` — 型注釈
+  - [x] `parse_pattern()` — match パターン
 
 #### Phase 1-C 単体テスト（`forge-compiler/src/parser/mod.rs` 内 `#[cfg(test)]`）
 
-- [ ] `test_parse_let` — `let x = 10` → `Stmt::Let`
-- [ ] `test_parse_state` — `state count = 0` → `Stmt::State`
-- [ ] `test_parse_const` — `const MAX = 100` → `Stmt::Const`
-- [ ] `test_parse_fn` — `fn add(a: number, b: number) -> number { a + b }` → `Stmt::Fn`
-- [ ] `test_parse_if_expr` — `if x > 0 { "pos" } else { "neg" }` → `Expr::If`
-- [ ] `test_parse_while` — `while i < 10 { i = i + 1 }` → `Stmt::While` ... `Expr::While`
-- [ ] `test_parse_for` — `for x in items { print(x) }` → `Expr::For`
-- [ ] `test_parse_match` — `match x { some(v) => v, none => 0 }` → `Expr::Match`
-- [ ] `test_parse_closure_single` — `x => x * 2` → `Expr::Closure`
-- [ ] `test_parse_closure_multi_arg` — `(a, b) => a + b` → `Expr::Closure`
-- [ ] `test_parse_closure_no_arg` — `() => print("hi")` → `Expr::Closure`
-- [ ] `test_parse_closure_block` — `x => { let y = x * 2; y + 1 }` → ブロックボディ
-- [ ] `test_parse_method_call` — `items.map(x => x * 2)` → `Expr::MethodCall`
-- [ ] `test_parse_question_op` — `parse(s)?` → `Expr::Question`
-- [ ] `test_parse_string_interpolation` — `"Hello, {name}!"` → `Expr::Interpolation`
-- [ ] `test_parse_range` — `[1..=10]` → `Expr::Range { inclusive: true }`
-- [ ] `test_parse_list_literal` — `[1, 2, 3]` → `Expr::List`
-- [ ] `test_parse_operator_precedence` — `1 + 2 * 3` → `1 + (2 * 3)`
-- [ ] `test_parse_type_ann` — `let x: number?` → `TypeAnn::Option(number)`
-- [ ] `test_parse_error_unexpected_token` — 不正な構文で `ParseError` を返す
+- [x] `test_parse_let` — `let x = 10` → `Stmt::Let`
+- [x] `test_parse_state` — `state count = 0` → `Stmt::State`
+- [x] `test_parse_const` — `const MAX = 100` → `Stmt::Const`
+- [x] `test_parse_fn` — `fn add(a: number, b: number) -> number { a + b }` → `Stmt::Fn`
+- [x] `test_parse_if_expr` — `if x > 0 { "pos" } else { "neg" }` → `Expr::If`
+- [x] `test_parse_while` — `while i < 10 { i = i + 1 }` → `Stmt::While` ... `Expr::While`
+- [x] `test_parse_for` — `for x in items { print(x) }` → `Expr::For`
+- [x] `test_parse_match` — `match x { some(v) => v, none => 0 }` → `Expr::Match`
+- [x] `test_parse_closure_single` — `x => x * 2` → `Expr::Closure`
+- [x] `test_parse_closure_multi_arg` — `(a, b) => a + b` → `Expr::Closure`
+- [x] `test_parse_closure_no_arg` — `() => print("hi")` → `Expr::Closure`
+- [x] `test_parse_closure_block` — `x => { let y = x * 2; y + 1 }` → ブロックボディ
+- [x] `test_parse_method_call` — `items.map(x => x * 2)` → `Expr::MethodCall`
+- [x] `test_parse_question_op` — `parse(s)?` → `Expr::Question`
+- [x] `test_parse_string_interpolation` — `"Hello, {name}!"` → `Expr::Interpolation`
+- [x] `test_parse_range` — `[1..=10]` → `Expr::Range { inclusive: true }`
+- [x] `test_parse_list_literal` — `[1, 2, 3]` → `Expr::List`
+- [x] `test_parse_operator_precedence` — `1 + 2 * 3` → `1 + (2 * 3)`
+- [x] `test_parse_type_ann` — `let x: number?` → `TypeAnn::Option(number)`
+- [x] `test_parse_error_unexpected_token` — 不正な構文で `ParseError` を返す
 
 #### Phase 1 結合テスト（`forge-compiler/tests/integration.rs`）
 
-- [ ] `test_full_parse_hello` — `let msg = "Hello!"\nprint(msg)` がエラーなくパースされる
-- [ ] `test_full_parse_fn_with_match` — 関数定義 + match 式をパース
-- [ ] `test_full_parse_closures` — クロージャを含むコードをパース
-- [ ] `test_full_parse_all_literals` — 全リテラル型（int/float/bool/string）をパース
+- [x] `test_full_parse_hello` — `let msg = "Hello!"\nprint(msg)` がエラーなくパースされる
+- [x] `test_full_parse_fn_with_match` — 関数定義 + match 式をパース
+- [x] `test_full_parse_closures` — クロージャを含むコードをパース
+- [x] `test_full_parse_all_literals` — 全リテラル型（int/float/bool/string）をパース
 
 ---
 
@@ -375,7 +375,7 @@ print(msg)
 | Phase 0 | [ ] 未着手 | 0 / 8 |
 | Phase 1-A Lexer | [x] 完了   | 14 / 14 |
 | Phase 1-B AST | [x] 完了   | 18 / 18 |
-| Phase 1-C Parser | [ ] 未着手 | 0 / 24 |
+| Phase 1-C Parser | [x] 完了   | 24 / 24 |
 | Phase 2-A Value | [ ] 未着手 | 0 / 9 |
 | Phase 2-B Interpreter | [ ] 未着手 | 0 / 24 |
 | Phase 2-C Stdlib | [ ] 未着手 | 0 / 8 |
