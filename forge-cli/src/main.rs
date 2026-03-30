@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 
 use forge_compiler::parser::parse_source;
+use forge_compiler::typechecker::type_check_source;
 use forge_vm::interpreter::Interpreter;
 use forge_vm::value::Value;
 
@@ -19,6 +20,15 @@ fn main() {
             } else {
                 eprintln!("エラー: ファイルパスを指定してください");
                 eprintln!("使用方法: forge run <file.forge>");
+                std::process::exit(1);
+            }
+        }
+        Some("check") => {
+            if let Some(path) = args.get(2) {
+                check_file(path);
+            } else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge check <file.forge>");
                 std::process::exit(1);
             }
         }
@@ -105,11 +115,32 @@ fn run_repl() {
     }
 }
 
+fn check_file(path: &str) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let errors = type_check_source(&source);
+    if errors.is_empty() {
+        println!("型チェック: エラーなし");
+    } else {
+        for err in &errors {
+            eprintln!("{}", err);
+        }
+        std::process::exit(1);
+    }
+}
+
 fn print_help() {
     println!("ForgeScript CLI");
     println!();
     println!("使用方法:");
-    println!("  forge run <file.forge>  ファイルを読み込んで実行");
-    println!("  forge repl              対話型 REPL を起動");
-    println!("  forge help              このヘルプを表示");
+    println!("  forge run <file.forge>   ファイルを読み込んで実行");
+    println!("  forge check <file.forge> 型チェックのみ（実行しない）");
+    println!("  forge repl               対話型 REPL を起動");
+    println!("  forge help               このヘルプを表示");
 }

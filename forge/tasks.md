@@ -357,14 +357,14 @@ print(msg)
 
 ### 4-B: forge check コマンド
 
-- [ ] `forge check file.forge` — 型チェックのみ（実行しない）
-- [ ] エラー一覧を行番号付きで出力
+- [x] `forge check file.forge` — 型チェックのみ（実行しない）
+- [x] エラー一覧を行番号付きで出力
 
 #### Phase 4 E2E テスト
 
-- [ ] `e2e_check_no_error` — 正しいコードで exit code 0
-- [ ] `e2e_check_type_error` — 型エラーがあるコードで exit code 1、エラーメッセージを出力
-- [ ] `e2e_check_match_exhaustion` — match の網羅性エラーを検出
+- [x] `e2e_check_no_error` — 正しいコードで exit code 0
+- [x] `e2e_check_type_error` — 型エラーがあるコードで exit code 1、エラーメッセージを出力
+- [x] `e2e_check_match_exhaustion` — match の網羅性エラーを検出
 
 ---
 

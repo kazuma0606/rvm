@@ -355,3 +355,67 @@ print(r.take(4).sum())
     let out = run_forge(src).unwrap();
     assert_eq!(out, "[3, 6, 9]\n10\n");
 }
+
+// ── Phase 4-B E2E テスト（forge check）────────────────────────────────────
+
+/// forge check を実行し (stdout, stderr, exit_code) を返す
+fn run_check(source: &str) -> (String, String, bool) {
+    let tid = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let mut path = std::env::temp_dir();
+    path.push(format!("forge_check_{}.forge", tid));
+
+    std::fs::write(&path, source).expect("write temp file");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args(["check", path.to_str().unwrap_or("")])
+        .output()
+        .expect("run forge-new");
+
+    let _ = std::fs::remove_file(&path);
+
+    (
+        String::from_utf8_lossy(&result.stdout).to_string(),
+        String::from_utf8_lossy(&result.stderr).to_string(),
+        result.status.success(),
+    )
+}
+
+#[test]
+fn e2e_check_no_error() {
+    let src = r#"
+fn add(a: number, b: number) -> number {
+    a + b
+}
+let x = add(1, 2)
+"#;
+    let (out, _err, ok) = run_check(src);
+    assert!(ok, "exit code 0 のはず");
+    assert!(out.contains("エラーなし"), "stdout: {}", out);
+}
+
+#[test]
+fn e2e_check_type_error() {
+    // 数値 + 文字列 → 型エラー
+    let src = r#"let x = 1 + "hello""#;
+    let (_out, err, ok) = run_check(src);
+    assert!(!ok, "exit code 1 のはず");
+    assert!(!err.is_empty(), "stderr にエラーメッセージが出るはず");
+    assert!(err.contains("型エラー") || err.contains("不一致"), "stderr: {}", err);
+}
+
+#[test]
+fn e2e_check_match_exhaustion() {
+    // none アームなし → 網羅性エラー
+    let src = r#"
+let v: number? = some(42)
+match v {
+    some(x) => x
+}
+"#;
+    let (_out, err, ok) = run_check(src);
+    assert!(!ok, "exit code 1 のはず");
+    assert!(err.contains("none") || err.contains("網羅"), "stderr: {}", err);
+}

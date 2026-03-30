@@ -19,7 +19,7 @@ pub struct TypeError {
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.span {
-            Some(s) => write!(f, "型エラー [col {}–{}]: {}", s.start, s.end, self.message),
+            Some(s) => write!(f, "型エラー [{}:{}]: {}", s.line, s.col, self.message),
             None    => write!(f, "型エラー: {}", self.message),
         }
     }
