@@ -1,16 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/fs-ast",
-    "crates/fs-lexer",
-    "crates/fs-parser",
-    "crates/fs-bytecode",
-    "crates/fs-compiler",
-    "crates/rvm-core",
-    "crates/rvm-runtime",
-    "crates/rvm-host",
-    "crates/fs-cli", "crates/test-utils", "crates/e2e-tests", "crates/fs-repl",
-    # 新 ForgeScript 実装 (Phase 0〜)
     "forge-compiler",
     "forge-vm",
     "forge-stdlib",
