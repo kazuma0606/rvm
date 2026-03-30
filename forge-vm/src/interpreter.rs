@@ -145,9 +145,51 @@ impl Interpreter {
             Ok(Value::Unit)
         }), false);
 
+        // println は print と同じ（改行付き）
+        self.define("println", native!(|args: Vec<Value>| {
+            let s = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+            println!("{}", s);
+            Ok(Value::Unit)
+        }), false);
+
         self.define("string", native!(|mut args: Vec<Value>| {
             if args.len() != 1 { return Err("string() takes 1 arg".to_string()); }
             Ok(Value::String(args.remove(0).to_string()))
+        }), false);
+
+        self.define("number", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("number() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::String(s) => match s.trim().parse::<i64>() {
+                    Ok(n)  => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
+                    Err(_) => Ok(Value::Result(Err(format!("\"{}\" を number に変換できません", s)))),
+                },
+                Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Int(f as i64))))),
+                Value::Int(n)   => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
+                v => Ok(Value::Result(Err(format!("{} を number に変換できません", v.type_name())))),
+            }
+        }), false);
+
+        self.define("float", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("float() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::String(s) => match s.trim().parse::<f64>() {
+                    Ok(f)  => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
+                    Err(_) => Ok(Value::Result(Err(format!("\"{}\" を float に変換できません", s)))),
+                },
+                Value::Int(n)   => Ok(Value::Result(Ok(Box::new(Value::Float(n as f64))))),
+                Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
+                v => Ok(Value::Result(Err(format!("{} を float に変換できません", v.type_name())))),
+            }
+        }), false);
+
+        self.define("len", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("len() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+                Value::List(list) => Ok(Value::Int(list.borrow().len() as i64)),
+                v => Err(format!("len() は string または list を期待しましたが {} でした", v.type_name())),
+            }
         }), false);
 
         self.define("type_of", native!(|mut args: Vec<Value>| {
@@ -784,5 +826,47 @@ mod tests {
     fn test_eval_scope() {
         let result = run("{ let x = 1 }; x");
         assert!(matches!(result, Err(RuntimeError::UndefinedVariable(_))));
+    }
+
+    // ── Phase 2-C tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_native_print() {
+        // print は Value::Unit を返し、副作用として stdout に出力する
+        assert_eq!(run("print(42)"), Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_native_string() {
+        assert_eq!(run("string(42)"),   Ok(Value::String("42".to_string())));
+        assert_eq!(run("string(true)"), Ok(Value::String("true".to_string())));
+    }
+
+    #[test]
+    fn test_native_number() {
+        assert_eq!(run(r#"number("42")"#),  Ok(Value::Result(Ok(Box::new(Value::Int(42))))));
+        // number("abc") → err(...)
+        let result = run(r#"number("abc")"#).expect("eval failed");
+        assert!(matches!(result, Value::Result(Err(_))));
+    }
+
+    #[test]
+    fn test_native_float() {
+        assert_eq!(run(r#"float("3.14")"#), Ok(Value::Result(Ok(Box::new(Value::Float(3.14))))));
+    }
+
+    #[test]
+    fn test_native_len_string() {
+        assert_eq!(run(r#"len("hello")"#), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn test_native_len_list() {
+        assert_eq!(run("len([1, 2, 3])"), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn test_native_type_of() {
+        assert_eq!(run("type_of(42)"), Ok(Value::String("number".to_string())));
     }
 }

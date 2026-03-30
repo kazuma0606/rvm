@@ -233,23 +233,23 @@ print(msg)
 
 ### 2-C: 標準ライブラリ（ネイティブ関数）
 
-- [ ] `print(v)` — 任意の値を stdout に出力
-- [ ] `println(v)` — 改行付き出力
-- [ ] `string(v)` — 任意の値を string に変換
-- [ ] `number(v)` — string / float → number!
-- [ ] `float(v)` — string / number → float!
-- [ ] `len(v)` — string / list の長さ
-- [ ] `type_of(v)` — 型名を string で返す
+- [x] `print(v)` — 任意の値を stdout に出力
+- [x] `println(v)` — 改行付き出力
+- [x] `string(v)` — 任意の値を string に変換
+- [x] `number(v)` — string / float → number!
+- [x] `float(v)` — string / number → float!
+- [x] `len(v)` — string / list の長さ
+- [x] `type_of(v)` — 型名を string で返す
 
 #### Phase 2-C 単体テスト
 
-- [ ] `test_native_print` — `print(42)` が stdout に `"42\n"` を出力
-- [ ] `test_native_string` — `string(42)` → `"42"`、`string(true)` → `"true"`
-- [ ] `test_native_number` — `number("42")` → `ok(42)`、`number("abc")` → `err(...)`
-- [ ] `test_native_float` — `float("3.14")` → `ok(3.14)`
-- [ ] `test_native_len_string` — `len("hello")` → `5`
-- [ ] `test_native_len_list` — `len([1,2,3])` → `3`
-- [ ] `test_native_type_of` — `type_of(42)` → `"number"`
+- [x] `test_native_print` — `print(42)` が stdout に `"42\n"` を出力
+- [x] `test_native_string` — `string(42)` → `"42"`、`string(true)` → `"true"`
+- [x] `test_native_number` — `number("42")` → `ok(42)`、`number("abc")` → `err(...)`
+- [x] `test_native_float` — `float("3.14")` → `ok(3.14)`
+- [x] `test_native_len_string` — `len("hello")` → `5`
+- [x] `test_native_len_list` — `len([1,2,3])` → `3`
+- [x] `test_native_type_of` — `type_of(42)` → `"number"`
 
 ### 2-D: forge-cli
 
@@ -378,7 +378,7 @@ print(msg)
 | Phase 1-C Parser | [x] 完了   | 24 / 24 |
 | Phase 2-A Value | [x] 完了   | 9 / 9 |
 | Phase 2-B Interpreter | [x] 完了   | 24 / 24 |
-| Phase 2-C Stdlib | [ ] 未着手 | 0 / 8 |
+| Phase 2-C Stdlib | [x] 完了   | 8 / 8 |
 | Phase 2-D CLI | [ ] 未着手 | 0 / 4 |
 | Phase 3 Collections | [ ] 未着手 | 0 / 20 |
 | Phase 4 TypeChecker | [ ] 未着手 | 0 / 10 |
