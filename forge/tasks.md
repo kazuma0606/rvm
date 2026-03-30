@@ -74,31 +74,31 @@ print(msg)
 
 ### 1-B: AST 定義
 
-- [ ] `forge-compiler/src/ast/mod.rs` に `Stmt` 定義
-  - [ ] `Stmt::Let`, `Stmt::State`, `Stmt::Const`
-  - [ ] `Stmt::Fn`（パラメータ・戻り値型・ボディ）
-  - [ ] `Stmt::Return`
-  - [ ] `Stmt::Expr`
-- [ ] `forge-compiler/src/ast/mod.rs` に `Expr` 定義
-  - [ ] `Expr::Literal`（Int / Float / Str / Bool）
-  - [ ] `Expr::Ident`
-  - [ ] `Expr::BinOp`, `Expr::UnaryOp`
-  - [ ] `Expr::If`, `Expr::While`, `Expr::For`
-  - [ ] `Expr::Block`
-  - [ ] `Expr::Match`（アームのリスト）
-  - [ ] `Expr::Call`, `Expr::MethodCall`
-  - [ ] `Expr::Index`（リストインデックス）
-  - [ ] `Expr::Closure`
-  - [ ] `Expr::Interpolation`（文字列補間）
-  - [ ] `Expr::Range`（`..` / `..=`）
-  - [ ] `Expr::List`（リストリテラル）
-  - [ ] `Expr::Question`（`?` 演算子）
-- [ ] `TypeAnn` 型定義（`number` / `float` / `string` / `bool` / `T?` / `T!` / `list<T>`）
-- [ ] `Pattern` 型定義（マッチパターン）
-  - [ ] `Pattern::Literal`, `Pattern::Wildcard`
-  - [ ] `Pattern::Some(Pattern)`, `Pattern::None`
-  - [ ] `Pattern::Ok(Pattern)`, `Pattern::Err(Pattern)`
-  - [ ] `Pattern::Range`
+- [x] `forge-compiler/src/ast/mod.rs` に `Stmt` 定義
+  - [x] `Stmt::Let`, `Stmt::State`, `Stmt::Const`
+  - [x] `Stmt::Fn`（パラメータ・戻り値型・ボディ）
+  - [x] `Stmt::Return`
+  - [x] `Stmt::Expr`
+- [x] `forge-compiler/src/ast/mod.rs` に `Expr` 定義
+  - [x] `Expr::Literal`（Int / Float / Str / Bool）
+  - [x] `Expr::Ident`
+  - [x] `Expr::BinOp`, `Expr::UnaryOp`
+  - [x] `Expr::If`, `Expr::While`, `Expr::For`
+  - [x] `Expr::Block`
+  - [x] `Expr::Match`（アームのリスト）
+  - [x] `Expr::Call`, `Expr::MethodCall`
+  - [x] `Expr::Index`（リストインデックス）
+  - [x] `Expr::Closure`
+  - [x] `Expr::Interpolation`（文字列補間）
+  - [x] `Expr::Range`（`..` / `..=`）
+  - [x] `Expr::List`（リストリテラル）
+  - [x] `Expr::Question`（`?` 演算子）
+- [x] `TypeAnn` 型定義（`number` / `float` / `string` / `bool` / `T?` / `T!` / `list<T>`）
+- [x] `Pattern` 型定義（マッチパターン）
+  - [x] `Pattern::Literal`, `Pattern::Wildcard`
+  - [x] `Pattern::Some(Pattern)`, `Pattern::None`
+  - [x] `Pattern::Ok(Pattern)`, `Pattern::Err(Pattern)`
+  - [x] `Pattern::Range`
 
 ### 1-C: Parser
 
@@ -374,7 +374,7 @@ print(msg)
 |---|---|---|
 | Phase 0 | [ ] 未着手 | 0 / 8 |
 | Phase 1-A Lexer | [x] 完了   | 14 / 14 |
-| Phase 1-B AST | [ ] 未着手 | 0 / 18 |
+| Phase 1-B AST | [x] 完了   | 18 / 18 |
 | Phase 1-C Parser | [ ] 未着手 | 0 / 24 |
 | Phase 2-A Value | [ ] 未着手 | 0 / 9 |
 | Phase 2-B Interpreter | [ ] 未着手 | 0 / 24 |
