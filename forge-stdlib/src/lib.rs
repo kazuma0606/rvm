@@ -3,3 +3,4 @@
 // 仕様: forge/spec_v0.0.1.md §10
 
 pub mod builtins;
+pub mod collections;

@@ -490,12 +490,342 @@ impl Interpreter {
 
     fn eval_method_call(&mut self, object: &Expr, method: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object)?;
-        let _arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
-        // Phase 3 でコレクション API を実装する
-        Err(RuntimeError::Custom(format!(
-            "メソッド '{}' は {} に対して未実装です (Phase 3 で実装予定)",
-            method, obj.type_name()
-        )))
+        let arg_vals: Vec<Value> = args.iter()
+            .map(|a| self.eval_expr(a))
+            .collect::<Result<_, _>>()?;
+
+        match obj {
+            Value::List(items) => self.eval_list_method(items, method, arg_vals),
+            other => Err(RuntimeError::Custom(format!(
+                "メソッド '{}' は {} に対して未実装です",
+                method, other.type_name()
+            ))),
+        }
+    }
+
+    /// リスト値に対するメソッド呼び出しをディスパッチする（Phase 3-A 全メソッド）
+    fn eval_list_method(
+        &mut self,
+        items: Rc<RefCell<Vec<Value>>>,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            // ── 変換 ──────────────────────────────────────────────────────
+            "map" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::with_capacity(list.len());
+                for item in list {
+                    out.push(self.call_value(f.clone(), vec![item])?);
+                }
+                Ok(mk_list(out))
+            }
+            "filter" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::new();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item.clone()])? {
+                        Value::Bool(true)  => out.push(item),
+                        Value::Bool(false) => {}
+                        v => return Err(type_err("bool", v.type_name())),
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            "flat_map" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::new();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item])? {
+                        Value::List(inner) => out.extend(inner.borrow().iter().cloned()),
+                        v => return Err(type_err("list", v.type_name())),
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            "filter_map" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::new();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item])? {
+                        Value::Option(Some(v)) => out.push(*v),
+                        Value::Option(None)    => {}
+                        v => return Err(type_err("option", v.type_name())),
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            // ── スライス ──────────────────────────────────────────────────
+            "take" => {
+                let n = one_int_arg(method, args)?;
+                let list = items.borrow();
+                let n = n.max(0) as usize;
+                Ok(mk_list(list.iter().take(n).cloned().collect()))
+            }
+            "skip" => {
+                let n = one_int_arg(method, args)?;
+                let list = items.borrow();
+                let n = n.max(0) as usize;
+                Ok(mk_list(list.iter().skip(n).cloned().collect()))
+            }
+            "take_while" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::new();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item.clone()])? {
+                        Value::Bool(true)  => out.push(item),
+                        Value::Bool(false) => break,
+                        v => return Err(type_err("bool", v.type_name())),
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            "skip_while" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut out = Vec::new();
+                let mut skipping = true;
+                for item in list {
+                    if skipping {
+                        match self.call_value(f.clone(), vec![item.clone()])? {
+                            Value::Bool(true)  => {}
+                            Value::Bool(false) => { skipping = false; out.push(item); }
+                            v => return Err(type_err("bool", v.type_name())),
+                        }
+                    } else {
+                        out.push(item);
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            // ── 結合 ──────────────────────────────────────────────────────
+            "enumerate" => {
+                let list = items.borrow();
+                let out = list.iter().enumerate()
+                    .map(|(i, v)| mk_list(vec![Value::Int(i as i64), v.clone()]))
+                    .collect();
+                Ok(mk_list(out))
+            }
+            "zip" => {
+                let other = one_list_arg(method, args)?;
+                let a = items.borrow();
+                let b = other.borrow();
+                let out = a.iter().zip(b.iter())
+                    .map(|(x, y)| mk_list(vec![x.clone(), y.clone()]))
+                    .collect();
+                Ok(mk_list(out))
+            }
+            // ── 集計 ──────────────────────────────────────────────────────
+            "sum" => {
+                let list = items.borrow();
+                if list.is_empty() {
+                    return Ok(Value::Int(0));
+                }
+                let mut int_sum: i64 = 0;
+                let mut float_sum: f64 = 0.0;
+                let mut has_float = false;
+                for item in list.iter() {
+                    match item {
+                        Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
+                        Value::Float(n) => { float_sum += n; has_float = true; }
+                        v => return Err(type_err("number", v.type_name())),
+                    }
+                }
+                Ok(if has_float { Value::Float(float_sum) } else { Value::Int(int_sum) })
+            }
+            "count" => {
+                Ok(Value::Int(items.borrow().len() as i64))
+            }
+            "fold" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::Custom("fold() は引数が2つ必要です".into()));
+                }
+                let mut it = args.into_iter();
+                let seed = it.next().ok_or_else(|| RuntimeError::Custom("fold: seed missing".into()))?;
+                let f    = it.next().ok_or_else(|| RuntimeError::Custom("fold: fn missing".into()))?;
+                let list = items.borrow().clone();
+                let mut acc = seed;
+                for item in list {
+                    acc = self.call_value(f.clone(), vec![acc, item])?;
+                }
+                Ok(acc)
+            }
+            "any" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item])? {
+                        Value::Bool(true)  => return Ok(Value::Bool(true)),
+                        Value::Bool(false) => {}
+                        v => return Err(type_err("bool", v.type_name())),
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item])? {
+                        Value::Bool(true)  => {}
+                        Value::Bool(false) => return Ok(Value::Bool(false)),
+                        v => return Err(type_err("bool", v.type_name())),
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "none" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                for item in list {
+                    match self.call_value(f.clone(), vec![item])? {
+                        Value::Bool(true)  => return Ok(Value::Bool(false)),
+                        Value::Bool(false) => {}
+                        v => return Err(type_err("bool", v.type_name())),
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            // ── 要素アクセス ───────────────────────────────────────────────
+            "first" => {
+                let list = items.borrow();
+                Ok(Value::Option(list.first().map(|v| Box::new(v.clone()))))
+            }
+            "last" => {
+                let list = items.borrow();
+                Ok(Value::Option(list.last().map(|v| Box::new(v.clone()))))
+            }
+            "nth" => {
+                let n = one_int_arg(method, args)?;
+                let list = items.borrow();
+                if n < 0 {
+                    return Ok(Value::Option(None));
+                }
+                Ok(Value::Option(list.get(n as usize).map(|v| Box::new(v.clone()))))
+            }
+            // ── 最小・最大 ─────────────────────────────────────────────────
+            "min" => {
+                let list = items.borrow();
+                if list.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                let mut min_val = &list[0];
+                for item in list.iter().skip(1) {
+                    if compare_values(item, min_val)? == std::cmp::Ordering::Less {
+                        min_val = item;
+                    }
+                }
+                Ok(Value::Option(Some(Box::new(min_val.clone()))))
+            }
+            "max" => {
+                let list = items.borrow();
+                if list.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                let mut max_val = &list[0];
+                for item in list.iter().skip(1) {
+                    if compare_values(item, max_val)? == std::cmp::Ordering::Greater {
+                        max_val = item;
+                    }
+                }
+                Ok(Value::Option(Some(Box::new(max_val.clone()))))
+            }
+            "min_by" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                if list.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                let mut min_item = list[0].clone();
+                let mut min_key  = self.call_value(f.clone(), vec![min_item.clone()])?;
+                for item in list.into_iter().skip(1) {
+                    let key = self.call_value(f.clone(), vec![item.clone()])?;
+                    if compare_values(&key, &min_key)? == std::cmp::Ordering::Less {
+                        min_key  = key;
+                        min_item = item;
+                    }
+                }
+                Ok(Value::Option(Some(Box::new(min_item))))
+            }
+            "max_by" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                if list.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                let mut max_item = list[0].clone();
+                let mut max_key  = self.call_value(f.clone(), vec![max_item.clone()])?;
+                for item in list.into_iter().skip(1) {
+                    let key = self.call_value(f.clone(), vec![item.clone()])?;
+                    if compare_values(&key, &max_key)? == std::cmp::Ordering::Greater {
+                        max_key  = key;
+                        max_item = item;
+                    }
+                }
+                Ok(Value::Option(Some(Box::new(max_item))))
+            }
+            // ── ソート ────────────────────────────────────────────────────
+            "order_by" => {
+                let f = one_fn_arg(method, args)?;
+                sort_by_key(self, items, f, false)
+            }
+            "order_by_descending" => {
+                let f = one_fn_arg(method, args)?;
+                sort_by_key(self, items, f, true)
+            }
+            // then_by は安定ソートなので order_by と同じ実装で正しい動作をする
+            "then_by" => {
+                let f = one_fn_arg(method, args)?;
+                sort_by_key(self, items, f, false)
+            }
+            "then_by_descending" => {
+                let f = one_fn_arg(method, args)?;
+                sort_by_key(self, items, f, true)
+            }
+            // ── その他 ────────────────────────────────────────────────────
+            "reverse" => {
+                let mut list = items.borrow().clone();
+                list.reverse();
+                Ok(mk_list(list))
+            }
+            "distinct" => {
+                let list = items.borrow();
+                let mut seen: Vec<Value> = Vec::new();
+                let mut out = Vec::new();
+                for item in list.iter() {
+                    if !seen.contains(item) {
+                        seen.push(item.clone());
+                        out.push(item.clone());
+                    }
+                }
+                Ok(mk_list(out))
+            }
+            "collect" => {
+                Ok(mk_list(items.borrow().clone()))
+            }
+            other => Err(RuntimeError::Custom(format!(
+                "メソッド '{}' は list に対して未実装です",
+                other
+            ))),
+        }
+    }
+
+    /// Value（Closure または NativeFunction）を引数付きで呼び出す
+    fn call_value(&mut self, f: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        match f {
+            Value::Closure { params, body, env } => {
+                self.call_closure(&params, &body, &env, args)
+            }
+            Value::NativeFunction(NativeFn(func)) => {
+                func(args).map_err(RuntimeError::Custom)
+            }
+            v => Err(type_err("function", v.type_name())),
+        }
     }
 
     fn eval_closure(&self, params: &[String], body: &Expr) -> Result<Value, RuntimeError> {
@@ -572,6 +902,81 @@ impl Default for Interpreter {
 }
 
 // ── ヘルパー関数 ────────────────────────────────────────────────────────────
+
+/// 新しいリスト Value を生成する
+fn mk_list(items: Vec<Value>) -> Value {
+    Value::List(Rc::new(RefCell::new(items)))
+}
+
+/// 2つの Value を大小比較する（Int / Float / String のみ対応）
+fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeError> {
+    use std::cmp::Ordering::Equal;
+    match (a, b) {
+        (Value::Int(x),    Value::Int(y))    => Ok(x.cmp(y)),
+        (Value::Float(x),  Value::Float(y))  => Ok(x.partial_cmp(y).unwrap_or(Equal)),
+        (Value::Int(x),    Value::Float(y))  => Ok((*x as f64).partial_cmp(y).unwrap_or(Equal)),
+        (Value::Float(x),  Value::Int(y))    => Ok(x.partial_cmp(&(*y as f64)).unwrap_or(Equal)),
+        (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
+        _ => Err(RuntimeError::Custom(format!(
+            "比較できない型: {} と {}", a.type_name(), b.type_name()
+        ))),
+    }
+}
+
+/// メソッドの第1引数として呼び出し可能な Value を取り出す
+fn one_fn_arg(method: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    args.into_iter().next()
+        .ok_or_else(|| RuntimeError::Custom(format!("{}() は引数が1つ必要です", method)))
+}
+
+/// メソッドの第1引数を i64 として取り出す
+fn one_int_arg(method: &str, args: Vec<Value>) -> Result<i64, RuntimeError> {
+    match args.into_iter().next() {
+        Some(Value::Int(n)) => Ok(n),
+        Some(v)             => Err(type_err("number", v.type_name())),
+        None => Err(RuntimeError::Custom(format!("{}() は引数が1つ必要です", method))),
+    }
+}
+
+/// メソッドの第1引数を List として取り出す
+fn one_list_arg(method: &str, args: Vec<Value>) -> Result<Rc<RefCell<Vec<Value>>>, RuntimeError> {
+    match args.into_iter().next() {
+        Some(Value::List(lst)) => Ok(lst),
+        Some(v)                => Err(type_err("list", v.type_name())),
+        None => Err(RuntimeError::Custom(format!("{}() は引数が1つ必要です", method))),
+    }
+}
+
+/// キー関数 f でリストをソートする（stable sort）
+fn sort_by_key(
+    interp: &mut Interpreter,
+    items: Rc<RefCell<Vec<Value>>>,
+    f: Value,
+    descending: bool,
+) -> Result<Value, RuntimeError> {
+    let list = items.borrow().clone();
+    // まず各要素のキーを計算してペアを作る
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(list.len());
+    for item in list {
+        let key = interp.call_value(f.clone(), vec![item.clone()])?;
+        keyed.push((key, item));
+    }
+    // 安定ソート（エラーは Cell 経由で伝播）
+    let mut sort_err: Option<RuntimeError> = None;
+    keyed.sort_by(|(ka, _), (kb, _)| {
+        if sort_err.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match compare_values(ka, kb) {
+            Ok(ord) => if descending { ord.reverse() } else { ord },
+            Err(e)  => { sort_err = Some(e); std::cmp::Ordering::Equal }
+        }
+    });
+    if let Some(e) = sort_err {
+        return Err(e);
+    }
+    Ok(mk_list(keyed.into_iter().map(|(_, v)| v).collect()))
+}
 
 fn eval_literal(lit: &Literal) -> Value {
     match lit {

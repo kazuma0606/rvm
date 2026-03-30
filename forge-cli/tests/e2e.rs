@@ -1,4 +1,4 @@
-// forge-cli: Phase 2-D E2E テスト
+// forge-cli: Phase 2-D / 3 E2E テスト
 
 use std::process::Command;
 
@@ -301,4 +301,57 @@ print(type_of(true))
 "#;
     let out = run_forge(src).unwrap();
     assert_eq!(out, "number\nstring\nbool\n");
+}
+
+// ── Phase 3 E2E テスト ─────────────────────────────────────────────────────
+
+#[test]
+fn e2e_collection_pipeline() {
+    let src = r#"
+let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let result = nums.filter(x => x % 2 == 0).map(x => x * x).sum()
+print(result)
+"#;
+    // 偶数: 2,4,6,8,10 → 二乗: 4,16,36,64,100 → 合計: 220
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "220\n");
+}
+
+#[test]
+fn e2e_for_plus_collection() {
+    let src = r#"
+let squares = for i in [1..=5] { i * i }
+let big = squares.filter(x => x > 5)
+print(big)
+"#;
+    // 二乗: [1,4,9,16,25] → 5より大きい: [9,16,25]
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "[9, 16, 25]\n");
+}
+
+#[test]
+fn e2e_nested_closures() {
+    let src = r#"
+let multiplier = factor => (x => x * factor)
+let double = multiplier(2)
+let triple = multiplier(3)
+let nums = [1, 2, 3]
+print(nums.map(double))
+print(nums.map(triple))
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "[2, 4, 6]\n[3, 6, 9]\n");
+}
+
+#[test]
+fn e2e_range_methods() {
+    let src = r#"
+let r = [1..=10]
+print(r.filter(x => x % 3 == 0))
+print(r.take(4).sum())
+"#;
+    // 3の倍数: [3,6,9]
+    // 最初の4要素: [1,2,3,4] → sum: 10
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "[3, 6, 9]\n10\n");
 }

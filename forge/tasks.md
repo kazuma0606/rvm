@@ -291,47 +291,47 @@ print(msg)
 
 ### 3-A: リストメソッド実装（`forge-stdlib/src/collections/`）
 
-- [ ] `.map(f)`
-- [ ] `.filter(f)`
-- [ ] `.flat_map(f)`
-- [ ] `.filter_map(f)`
-- [ ] `.take(n)` / `.skip(n)`
-- [ ] `.take_while(f)` / `.skip_while(f)`
-- [ ] `.enumerate()`
-- [ ] `.zip(other)`
-- [ ] `.sum()` / `.count()`
-- [ ] `.fold(seed, f)`
-- [ ] `.any(f)` / `.all(f)` / `.none(f)`
-- [ ] `.first()` / `.last()` / `.nth(n)`
-- [ ] `.min()` / `.max()` / `.min_by(f)` / `.max_by(f)`
-- [ ] `.order_by(f)` / `.order_by_descending(f)`
-- [ ] `.then_by(f)` / `.then_by_descending(f)`
-- [ ] `.reverse()`
-- [ ] `.distinct()`
-- [ ] `.collect()`
+- [x] `.map(f)`
+- [x] `.filter(f)`
+- [x] `.flat_map(f)`
+- [x] `.filter_map(f)`
+- [x] `.take(n)` / `.skip(n)`
+- [x] `.take_while(f)` / `.skip_while(f)`
+- [x] `.enumerate()`
+- [x] `.zip(other)`
+- [x] `.sum()` / `.count()`
+- [x] `.fold(seed, f)`
+- [x] `.any(f)` / `.all(f)` / `.none(f)`
+- [x] `.first()` / `.last()` / `.nth(n)`
+- [x] `.min()` / `.max()` / `.min_by(f)` / `.max_by(f)`
+- [x] `.order_by(f)` / `.order_by_descending(f)`
+- [x] `.then_by(f)` / `.then_by_descending(f)`
+- [x] `.reverse()`
+- [x] `.distinct()`
+- [x] `.collect()`
 
 #### Phase 3 単体テスト（`forge-stdlib/tests/`）
 
-- [ ] `test_map` — `[1,2,3].map(x => x * 2)` → `[2, 4, 6]`
-- [ ] `test_filter` — `[1,2,3,4].filter(x => x % 2 == 0)` → `[2, 4]`
-- [ ] `test_fold` — `[1,2,3].fold(0, (acc, x) => acc + x)` → `6`
-- [ ] `test_sum` — `[1,2,3,4,5].sum()` → `15`
-- [ ] `test_count` — `[1,2,3].count()` → `3`
-- [ ] `test_any_all` — `any` / `all` の真偽値検証
-- [ ] `test_first_last` — 空リストで `none` を返すことを確認
-- [ ] `test_order_by` — ソートの正確性
-- [ ] `test_take_skip` — 境界値（0・リスト長超過）
-- [ ] `test_distinct` — 重複除去
-- [ ] `test_zip` — 長さが異なる場合は短い方に合わせる
-- [ ] `test_flat_map` — ネストしたリストの展開
-- [ ] `test_method_chain` — `.filter().map().fold()` のチェーン
+- [x] `test_map` — `[1,2,3].map(x => x * 2)` → `[2, 4, 6]`
+- [x] `test_filter` — `[1,2,3,4].filter(x => x % 2 == 0)` → `[2, 4]`
+- [x] `test_fold` — `[1,2,3].fold(0, (acc, x) => acc + x)` → `6`
+- [x] `test_sum` — `[1,2,3,4,5].sum()` → `15`
+- [x] `test_count` — `[1,2,3].count()` → `3`
+- [x] `test_any_all` — `any` / `all` の真偽値検証
+- [x] `test_first_last` — 空リストで `none` を返すことを確認
+- [x] `test_order_by` — ソートの正確性
+- [x] `test_take_skip` — 境界値（0・リスト長超過）
+- [x] `test_distinct` — 重複除去
+- [x] `test_zip` — 長さが異なる場合は短い方に合わせる
+- [x] `test_flat_map` — ネストしたリストの展開
+- [x] `test_method_chain` — `.filter().map().fold()` のチェーン
 
 #### Phase 3 E2E テスト
 
-- [ ] `e2e_collection_pipeline` — フィルタ→マップ→集計のパイプライン
-- [ ] `e2e_for_plus_collection` — for 式とコレクションメソッドの組み合わせ
-- [ ] `e2e_nested_closures` — ネストしたクロージャ
-- [ ] `e2e_range_methods` — 範囲リテラルにメソッドを適用
+- [x] `e2e_collection_pipeline` — フィルタ→マップ→集計のパイプライン
+- [x] `e2e_for_plus_collection` — for 式とコレクションメソッドの組み合わせ
+- [x] `e2e_nested_closures` — ネストしたクロージャ
+- [x] `e2e_range_methods` — 範囲リテラルにメソッドを適用
 
 ---
 
