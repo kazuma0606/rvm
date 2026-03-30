@@ -253,37 +253,37 @@ print(msg)
 
 ### 2-D: forge-cli
 
-- [ ] `forge run file.forge` — ファイルを読み込んで実行
-- [ ] `forge repl` — 対話型 REPL（複数行入力・状態保持）
-- [ ] `forge help` — コマンド一覧
-- [ ] エラー時の適切なメッセージ表示（行番号・カラム付き）
+- [x] `forge run file.forge` — ファイルを読み込んで実行
+- [x] `forge repl` — 対話型 REPL（複数行入力・状態保持）
+- [x] `forge help` — コマンド一覧
+- [x] エラー時の適切なメッセージ表示（行番号・カラム付き）
 
 #### Phase 2 E2E テスト（`forge-cli/tests/e2e.rs`）
 
 各テストは `.forge` ファイルを `forge run` で実行し stdout を検証する。
 
-- [ ] `e2e_hello_world` — `print("Hello, World!")` → `"Hello, World!\n"`
-- [ ] `e2e_arithmetic` — 四則演算・余り
-- [ ] `e2e_string_concat` — 文字列連結
-- [ ] `e2e_bool_logic` — `&&` `||` `!`
-- [ ] `e2e_let_state` — let は再代入不可・state は再代入可
-- [ ] `e2e_const` — const 定数の使用
-- [ ] `e2e_if_else_expr` — if/else が式として値を返す
-- [ ] `e2e_while_loop` — while ループ
-- [ ] `e2e_for_range` — `for i in [1..=5]` のループ
-- [ ] `e2e_for_expr` — for が値のリストを返す
-- [ ] `e2e_function_def` — 関数定義と呼び出し
-- [ ] `e2e_function_return` — return 文
-- [ ] `e2e_closure_basic` — クロージャの基本動作
-- [ ] `e2e_closure_capture` — クロージャによるキャプチャ
-- [ ] `e2e_match_literal` — リテラルのパターンマッチ
-- [ ] `e2e_match_option` — Option のパターンマッチ
-- [ ] `e2e_match_result` — Result のパターンマッチ
-- [ ] `e2e_question_op` — `?` 演算子によるエラー伝播
-- [ ] `e2e_string_interpolation` — `"Hello, {name}!"`
-- [ ] `e2e_recursion` — 再帰関数（フィボナッチ等）
-- [ ] `e2e_nested_scope` — ネストしたスコープとシャドーイング
-- [ ] `e2e_type_of` — `type_of` 組み込み関数
+- [x] `e2e_hello_world` — `print("Hello, World!")` → `"Hello, World!\n"`
+- [x] `e2e_arithmetic` — 四則演算・余り
+- [x] `e2e_string_concat` — 文字列連結
+- [x] `e2e_bool_logic` — `&&` `||` `!`
+- [x] `e2e_let_state` — let は再代入不可・state は再代入可
+- [x] `e2e_const` — const 定数の使用
+- [x] `e2e_if_else_expr` — if/else が式として値を返す
+- [x] `e2e_while_loop` — while ループ
+- [x] `e2e_for_range` — `for i in [1..=5]` のループ
+- [x] `e2e_for_expr` — for が値のリストを返す
+- [x] `e2e_function_def` — 関数定義と呼び出し
+- [x] `e2e_function_return` — return 文
+- [x] `e2e_closure_basic` — クロージャの基本動作
+- [x] `e2e_closure_capture` — クロージャによるキャプチャ
+- [x] `e2e_match_literal` — リテラルのパターンマッチ
+- [x] `e2e_match_option` — Option のパターンマッチ
+- [x] `e2e_match_result` — Result のパターンマッチ
+- [x] `e2e_question_op` — `?` 演算子によるエラー伝播
+- [x] `e2e_string_interpolation` — `"Hello, {name}!"`
+- [x] `e2e_recursion` — 再帰関数（フィボナッチ等）
+- [x] `e2e_nested_scope` — ネストしたスコープとシャドーイング
+- [x] `e2e_type_of` — `type_of` 組み込み関数
 
 ---
 
