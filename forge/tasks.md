@@ -41,36 +41,36 @@ print(msg)
 
 ### 1-A: Lexer
 
-- [ ] `forge-compiler/src/lexer/tokens.rs` に `TokenKind` 定義
-  - [ ] 数値リテラル: `Int(i64)`, `Float(f64)`
-  - [ ] 文字列リテラル: `Str(String)`
-  - [ ] 真偽値: `True`, `False`
-  - [ ] キーワード: `Let`, `State`, `Const`, `Fn`, `Return`
-  - [ ] キーワード: `If`, `Else`, `For`, `In`, `While`
-  - [ ] キーワード: `Match`, `None`, `Some`, `Ok`, `Err`
-  - [ ] 演算子: `Plus`, `Minus`, `Star`, `Slash`, `Percent`
-  - [ ] 演算子: `EqEq`, `BangEq`, `Lt`, `Gt`, `LtEq`, `GtEq`
-  - [ ] 演算子: `And`, `Or`, `Bang`
-  - [ ] 記号: `Arrow(=>)`, `ThinArrow(->)`, `Question(?)`
-  - [ ] 記号: `Colon`, `Dot`, `DotDot`, `DotDotEq`
-  - [ ] 記号: `LBracket`, `RBracket`
-  - [ ] コメント: `//` をスキップ
-  - [ ] 文字列補間: `"Hello, {name}"` を `StrPart` のリストにパース
+- [x] `forge-compiler/src/lexer/tokens.rs` に `TokenKind` 定義
+  - [x] 数値リテラル: `Int(i64)`, `Float(f64)`
+  - [x] 文字列リテラル: `Str(String)`
+  - [x] 真偽値: `True`, `False`
+  - [x] キーワード: `Let`, `State`, `Const`, `Fn`, `Return`
+  - [x] キーワード: `If`, `Else`, `For`, `In`, `While`
+  - [x] キーワード: `Match`, `None`, `Some`, `Ok`, `Err`
+  - [x] 演算子: `Plus`, `Minus`, `Star`, `Slash`, `Percent`
+  - [x] 演算子: `EqEq`, `BangEq`, `Lt`, `Gt`, `LtEq`, `GtEq`
+  - [x] 演算子: `And`, `Or`, `Bang`
+  - [x] 記号: `Arrow(=>)`, `ThinArrow(->)`, `Question(?)`
+  - [x] 記号: `Colon`, `Dot`, `DotDot`, `DotDotEq`
+  - [x] 記号: `LBracket`, `RBracket`
+  - [x] コメント: `//` をスキップ
+  - [x] 文字列補間: `"Hello, {name}"` を `StrPart` のリストにパース
 
 #### Phase 1-A 単体テスト（`forge-compiler/src/lexer/mod.rs` 内 `#[cfg(test)]`）
 
-- [ ] `test_lex_integer` — `42` → `[Int(42), Eof]`
-- [ ] `test_lex_float` — `3.14` → `[Float(3.14), Eof]`
-- [ ] `test_lex_bool` — `true` → `[True, Eof]`、`false` → `[False, Eof]`
-- [ ] `test_lex_string` — `"hello"` → `[Str("hello"), Eof]`
-- [ ] `test_lex_keywords` — `let state const fn return if else for in while match` 各キーワード
-- [ ] `test_lex_operators` — `+ - * / % == != < > <= >= && || !`
-- [ ] `test_lex_symbols` — `=> -> ? : . .. ..= [ ]`
-- [ ] `test_lex_comment` — `// comment\nlet x = 1` でコメントがスキップされる
-- [ ] `test_lex_string_interpolation` — `"Hello, {name}!"` が正しく分割される
-- [ ] `test_lex_unknown_char` — `@` → `LexError::UnexpectedChar`
-- [ ] `test_lex_unterminated_string` — `"hello` → `LexError::UnterminatedString`
-- [ ] `test_lex_span` — 各トークンの span（開始・終了位置）が正しい
+- [x] `test_lex_integer` — `42` → `[Int(42), Eof]`
+- [x] `test_lex_float` — `3.14` → `[Float(3.14), Eof]`
+- [x] `test_lex_bool` — `true` → `[True, Eof]`、`false` → `[False, Eof]`
+- [x] `test_lex_string` — `"hello"` → `[Str("hello"), Eof]`
+- [x] `test_lex_keywords` — `let state const fn return if else for in while match` 各キーワード
+- [x] `test_lex_operators` — `+ - * / % == != < > <= >= && || !`
+- [x] `test_lex_symbols` — `=> -> ? : . .. ..= [ ]`
+- [x] `test_lex_comment` — `// comment\nlet x = 1` でコメントがスキップされる
+- [x] `test_lex_string_interpolation` — `"Hello, {name}!"` が正しく分割される
+- [x] `test_lex_unknown_char` — `@` → `LexError::UnexpectedChar`
+- [x] `test_lex_unterminated_string` — `"hello` → `LexError::UnterminatedString`
+- [x] `test_lex_span` — 各トークンの span（開始・終了位置）が正しい
 
 ### 1-B: AST 定義
 
@@ -373,7 +373,7 @@ print(msg)
 | Phase | 状態 | 完了タスク数 |
 |---|---|---|
 | Phase 0 | [ ] 未着手 | 0 / 8 |
-| Phase 1-A Lexer | [ ] 未着手 | 0 / 14 |
+| Phase 1-A Lexer | [x] 完了   | 14 / 14 |
 | Phase 1-B AST | [ ] 未着手 | 0 / 18 |
 | Phase 1-C Parser | [ ] 未着手 | 0 / 24 |
 | Phase 2-A Value | [ ] 未着手 | 0 / 9 |

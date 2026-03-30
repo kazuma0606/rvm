@@ -5,7 +5,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:docs.rs)",
       "Bash(gh repo:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(mkdir -p /c/Users/yoshi/rvm/.claude/commands)",
+      "Bash(cp /c/Users/yoshi/rvm/.claude/skills/*.md /c/Users/yoshi/rvm/.claude/commands/)"
     ]
   }
 }
