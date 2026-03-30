@@ -100,6 +100,42 @@ POST /eval
 
 **推奨**: まず WASM で Playground を作り、`forge build`（Rust トランスパイラ）が完成したタイミングでサーバー型を検討する。
 
+### セキュリティ考察（Azure ブログへの埋め込みを想定）
+
+#### WASM 方式が安全な理由
+
+WASM はブラウザのサンドボックス内で完結するため、ネットワークアクセス・ファイルシステム・DB への経路が物理的に存在しない。
+どんなコードを入力されても Azure 側のリソースには届かない。
+
+```
+ブラウザ
+  └─ ForgeScript WASM モジュール（サンドボックス）
+       ├─ ネットワークアクセス: 不可
+       ├─ ファイルシステム: 不可
+       └─ DB: 物理的に届かない
+```
+
+| 観点 | WASM | サーバー型（Axum 等） |
+|---|---|---|
+| DB 越境リスク | **なし**（ブラウザ完結） | あり（要サンドボックス） |
+| インジェクション | **なし** | 要対策（入力検証・タイムアウト） |
+| 無限ループ攻撃 | ブラウザタブが固まるだけ | サーバーリソース枯渇リスク |
+| コスト | **ゼロ** | 実行コスト発生 |
+| レイテンシ | **ゼロ**（ローカル実行） | ネットワーク往復あり |
+
+#### サーバー型が必要になった場合の Azure 構成
+
+`forge build`（Rust トランスパイル）等の重い処理が必要になったタイミングで検討する。
+その場合は Azure Functions + VNet でアウトバウンドを遮断する構成が安全。
+
+```
+ブログ (Azure Static Web Apps)
+  └─ POST /eval → Azure Functions（使い捨てコンテナ）
+                    ├─ タイムアウト: 3秒
+                    ├─ ネットワーク: アウトバウンド遮断（VNet）
+                    └─ DB 接続情報: Functions の環境変数に置かない
+```
+
 ---
 
 ## 4. 言語サーバー（LSP）
@@ -126,17 +162,108 @@ forge-lsp/ (新クレート)
 
 ---
 
+## 5. インストール・配布
+
+### 前提作業
+
+- `forge-cli/Cargo.toml` の `[[bin]] name` を `"forge-new"` → `"forge"` に変更する
+- E2E テスト内の `CARGO_BIN_EXE_forge-new` も合わせて修正する
+
+### 方法A: Vagrant + Ubuntu でのローカル検証（推奨・開発中）
+
+```ruby
+# Vagrantfile
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.synced_folder ".", "/vagrant"
+end
+```
+
+```bash
+# Ubuntu 内での手順
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+cd /vagrant
+cargo build --release
+sudo cp target/release/forge /usr/local/bin/
+forge run UAT/hello.forge
+```
+
+### 方法B: cross でクロスコンパイル（Windows → Linux バイナリ生成）
+
+```bash
+cargo install cross
+cross build --release --target x86_64-unknown-linux-gnu
+# → target/x86_64-unknown-linux-gnu/release/forge
+```
+
+Docker が必要。生成したバイナリを Vagrant 共有フォルダ経由で Ubuntu に渡してそのまま実行できる。
+
+### 方法C: GitHub Actions（CI/CD で自動生成）
+
+Linux / macOS / Windows の各バイナリを Releases に自動アップロード。言語仕様が安定したタイミングで整備する。
+
+---
+
+## 6. セルフホスティング
+
+### 概要
+
+「ForgeScript で ForgeScript のコンパイラを書く」こと。C が C コンパイラを持つように、言語が成熟した証として自然に目指すゴール。
+
+### rustc への依存とは別問題
+
+セルフホスティング（コンパイラを何の言語で書くか）と、実行基盤（何の上で動くか）は独立した軸。
+
+| 軸 | 選択肢 |
+|---|---|
+| コンパイラを書く言語 | Rust → ForgeScript（セルフホスティング） |
+| 実行基盤 | rustc / LLVM への依存は**維持してよい** |
+
+Kotlin がセルフホスティングでありながら JVM に依存し続けているように、ForgeScript も rustc に最適化を委任しながらコンパイラ自体を ForgeScript で書ける。「何で作られているか」と「何の上で動くか」は別の話。
+
+### セルフホスティングのメリット
+
+1. **言語仕様のバグが自然に発見される** — コンパイラという大規模実用プログラムを ForgeScript で書くことで、言語の穴・不便な箇所が露呈する
+2. **ドッグフーディング** — 作者が最も ForgeScript を使い込む状況になる
+3. **最良のサンプルコードになる** — コンパイラのソースが大規模実用プログラムのショーケースになる
+4. **言語としての完全性の証明** — 外部から「実用レベルに達した」と認識される
+
+### 現実的な進め方
+
+```
+Stage 1: forge build 完成
+          ForgeScript → Rust コード → rustc → バイナリ
+
+Stage 2: forge-compiler の中枢（パーサー・型チェッカー）を ForgeScript で書き直す
+          コード生成・最適化は引き続き rustc に委任
+
+Stage 3: セルフホスティング完成
+          ForgeScript で書いた ForgeScript コンパイラを ForgeScript 自身がコンパイルできる
+```
+
+### 優先度
+
+言語仕様が変わり続けている段階では着手しない。`forge build` 完成・仕様安定後に自然に目指すゴール。
+
+---
+
 ## 優先順位
 
 ```
 今すぐ作れる
   │
-  ├─ [1] シンタックスハイライト（TextMate grammar）
+  ├─ [1] シンタックスハイライト（TextMate grammar）✅
   ├─ [2] forge test + test "..." インラインブロック
+  ├─ [3] バイナリ名を forge に変更 + Vagrant 検証
   │
   モジュールシステム実装後
   │
-  ├─ [3] 言語サーバー（LSP）
-  ├─ [4] Playground（WASM ビルド）
-  └─ [5] .test.forge コンパニオンスタイル
+  ├─ [4] 言語サーバー（LSP）
+  ├─ [5] Playground（WASM ビルド）
+  └─ [6] .test.forge コンパニオンスタイル
+
+  言語仕様安定・forge build 完成後
+  │
+  └─ [7] セルフホスティング（ForgeScript で ForgeScript コンパイラを書く）
 ```

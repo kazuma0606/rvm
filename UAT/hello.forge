@@ -1,0 +1,14 @@
+// UAT: 基本動作確認
+let name = "World"
+println("Hello, {name}!")
+
+let x = 42
+let y = 8
+println("sum = {x + y}")
+
+fn greet(name: string) -> string {
+    "Hello, {name}!"
+}
+
+let msg = greet("Forge")
+println(msg)
