@@ -1,0 +1,7 @@
+[package]
+name = "forge-stdlib"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-vm = { path = "../forge-vm" }

@@ -1,0 +1,15 @@
+[package]
+name = "forge-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "forge-new"
+path = "src/main.rs"
+
+[dependencies]
+forge-compiler = { path = "../forge-compiler" }
+forge-vm = { path = "../forge-vm" }
+forge-stdlib = { path = "../forge-stdlib" }
+
+[dev-dependencies]

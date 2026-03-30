@@ -1,0 +1,18 @@
+// fixtures/hello.forge
+// ForgeScript の最初のサンプルプログラム
+// Phase 2-D で forge run fixtures/hello.forge が動くことを確認する
+
+let name = "World"
+print("Hello, {name}!")
+
+let x = 42
+let y = 8
+let sum = x + y
+print("sum = {sum}")
+
+fn greet(name: string) -> string {
+    "Hello, {name}!"
+}
+
+let msg = greet("Forge")
+print(msg)

@@ -1,5 +1,8 @@
 ## はじめに
 
+<!-- 2026/03/17: リポジトリURL追加 -->
+**リポジトリ:** [https://github.com/kazuma0606/rvm](https://github.com/kazuma0606/rvm)
+
 Rustはその高い安全性とパフォーマンスにより、多くの開発者に支持されるプログラミング言語ですが、所有権やライフタイムの概念は初心者にとって大きな障壁となります。また、Cargoを活用した依存関係の管理も強力である一方で、手動での設定が煩雑になりがちです。
 
 このような課題を解決し、Rustのエコシステムをより手軽に活用できるようにするため、**ForgeScript（FS）とRust Virtual Machine（RVM）** を構想しました。
@@ -13,6 +16,7 @@ ForgeScript（FS）はRustに準拠しつつ、所有権やライフタイム、
 ## ForgeScript の特徴
 
 ### 1. Rustの難しい概念をブラックボックス化
+<!-- 2026/03/17: 表は従来どおり、将来の目標として記載 -->
 | Rustの難しい要素 | ForgeScriptでの扱い |
 |----------------|----------------|
 | **所有権 (Ownership)** | **すべて参照カウント（Rc/Arc）で自動管理** |
@@ -104,19 +108,80 @@ fn compile_to_binary(source: &str, output: &str) {
 }
 ```
 
+---
+
+## 実装状況（2026/03/17 時点）
+
+<!-- 2026/03/17: MVP完了・REPL・usageドキュメントの実装状況を追加 -->
+### MVP 完了
+
+- **Phase 1〜6 完了**: Workspace、AST、Lexer、Parser、Bytecode、Compiler、RVM Core/Runtime、Host、CLI、E2E
+- **テスト**: 125/125 テスト通過（12 crates）
+- **対応機能**: `let` 変数宣言、四則演算、文字列連結、`print` ネイティブ関数、グローバル変数
+
+### CLI（forge）
+
+<!-- 2026/03/17: forge コマンドの仕様を追加 -->
+```bash
+forge              # REPL 起動
+forge run <file>   # .fs ファイル実行
+forge repl         # REPL 明示起動
+forge help         # ヘルプ表示
+```
+
+### REPL（対話型インタプリタ）
+
+<!-- 2026/03/17: Python 同様の REPL を追加 -->
+`forge` を引数なしで実行すると、Python と同様に対話型インタプリタが起動します。
+
+```bash
+$ forge
+ForgeScript REPL v0.1.0
+>>> let x = 10
+>>> let y = 20
+>>> print(x + y)
+30
+>>> exit
+Goodbye!
+```
+
+- **REPL コマンド**: `exit` / `quit`（終了）、`help`（ヘルプ）、`clear`（環境リセット）
+- **変数永続**: 1行ずつ評価し、変数はセッション中保持
+
+### マニュアル（usage/）
+
+<!-- 2026/03/17: usage/ 配下のドキュメント構成を追加 -->
+| ドキュメント | 説明 |
+|-------------|------|
+| quick-start.md | 5分で始めるクイックスタート |
+| cli.md | forge コマンドリファレンス |
+| repl.md | REPL ガイド |
+| language-reference.md | 文法・型・演算子の仕様 |
+| errors.md | エラーとトラブルシューティング |
+| examples.md | サンプルコード集 |
+
+---
+
 ## 今後の展望
 ForgeScript + RVMは、**Rustのエコシステムをより手軽に扱える新しい言語と仮想マシンの構築を目指します**。今後のロードマップは以下のとおりです。
 
-1. **ForgeScriptのパーサーとASTの構築**
-2. **RVMのインタープリタ実装（バイトコード解釈実行）**
-3. **Cargoとの統合（自動クレート管理）**
-4. **JITコンパイルの導入（Cranelift）**
-5. **AOTコンパイルおよびWASMサポート**
+<!-- 2026/03/17: ロードマップを現状に合わせて更新 -->
+1. ~~**ForgeScriptのパーサーとASTの構築**~~ ✅ 完了
+2. ~~**RVMのインタープリタ実装（バイトコード解釈実行）**~~ ✅ 完了
+3. ~~**CLI・REPL の実装**~~ ✅ 完了（2026/03/17）
+4. **モジュール読み込み機構**（Phase 7）
+5. **Cargoとの統合（自動クレート管理）**
+6. **JITコンパイルの導入（Cranelift）**
+7. **AOTコンパイルおよびWASMサポート**
 
 ## まとめ
 - **ForgeScriptはRustに準拠しながらも、所有権やライフタイムをブラックボックス化し、より扱いやすくするスクリプト言語**
 - **Cargoの管理を簡素化し、`use serde` だけでRustクレートを利用可能にする**
 - **RVM（Rust Virtual Machine）はForgeScriptの実行環境として、インタープリタ・JIT・AOTをサポート予定**
 
-ForgeScript + RVMの実装を進めながら、Rustのエコシステムを活用しやすくする新しい開発体験を提供したいと考えています。🚀
+<!-- 2026/03/17: 現状の達成を追記 -->
+- **MVP 完了**: `let`、四則演算、文字列、`print` が動作
+- **REPL 対応**: `forge` で対話型実行が可能
+- **ドキュメント**: usage/ に詳細マニュアルを整備
 
+ForgeScript + RVMの実装を進めながら、Rustのエコシステムを活用しやすくする新しい開発体験を提供したいと考えています。🚀

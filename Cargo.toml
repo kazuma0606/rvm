@@ -10,6 +10,11 @@ members = [
     "crates/rvm-runtime",
     "crates/rvm-host",
     "crates/fs-cli", "crates/test-utils", "crates/e2e-tests", "crates/fs-repl",
+    # 新 ForgeScript 実装 (Phase 0〜)
+    "forge-compiler",
+    "forge-vm",
+    "forge-stdlib",
+    "forge-cli",
 ]
 
 [workspace.package]
