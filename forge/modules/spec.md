@@ -83,25 +83,29 @@ src/
 
 ## 2. `use` 構文
 
-### 2-1. ローカルモジュール（パスに `/` を含む）
+### 2-1. ローカルモジュール（`./` プレフィックス必須）
+
+ローカルモジュールは必ず `./` で始める。TypeScript / Node.js と同じ規則。
 
 ```forge
 // 単一インポート
-use utils/helper.add
+use ./utils/helper.add
 
 // 複数インポート（波括弧）
-use utils/helper.{add, subtract}
-use models/user.{User, UserRole}
+use ./utils/helper.{add, subtract}
+use ./models/user.{User, UserRole}
 
 // ワイルドカード
-use utils/helper.*
+use ./utils/helper.*
 
 // エイリアス
-use utils/helper.add as add_numbers
-use models/user.User as UserModel
+use ./utils/helper.add as add_numbers
+use ./models/user.User as UserModel
 ```
 
-### 2-2. 外部クレート（単一識別子 → Cargo 名前解決をトリガー）
+### 2-2. 外部クレート（裸の識別子 → Cargo 名前解決をトリガー）
+
+`./` を持たない裸の識別子は必ず外部クレートとして扱う。
 
 ```forge
 // 外部クレート（forge.toml の [dependencies] に自動追記）
@@ -122,9 +126,38 @@ use forge/std/http.Client
 
 | パターン | 判定 | 例 |
 |---|---|---|
-| `/` を含むパス | ローカルモジュール | `use utils/helper.add` |
+| `./` で始まるパス | ローカルモジュール（確定） | `use ./utils/helper.add` |
 | `forge/std/` 始まり | 標準ライブラリ | `use forge/std/io.read_file` |
-| 単一識別子 | 外部クレート | `use serde` |
+| 裸の識別子（`./` なし） | 外部クレート（確定） | `use serde` / `use reqwest.{Client}` |
+
+`./` の有無が判定の唯一の基準。パーサーが一意に決定できる。
+
+### 2-5. ローカルディレクトリの命名規則
+
+`./` プレフィックスによりローカルと外部クレートは構文で区別できるが、
+可読性と混乱防止のため以下を推奨する。
+
+**推奨**: `snake_case` のプロジェクト固有の名前を使う
+
+```
+✅ 推奨
+  src/user_service/
+  src/auth_helpers/
+  src/api_client/
+
+⚠️ 非推奨（有名Rustクレートと同名）
+  src/reqwest/    ← reqwest クレートと紛らわしい
+  src/serde/      ← serde クレートと紛らわしい
+  src/tokio/      ← tokio クレートと紛らわしい
+```
+
+同名でもコンパイルエラーにはならないが（`./` で区別されるため）、
+コードレビュー時の混乱を避けるため公式リファレンスで一覧を提示する。
+
+**主要な予約推奨回避リスト（抜粋）:**
+`serde`, `tokio`, `reqwest`, `axum`, `hyper`, `tonic`, `sqlx`,
+`diesel`, `clap`, `tracing`, `anyhow`, `thiserror`, `rayon`,
+`regex`, `uuid`, `chrono`, `rand`, `log`, `env_logger`
 
 ---
 
@@ -211,8 +244,8 @@ pub fn new_user(name: string, age: number) -> User {
 ### `main.forge`
 
 ```forge
-use math.{add, multiply}       // mod.forge 経由で re-export されたもの
-use models/user.{User, new_user}
+use ./math.{add, multiply}       // mod.forge 経由で re-export されたもの
+use ./models/user.{User, new_user}
 
 let result = add(1, 2)
 let u = new_user("Alice", 30)
@@ -230,7 +263,7 @@ ForgeScript                    →  生成される Rust
 ─────────────────────────────────────────────────
 src/utils/helper.forge         →  src/utils/helper.rs
 src/utils/mod.forge            →  src/utils/mod.rs
-use utils/helper.add           →  use crate::utils::helper::add;
+use ./utils/helper.add         →  use crate::utils::helper::add;
 pub use helper.{add, subtract} →  pub use helper::{add, subtract};
 ```
 
