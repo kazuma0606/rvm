@@ -25,6 +25,40 @@ use models::User;
 
 **ForgeScript では `mod` 宣言を廃止し、ディレクトリ構造がそのままモジュール構造になる。**
 
+### パス解決の基準
+
+`use` パスは `forge.toml` が存在するディレクトリ直下の `src/` を起点とする（Rust と同じ）。
+
+```
+myproject/
+  forge.toml        ← プロジェクトルート
+  src/
+    main.forge      ← エントリーポイント
+    utils/
+      helper.forge
+```
+
+```forge
+// src/main.forge から
+use utils/helper.add    // → src/utils/helper.forge を探す
+```
+
+### モジュールトップレベルの制約
+
+モジュールトップレベルには `const`（コンパイル時定数）のみ記述可能。
+副作用のあるコード（関数呼び出し・`let` 宣言）はすべて関数内に書く。
+
+```forge
+// OK: コンパイル時定数
+const MAX_SIZE = 100
+const PI: float = 3.14159
+
+// ❌ エラー: 副作用のある式はトップレベルに書けない
+let db = connect("localhost")
+```
+
+これにより初期化順序の問題を根本から防ぐ。ランタイムの初期化は `fn main()` 内で行う。
+
 ---
 
 ## 1. ディレクトリ構造
@@ -202,7 +236,21 @@ pub use helper.{add, subtract} →  pub use helper::{add, subtract};
 
 ---
 
-## 7. 循環参照の検出
+## 7. 未使用インポートの検出
+
+`main.forge` を起点に依存グラフを辿り、到達しないモジュールを未使用として警告する。
+
+```
+main.forge → use utils/helper ✔
+           → use models/user  ✔
+           → use legacy/old   ← どこからも呼ばれていない
+
+⚠️ 警告: `legacy/old` はインポートされていますが使用されていません
+```
+
+---
+
+## 8. 循環参照の検出
 
 ForgeScript コンパイラが Rust に渡す前に検出する（二重安全網）。
 
@@ -254,6 +302,60 @@ let result = utils_add(1, 2)
   utils/math.add
   core/math.add
 解決策: エイリアスを使用してください（use utils/math.add as utils_add）
+```
+
+### `use *` のスコープ汚染と警告
+
+ワイルドカードインポートで同名シンボルが衝突した場合、**インポート時点で警告**を出す。
+
+```forge
+use utils/math.*   // add, subtract, multiply
+use core/math.*    // add, format ← add が衝突！
+
+// ⚠️ 警告: `add` が複数のモジュールから `use *` でインポートされています
+//   utils/math.add
+//   core/math.add
+// 予期しない関数が呼ばれる可能性があります。
+// 明示的なインポートまたはエイリアスを推奨します。
+```
+
+呼び出し時にどのモジュールの `add` かを IDE が表示する（LSP 連携）。
+
+### 生 Rust 関数の呼び出し形式
+
+`use raw` ブロック内で Rust の関数を呼ぶ場合は `::` プレフィックスで ForgeScript 関数と明示的に区別する。
+
+```forge
+use raw {
+    // Rust の標準ライブラリは :: で始める
+    let map = ::std::collections::HashMap::new();
+    let val = ::std::env::var("HOME");
+}
+```
+
+これにより「ForgeScript の関数」と「生 Rust の関数」が構文レベルで区別できる。
+
+### 再エクスポートチェーンの深さ制限
+
+再エクスポートは **3段階を上限の目安** とする。それ以上は保守性が著しく下がるため非推奨。
+
+```
+1段: utils/helper               → OK
+2段: utils/mod → helper         → OK
+3段: lib/mod → utils/mod → helper → OK（上限目安）
+4段以上                         → ⚠️ 警告（非推奨）
+```
+
+深いチェーンが必要な場合は、カスタム Result 型でエラー発生レイヤーを明示する設計を推奨。
+
+```forge
+data LayeredError {
+    layer: string        // "db" / "service" / "api" など
+    message: string
+    source: LayeredError?
+}
+
+fn deep_operation() -> string![LayeredError] { ... }
 ```
 
 ---

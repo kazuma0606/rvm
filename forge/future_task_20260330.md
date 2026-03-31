@@ -71,7 +71,72 @@ test "add" {
 
 ---
 
-## 3. Playground サーバ
+## 3. REPL 拡張
+
+### コード補完（3段階）
+
+```
+Level 1（静的・すぐ実装可）
+  キーワード・組み込み関数の補完
+  fn / let / state / if / match / println ...
+
+Level 2（動的・モジュール実装後）
+  ロード済みモジュールのシンボル補完
+  use utils/helper.{add, ...} 後に add が候補に出る
+
+Level 3（型対応・LSP 実装時）
+  メソッド補完（型チェッカーと連携）
+  user.  →  .name / .age / .greet() / .to_json() ...
+```
+
+Level 3 は LSP 実装時に REPL にも自動的に恩恵が来る。
+
+### Playground → REPL → ローカル ワークフロー
+
+「プロトタイプを Playground で書いて、気に入ったらローカルに昇格させる」という Jupyter → Python スクリプトに近いワークフロー。
+
+```
+┌─────────────────────────────────────┐
+│  Playground（ブラウザ・WASM）        │
+│  fn greet(name: string) -> string { │
+│      "Hello, {name}!"               │
+│  }                    [Save Module] │
+└──────────────┬──────────────────────┘
+               │ .forge ファイルをダウンロード
+               ▼
+┌─────────────────────────────────────┐
+│  ローカル REPL                       │
+│  > use saved/greet.greet            │
+│  ✔ loaded                           │
+│  > greet("World")                   │
+│  "Hello, World!"                    │
+│  > :save utils/greeting             │
+│  ✔ utils/greeting.forge を作成      │
+└─────────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  プロジェクト                        │
+│  use utils/greeting.greet           │
+│  println(greet("Forge"))            │
+└─────────────────────────────────────┘
+```
+
+### REPL 専用コマンド
+
+```
+:modules                    # ロード済みモジュール一覧
+:reload utils/helper        # モジュールの再読み込み（ファイル変更後）
+:unload utils/helper        # アンロード
+:save utils/greeting        # セッションで定義した fn/data を .forge に書き出す
+:save utils/greeting --only greet, format_name  # 特定シンボルだけ保存
+:history                    # セッション履歴を表示
+:export                     # クリップボードにコピー（Playground 連携用）
+```
+
+---
+
+## 4. Playground サーバ
 
 ### パターン A: WASM（推奨・サーバーレス）
 
