@@ -419,3 +419,142 @@ match v {
     assert!(!ok, "exit code 1 のはず");
     assert!(err.contains("none") || err.contains("網羅"), "stderr: {}", err);
 }
+
+// ── ラウンドトリップテスト（forge run == forge build + 実行）────────────────
+
+/// ForgeScript ソースを `forge build` でバイナリ化して実行し、stdout を返す
+fn run_built(source: &str) -> Result<String, String> {
+    use std::fs;
+    let tid = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let mut src_path = std::env::temp_dir();
+    src_path.push(format!("forge_rt_{}.forge", tid));
+    let mut bin_path = std::env::temp_dir();
+    bin_path.push(format!("forge_rt_{}_bin", tid));
+
+    fs::write(&src_path, source).map_err(|e| e.to_string())?;
+
+    let build_result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args([
+            "build",
+            src_path.to_str().unwrap_or(""),
+            "-o",
+            bin_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let _ = fs::remove_file(&src_path);
+
+    if !build_result.status.success() {
+        return Err(String::from_utf8_lossy(&build_result.stderr).to_string());
+    }
+
+    let run_result = Command::new(&bin_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let _ = fs::remove_file(&bin_path);
+
+    if run_result.status.success() {
+        Ok(String::from_utf8_lossy(&run_result.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run_result.stderr).to_string())
+    }
+}
+
+#[test]
+fn roundtrip_hello_world() {
+    let src = r#"print("Hello, World!")"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_arithmetic() {
+    let src = r#"
+print(2 + 3)
+print(10 - 4)
+print(3 * 4)
+print(10 / 4)
+print(10 % 3)
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_let_state() {
+    let src = r#"
+let x = 10
+state y = 0
+y = y + 5
+print(x)
+print(y)
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_if_expression() {
+    let src = r#"
+let x = 10
+let label = if x > 5 { "big" } else { "small" }
+print(label)
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_function_def() {
+    let src = r#"
+fn add(a: number, b: number) -> number {
+    a + b
+}
+print(add(3, 4))
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_for_loop() {
+    let src = r#"
+for i in [1, 2, 3] {
+    print(i)
+}
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_string_interpolation() {
+    let src = r#"
+let name = "Forge"
+print("Hello, {name}!")
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_option() {
+    let src = r#"
+let x: number? = some(42)
+match x {
+    some(n) => print(n),
+    none    => print("none"),
+}
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_collection_map() {
+    let src = r#"
+let nums = [1, 2, 3]
+let doubled = nums.map(x => x * 2)
+for n in doubled {
+    print(n)
+}
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}

@@ -9,7 +9,11 @@
       "Bash(mkdir -p /c/Users/yoshi/rvm/.claude/commands)",
       "Bash(cp /c/Users/yoshi/rvm/.claude/skills/*.md /c/Users/yoshi/rvm/.claude/commands/)",
       "Bash(wc:*)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo run:*)",
+      "Bash(rustc /tmp/hello_forge.rs -o /tmp/hello_forge --edition=2021)",
+      "Bash(./target/debug/forge-new transpile:*)"
     ]
   }
 }

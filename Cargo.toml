@@ -5,6 +5,7 @@ members = [
     "forge-vm",
     "forge-stdlib",
     "forge-cli",
+    "forge-transpiler",
 ]
 
 [workspace.package]

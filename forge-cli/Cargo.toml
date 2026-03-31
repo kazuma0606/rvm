@@ -11,5 +11,6 @@ path = "src/main.rs"
 forge-compiler = { path = "../forge-compiler" }
 forge-vm = { path = "../forge-vm" }
 forge-stdlib = { path = "../forge-stdlib" }
+forge-transpiler = { path = "../forge-transpiler" }
 
 [dev-dependencies]

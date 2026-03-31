@@ -1,0 +1,9 @@
+[package]
+name = "forge-transpiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-compiler = { path = "../forge-compiler" }
+
+[dev-dependencies]

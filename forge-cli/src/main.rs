@@ -9,6 +9,7 @@ use forge_compiler::parser::parse_source;
 use forge_compiler::typechecker::type_check_source;
 use forge_vm::interpreter::Interpreter;
 use forge_vm::value::Value;
+use forge_transpiler::transpile;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -29,6 +30,28 @@ fn main() {
             } else {
                 eprintln!("エラー: ファイルパスを指定してください");
                 eprintln!("使用方法: forge check <file.forge>");
+                std::process::exit(1);
+            }
+        }
+        Some("transpile") => {
+            if let Some(path) = args.get(2) {
+                let output = args.iter().position(|s| s == "-o")
+                    .and_then(|i| args.get(i + 1));
+                transpile_file(path, output.map(|s| s.as_str()));
+            } else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge transpile <file.forge> [-o output.rs]");
+                std::process::exit(1);
+            }
+        }
+        Some("build") => {
+            if let Some(path) = args.get(2) {
+                let output = args.iter().position(|s| s == "-o")
+                    .and_then(|i| args.get(i + 1));
+                build_file(path, output.map(|s| s.as_str()));
+            } else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge build <file.forge> [-o binary]");
                 std::process::exit(1);
             }
         }
@@ -135,12 +158,151 @@ fn check_file(path: &str) {
     }
 }
 
+fn transpile_file(path: &str, output: Option<&str>) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let rust_code = match transpile(&source) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("トランスパイルエラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match output {
+        Some(out_path) => {
+            if let Err(e) = fs::write(out_path, &rust_code) {
+                eprintln!("エラー: ファイル '{}' への書き込みに失敗しました: {}", out_path, e);
+                std::process::exit(1);
+            }
+            println!("Rust コードを '{}' に書き込みました", out_path);
+        }
+        None => {
+            print!("{}", rust_code);
+        }
+    }
+}
+
+fn build_file(path: &str, output: Option<&str>) {
+    use std::path::Path;
+    use std::process::Command;
+
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let rust_code = match transpile(&source) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("トランスパイルエラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("forge_out");
+
+    // 一時 Cargo プロジェクトを作成する
+    let mut proj_dir = std::env::temp_dir();
+    proj_dir.push(format!("forge_build_{}", stem));
+
+    if let Err(e) = fs::create_dir_all(proj_dir.join("src")) {
+        eprintln!("エラー: 一時プロジェクトディレクトリを作成できませんでした: {}", e);
+        std::process::exit(1);
+    }
+
+    // Cargo.toml を生成
+    let cargo_toml = format!(
+        "[package]\nname = \"{stem}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nanyhow = \"1\"\n"
+    );
+    if let Err(e) = fs::write(proj_dir.join("Cargo.toml"), cargo_toml) {
+        eprintln!("エラー: Cargo.toml の書き込みに失敗しました: {}", e);
+        std::process::exit(1);
+    }
+
+    // main.rs を生成
+    if let Err(e) = fs::write(proj_dir.join("src/main.rs"), &rust_code) {
+        eprintln!("エラー: main.rs の書き込みに失敗しました: {}", e);
+        std::process::exit(1);
+    }
+
+    // 出力先バイナリパスを決定
+    let binary_name = output.unwrap_or(stem);
+    let out_dir = std::path::PathBuf::from("target/forge");
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        eprintln!("エラー: 出力ディレクトリを作成できませんでした: {}", e);
+        std::process::exit(1);
+    }
+    // 絶対パスにする
+    let out_dir_abs = match out_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => out_dir.clone(),
+    };
+    let binary_path = out_dir_abs.join(binary_name);
+
+    // cargo build --release を呼び出す
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--manifest-path",
+            proj_dir.join("Cargo.toml").to_str().unwrap_or(""),
+        ])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            // バイナリを出力先にコピー
+            let built_bin = proj_dir.join(format!("target/release/{}", stem));
+            let built_bin_exe = proj_dir.join(format!("target/release/{}.exe", stem));
+            let src_bin = if built_bin_exe.exists() { built_bin_exe } else { built_bin };
+
+            if let Err(e) = fs::copy(&src_bin, &binary_path) {
+                eprintln!("エラー: バイナリのコピーに失敗しました: {}", e);
+                eprintln!("  コピー元: {}", src_bin.display());
+                eprintln!("  コピー先: {}", binary_path.display());
+                let _ = fs::remove_dir_all(&proj_dir);
+                std::process::exit(1);
+            }
+            let _ = fs::remove_dir_all(&proj_dir);
+            println!("ビルド成功: {}", binary_path.display());
+        }
+        Ok(s) => {
+            let _ = fs::remove_dir_all(&proj_dir);
+            eprintln!("cargo build がエラーを返しました (exit code: {:?})", s.code());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&proj_dir);
+            eprintln!("エラー: cargo を呼び出せませんでした: {}", e);
+            eprintln!("ヒント: Rust ツールチェーンがインストールされているか確認してください");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn print_help() {
     println!("ForgeScript CLI");
     println!();
     println!("使用方法:");
-    println!("  forge run <file.forge>   ファイルを読み込んで実行");
-    println!("  forge check <file.forge> 型チェックのみ（実行しない）");
-    println!("  forge repl               対話型 REPL を起動");
-    println!("  forge help               このヘルプを表示");
+    println!("  forge run <file.forge>              ファイルを読み込んで実行");
+    println!("  forge check <file.forge>            型チェックのみ（実行しない）");
+    println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
+    println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");
+    println!("  forge build <file.forge>            ネイティブバイナリを生成");
+    println!("  forge build <file.forge> -o myapp   出力バイナリ名を指定");
+    println!("  forge repl                          対話型 REPL を起動");
+    println!("  forge help                          このヘルプを表示");
 }
