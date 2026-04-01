@@ -46,6 +46,27 @@ pub enum Stmt {
     Return(Option<Expr>, Span),
     /// 式文
     Expr(Expr),
+    /// struct Name { field: Type, ... }
+    StructDef {
+        name: String,
+        fields: Vec<(String, TypeAnn)>,
+        derives: Vec<String>,
+        span: Span,
+    },
+    /// impl Name { fn ... }  /  impl Trait for Name { fn ... }
+    ImplBlock {
+        target: String,
+        trait_name: Option<String>,
+        methods: Vec<FnDef>,
+        span: Span,
+    },
+    /// enum Name { Variant, Variant(Type), Variant { field: Type } }
+    EnumDef {
+        name: String,
+        variants: Vec<EnumVariant>,
+        derives: Vec<String>,
+        span: Span,
+    },
 }
 
 /// 式
@@ -153,6 +174,26 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    /// struct インスタンス化 Name { field: expr, ... }
+    StructInit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    },
+    /// enum バリアントのインスタンス化 EnumName::Variant / EnumName::Variant(expr) / EnumName::Variant { field: expr }
+    EnumInit {
+        enum_name: String,
+        variant: String,
+        data: EnumInitData,
+        span: Span,
+    },
+    /// フィールドへの代入 (state self) self.field = expr
+    FieldAssign {
+        object: Box<Expr>,
+        field: String,
+        value: Box<Expr>,
+        span: Span,
+    },
 }
 
 /// 文字列補間パーツ
@@ -191,6 +232,28 @@ pub enum Pattern {
     Range { start: Literal, end: Literal, inclusive: bool },
 }
 
+/// enum バリアント定義
+#[derive(Debug, Clone)]
+pub enum EnumVariant {
+    /// データなし: North
+    Unit(String),
+    /// タプル: Circle(number)
+    Tuple(String, Vec<TypeAnn>),
+    /// 名前付きフィールド: Move { x: number, y: number }
+    Struct(String, Vec<(String, TypeAnn)>),
+}
+
+/// enum インスタンス化時のデータ
+#[derive(Debug, Clone)]
+pub enum EnumInitData {
+    /// データなし
+    None,
+    /// タプル: Circle(3)
+    Tuple(Vec<Expr>),
+    /// 名前付き: Move { x: 1, y: 2 }
+    Struct(Vec<(String, Expr)>),
+}
+
 /// リテラル値
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
@@ -219,6 +282,17 @@ pub enum TypeAnn {
 pub struct Param {
     pub name: String,
     pub type_ann: Option<TypeAnn>,
+    pub span: Span,
+}
+
+/// impl ブロック内のメソッド定義
+#[derive(Debug, Clone)]
+pub struct FnDef {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeAnn>,
+    pub body: Box<Expr>,
+    pub has_state_self: bool,   // `state self` で宣言されたか
     pub span: Span,
 }
 

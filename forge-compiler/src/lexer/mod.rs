@@ -276,13 +276,21 @@ impl Lexer {
                         "in"     => TokenKind::In,
                         "while"  => TokenKind::While,
                         "match"  => TokenKind::Match,
-                        "true"   => TokenKind::True,
-                        "false"  => TokenKind::False,
-                        "none"   => TokenKind::None,
-                        "some"   => TokenKind::Some,
-                        "ok"     => TokenKind::Ok,
-                        "err"    => TokenKind::Err,
-                        _        => TokenKind::Ident(ident),
+                        "true"      => TokenKind::True,
+                        "false"     => TokenKind::False,
+                        "none"      => TokenKind::None,
+                        "some"      => TokenKind::Some,
+                        "ok"        => TokenKind::Ok,
+                        "err"       => TokenKind::Err,
+                        "struct"    => TokenKind::Struct,
+                        "impl"      => TokenKind::Impl,
+                        "self"      => TokenKind::SelfVal,
+                        "Self"      => TokenKind::SelfType,
+                        "trait"     => TokenKind::Trait,
+                        "mixin"     => TokenKind::Mixin,
+                        "data"      => TokenKind::Data,
+                        "typestate" => TokenKind::Typestate,
+                        _           => TokenKind::Ident(ident),
                     };
                     tokens.push(Token { kind, span });
                 }
@@ -356,7 +364,15 @@ impl Lexer {
                         return Err(LexError::UnexpectedChar { ch: '|', line: start_line, col: start_col });
                     }
                 }
-                Some(':') => { self.advance(); tokens.push(Token { kind: TokenKind::Colon,    span: self.make_span(start, start_line, start_col) }); }
+                Some(':') => {
+                    self.advance();
+                    if self.peek() == Some(':') {
+                        self.advance();
+                        tokens.push(Token { kind: TokenKind::ColonColon, span: self.make_span(start, start_line, start_col) });
+                    } else {
+                        tokens.push(Token { kind: TokenKind::Colon, span: self.make_span(start, start_line, start_col) });
+                    }
+                }
                 Some('?') => { self.advance(); tokens.push(Token { kind: TokenKind::Question, span: self.make_span(start, start_line, start_col) }); }
                 Some('.') => {
                     self.advance();
@@ -380,6 +396,10 @@ impl Lexer {
                 Some(']') => { self.advance(); tokens.push(Token { kind: TokenKind::RBracket, span: self.make_span(start, start_line, start_col) }); }
                 Some(',') => { self.advance(); tokens.push(Token { kind: TokenKind::Comma,    span: self.make_span(start, start_line, start_col) }); }
                 Some(';') => { self.advance(); tokens.push(Token { kind: TokenKind::Semicolon, span: self.make_span(start, start_line, start_col) }); }
+                Some('@') => {
+                    self.advance();
+                    tokens.push(Token { kind: TokenKind::At, span: self.make_span(start, start_line, start_col) });
+                }
                 Some(ch) => {
                     let c = ch;
                     self.advance();
@@ -522,8 +542,44 @@ mod tests {
 
     #[test]
     fn test_lex_unknown_char() {
-        let result = lex("@");
-        assert!(matches!(result, Err(LexError::UnexpectedChar { ch: '@', .. })));
+        // @ は現在 At トークンとして認識されるので、別の未知文字でテスト
+        let result = lex("#");
+        assert!(matches!(result, Err(LexError::UnexpectedChar { ch: '#', .. })));
+    }
+
+    #[test]
+    fn test_lex_at_token() {
+        let kinds = kinds("@");
+        assert_eq!(kinds, vec![TokenKind::At, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_lex_struct_keywords() {
+        let src = "struct impl self Self trait mixin data typestate";
+        let got = kinds(src);
+        let expected = vec![
+            TokenKind::Struct,
+            TokenKind::Impl,
+            TokenKind::SelfVal,
+            TokenKind::SelfType,
+            TokenKind::Trait,
+            TokenKind::Mixin,
+            TokenKind::Data,
+            TokenKind::Typestate,
+            TokenKind::Eof,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_lex_colon_colon() {
+        let got = kinds("Foo::bar");
+        assert_eq!(got, vec![
+            TokenKind::Ident("Foo".to_string()),
+            TokenKind::ColonColon,
+            TokenKind::Ident("bar".to_string()),
+            TokenKind::Eof,
+        ]);
     }
 
     #[test]

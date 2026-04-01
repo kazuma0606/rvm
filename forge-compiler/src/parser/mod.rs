@@ -111,11 +111,12 @@ impl Parser {
     fn expect_name(&mut self) -> Result<(String, Span), ParseError> {
         let tok = self.peek().clone();
         let name = match &tok.kind {
-            TokenKind::Ident(n) => n.clone(),
-            TokenKind::Some  => "some".to_string(),
-            TokenKind::None  => "none".to_string(),
-            TokenKind::Ok    => "ok".to_string(),
-            TokenKind::Err   => "err".to_string(),
+            TokenKind::Ident(n)   => n.clone(),
+            TokenKind::Some       => "some".to_string(),
+            TokenKind::None       => "none".to_string(),
+            TokenKind::Ok         => "ok".to_string(),
+            TokenKind::Err        => "err".to_string(),
+            TokenKind::SelfVal    => "self".to_string(),
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "identifier".to_string(),
@@ -176,6 +177,9 @@ impl Parser {
             TokenKind::Const  => self.parse_const(),
             TokenKind::Fn     => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Struct => self.parse_struct_def(vec![]),
+            TokenKind::Impl   => self.parse_impl_block(),
+            TokenKind::At     => self.parse_annotated_stmt(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
@@ -304,13 +308,21 @@ impl Parser {
     // ── パース: 式 ────────────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        // 代入: base を or レベルで解析し、直後に `=` があれば Assign
+        // 代入: base を or レベルで解析し、直後に `=` があれば Assign / FieldAssign
         let base = self.parse_or()?;
         if matches!(self.peek_kind(), TokenKind::Eq) {
-            if let Expr::Ident(name, span) = base {
-                self.advance(); // consume '='
-                let value = self.parse_expr()?; // right-associative
-                return Ok(Expr::Assign { name, value: Box::new(value), span });
+            match base {
+                Expr::Ident(name, span) => {
+                    self.advance(); // consume '='
+                    let value = self.parse_expr()?;
+                    return Ok(Expr::Assign { name, value: Box::new(value), span });
+                }
+                Expr::Field { object, field, span } => {
+                    self.advance(); // consume '='
+                    let value = self.parse_expr()?;
+                    return Ok(Expr::FieldAssign { object, field, value: Box::new(value), span });
+                }
+                other => return Ok(other),
             }
         }
         Ok(base)
@@ -431,6 +443,21 @@ impl Parser {
                     self.advance();
                     expr = Expr::Question(Box::new(expr), span);
                 }
+                TokenKind::ColonColon => {
+                    // TypeName::method() または TypeName::instance() など
+                    let span = self.current_span();
+                    self.advance(); // consume '::'
+                    let (method, _) = self.expect_name()?;
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        self.advance();
+                        let args = self.parse_call_args()?;
+                        self.expect_token(&TokenKind::RParen)?;
+                        expr = Expr::MethodCall { object: Box::new(expr), method, args, span };
+                    } else {
+                        // TypeName::VARIANT など（将来の enum 用）
+                        expr = Expr::Field { object: Box::new(expr), field: method, span };
+                    }
+                }
                 TokenKind::Dot => {
                     self.advance();
                     let (name, span) = self.expect_name()?;
@@ -505,24 +532,32 @@ impl Parser {
                 Ok(Expr::Literal(Literal::Bool(false), tok.span))
             }
 
-            // ── 識別子 / 単引数クロージャ ──
+            // ── 識別子 / 単引数クロージャ / StructInit ──
             TokenKind::Ident(_) => {
                 if matches!(self.kind_at(1), Some(TokenKind::Arrow)) {
                     self.parse_closure()
                 } else {
                     let (name, span) = self.expect_ident()?;
-                    Ok(Expr::Ident(name, span))
+                    // StructInit: 大文字から始まる識別子の後に `{` が来る場合
+                    // ただし `{` がブロックとして解釈される文脈とは区別できないため
+                    // 大文字から始まる名前限定で試みる
+                    if matches!(self.peek_kind(), TokenKind::LBrace) && is_type_name(&name) {
+                        self.parse_struct_init(name, span)
+                    } else {
+                        Ok(Expr::Ident(name, span))
+                    }
                 }
             }
 
-            // ── キーワードを識別子として扱う（some/none/ok/err） ──
-            TokenKind::Some | TokenKind::None | TokenKind::Ok | TokenKind::Err => {
+            // ── キーワードを識別子として扱う（some/none/ok/err/self） ──
+            TokenKind::Some | TokenKind::None | TokenKind::Ok | TokenKind::Err | TokenKind::SelfVal => {
                 let tok = self.advance();
                 let name = match &tok.kind {
-                    TokenKind::Some => "some",
-                    TokenKind::None => "none",
-                    TokenKind::Ok   => "ok",
-                    TokenKind::Err  => "err",
+                    TokenKind::Some    => "some",
+                    TokenKind::None    => "none",
+                    TokenKind::Ok      => "ok",
+                    TokenKind::Err     => "err",
+                    TokenKind::SelfVal => "self",
                     _ => unreachable!(),
                 };
                 Ok(Expr::Ident(name.to_string(), tok.span))
@@ -581,6 +616,9 @@ impl Parser {
                 TokenKind::Const  => stmts.push(self.parse_const()?),
                 TokenKind::Fn     => stmts.push(self.parse_fn()?),
                 TokenKind::Return => stmts.push(self.parse_return()?),
+                TokenKind::Struct => stmts.push(self.parse_struct_def(vec![])?),
+                TokenKind::Impl   => stmts.push(self.parse_impl_block()?),
+                TokenKind::At     => stmts.push(self.parse_annotated_stmt()?),
                 _ => {
                     let expr = self.parse_expr()?;
                     if matches!(self.peek_kind(), TokenKind::Semicolon) {
@@ -700,6 +738,180 @@ impl Parser {
         };
 
         Ok(Expr::Closure { params, body: Box::new(body), span })
+    }
+
+    // ── T-1-C: struct / impl / @derive パース ──────────────────────────────
+
+    fn parse_annotated_stmt(&mut self) -> Result<Stmt, ParseError> {
+        // @derive(...) などのアノテーションをパースし、直後の struct 定義に付与
+        let mut derives: Vec<String> = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::At) {
+            self.advance(); // consume '@'
+            let (ann_name, _) = self.expect_ident()?;
+            if ann_name == "derive" {
+                self.expect_token(&TokenKind::LParen)?;
+                while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                    let (d, _) = self.expect_ident()?;
+                    derives.push(d);
+                    if matches!(self.peek_kind(), TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RParen)?;
+            }
+            self.skip_sep();
+        }
+        // アノテーションの直後に struct が来ることを期待
+        match self.peek_kind().clone() {
+            TokenKind::Struct => self.parse_struct_def(derives),
+            _ => {
+                let tok = self.peek().clone();
+                Err(ParseError::UnexpectedToken {
+                    expected: "struct after annotation".to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    fn parse_struct_def(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Struct)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut fields: Vec<(String, TypeAnn)> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let type_ann = self.parse_type_ann()?;
+            fields.push((field_name, type_ann));
+            // フィールド区切りはカンマまたは改行（セミコロン）
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::StructDef { name, fields, derives, span })
+    }
+
+    fn parse_impl_block(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Impl)?;
+
+        // impl Name { ... }  または  impl Trait for Name { ... }
+        let first_name = self.expect_ident()?.0;
+
+        let (target, trait_name) = if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            // impl Trait for Name
+            let tok = self.peek().clone();
+            if let TokenKind::Ident(ref s) = tok.kind {
+                if s == "for" {
+                    self.advance(); // consume 'for'
+                    let (target, _) = self.expect_ident()?;
+                    (target, Some(first_name))
+                } else {
+                    (first_name, None)
+                }
+            } else {
+                (first_name, None)
+            }
+        } else {
+            (first_name, None)
+        };
+
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut methods: Vec<FnDef> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            methods.push(self.parse_fn_def()?);
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::ImplBlock { target, trait_name, methods, span })
+    }
+
+    /// impl ブロック内の fn 定義をパース
+    fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+        let mut has_state_self = false;
+
+        // 最初のパラメータが `state self` または `self` の場合を処理
+        if matches!(self.peek_kind(), TokenKind::State) {
+            self.advance(); // consume 'state'
+            if matches!(self.peek_kind(), TokenKind::SelfVal) {
+                self.advance(); // consume 'self'
+                has_state_self = true;
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                }
+            }
+        } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
+            self.advance(); // consume 'self'
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let (param_name, param_span) = self.expect_ident()?;
+            let type_ann = if matches!(self.peek_kind(), TokenKind::Colon) {
+                self.advance();
+                Some(self.parse_type_ann()?)
+            } else {
+                None
+            };
+            params.push(Param { name: param_name, type_ann, span: param_span });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RParen)?;
+
+        let return_type = if matches!(self.peek_kind(), TokenKind::ThinArrow) {
+            self.advance();
+            Some(self.parse_type_ann()?)
+        } else {
+            None
+        };
+
+        let body = self.parse_block()?;
+        Ok(FnDef { name, params, return_type, body: Box::new(body), has_state_self, span })
+    }
+
+    fn parse_struct_init(&mut self, name: String, span: Span) -> Result<Expr, ParseError> {
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let value = self.parse_expr()?;
+            fields.push((field_name, value));
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Expr::StructInit { name, fields, span })
     }
 
     fn parse_bracket_expr(&mut self) -> Result<Expr, ParseError> {
@@ -839,6 +1051,13 @@ impl Parser {
             }),
         }
     }
+}
+
+// ── ヘルパー関数 ─────────────────────────────────────────────────────────
+
+/// 型名かどうかを判定（大文字から始まる識別子）
+fn is_type_name(name: &str) -> bool {
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 // ── 公開ユーティリティ ────────────────────────────────────────────────────
@@ -1080,5 +1299,81 @@ mod tests {
         let result = Parser::new(tokens).parse();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ParseError::UnexpectedToken { .. }));
+    }
+
+    // ── Phase T-1 tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_struct_def() {
+        match first_stmt("struct Point { x: number, y: number }") {
+            Stmt::StructDef { name, fields, derives, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+                assert!(matches!(fields[0].1, TypeAnn::Number));
+                assert!(derives.is_empty());
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_derive() {
+        let src = "@derive(Debug, Clone)\nstruct Point { x: number }";
+        match first_stmt(src) {
+            Stmt::StructDef { name, derives, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(derives, vec!["Debug".to_string(), "Clone".to_string()]);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_impl_block() {
+        let src = "impl Rectangle { fn area() -> number { self.width * self.height } }";
+        match first_stmt(src) {
+            Stmt::ImplBlock { target, trait_name, methods, .. } => {
+                assert_eq!(target, "Rectangle");
+                assert!(trait_name.is_none());
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "area");
+            }
+            other => panic!("expected ImplBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_init() {
+        match first_stmt("let p = Point { x: 1, y: 2 }") {
+            Stmt::Let { value: Expr::StructInit { name, fields, .. }, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+            }
+            other => panic!("expected StructInit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_field_access() {
+        match first_stmt("p.x") {
+            Stmt::Expr(Expr::Field { field, .. }) => {
+                assert_eq!(field, "x");
+            }
+            other => panic!("expected Field access, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_impl_state_self() {
+        let src = "impl Counter { fn increment(state self) { self.count = self.count + 1 } }";
+        match first_stmt(src) {
+            Stmt::ImplBlock { methods, .. } => {
+                assert_eq!(methods.len(), 1);
+                assert!(methods[0].has_state_self);
+            }
+            other => panic!("expected ImplBlock, got {:?}", other),
+        }
     }
 }

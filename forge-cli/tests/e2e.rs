@@ -558,3 +558,64 @@ for n in doubled {
 "#;
     assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
 }
+
+// ── Phase T-1 E2E テスト ─────────────────────────────────────────────────
+
+#[test]
+fn struct_basic() {
+    let src = r#"
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 10, y: 20 }
+println(p.x)
+println(p.y)
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "10\n20\n");
+}
+
+#[test]
+fn struct_methods() {
+    let src = r#"
+struct Rectangle {
+    width: number
+    height: number
+}
+
+impl Rectangle {
+    fn area() -> number {
+        self.width * self.height
+    }
+
+    fn perimeter() -> number {
+        (self.width + self.height) * 2
+    }
+}
+
+let r = Rectangle { width: 3, height: 4 }
+println(r.area())
+println(r.perimeter())
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "12\n14\n");
+}
+
+#[test]
+fn struct_derive() {
+    let src = r#"
+@derive(Debug, Clone, Accessor)
+struct User {
+    name: string
+    age: number
+}
+let u = User { name: "Alice", age: 30 }
+println(u.get_name())
+println(u.get_age())
+u.set_name("Bob")
+println(u.get_name())
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "Alice\n30\nBob\n");
+}

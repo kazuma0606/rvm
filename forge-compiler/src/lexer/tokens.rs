@@ -38,6 +38,17 @@ pub enum TokenKind {
     Some,
     Ok,
     Err,
+    // ── 型定義キーワード (Phase T-1 以降) ────
+    Struct,
+    Impl,
+    SelfVal,    // self (小文字)
+    SelfType,   // Self (大文字)
+    Trait,
+    Mixin,
+    Data,
+    Typestate,
+    // ── アノテーション ────────────────────────
+    At,         // @
 
     // ── 識別子 ────────────────────────────────
     Ident(String),
@@ -68,6 +79,7 @@ pub enum TokenKind {
     ThinArrow,   // ->
     Arrow,       // =>
     Question,    // ?
+    ColonColon,  // ::
 
     // ── 範囲 ─────────────────────────────────
     DotDot,      // ..

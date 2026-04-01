@@ -8,6 +8,40 @@ use std::rc::Rc;
 use forge_compiler::ast::*;
 use crate::value::{CapturedEnv, NativeFn, Value};
 
+/// struct 型のメソッド（Forge 定義 or ネイティブ関数）
+#[derive(Clone)]
+enum MethodImpl {
+    /// Forge スクリプトで定義されたメソッド
+    Forge(FnDef),
+    /// Rust ネイティブ関数（引数の第1要素が self）
+    Native(NativeFn),
+}
+
+impl std::fmt::Debug for MethodImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MethodImpl::Forge(def) => write!(f, "Forge({})", def.name),
+            MethodImpl::Native(_)  => write!(f, "Native"),
+        }
+    }
+}
+
+/// struct 型の定義情報（型レジストリに格納）
+#[derive(Debug, Clone)]
+struct StructInfo {
+    fields: Vec<(String, TypeAnn)>,
+    derives: Vec<String>,
+    methods: HashMap<String, MethodImpl>,
+}
+
+/// 型レジストリ（struct 定義とメソッドを格納）
+#[derive(Default)]
+struct TypeRegistry {
+    structs: HashMap<String, StructInfo>,
+    /// Singleton インスタンスキャッシュ
+    singletons: HashMap<String, Value>,
+}
+
 // ── RuntimeError ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,11 +89,16 @@ type Binding = (Value, bool);
 pub struct Interpreter {
     /// スコープスタック。scopes[0] = グローバル、scopes.last() = 現在のスコープ
     scopes: Vec<HashMap<String, Binding>>,
+    /// 型レジストリ（struct 定義・メソッドを保持）
+    type_registry: TypeRegistry,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
-        let mut interp = Self { scopes: vec![HashMap::new()] };
+        let mut interp = Self {
+            scopes: vec![HashMap::new()],
+            type_registry: TypeRegistry::default(),
+        };
         interp.register_builtins();
         interp
     }
@@ -248,6 +287,14 @@ impl Interpreter {
                 Err(RuntimeError::Return(v))
             }
             Stmt::Expr(expr) => self.eval_expr(expr),
+            Stmt::StructDef { name, fields, derives, .. } => {
+                self.eval_struct_def(name.clone(), fields.clone(), derives.clone())
+            }
+            Stmt::ImplBlock { target, trait_name: _, methods, .. } => {
+                self.eval_impl_block(target.clone(), methods.clone())
+            }
+            // T-2 (enum) は未実装 → Unit を返す
+            Stmt::EnumDef { .. } => Ok(Value::Unit),
         }
     }
 
@@ -279,7 +326,15 @@ impl Interpreter {
                 self.assign(name, v)
             }
             Expr::Index { object, index, .. } => self.eval_index(object, index),
-            Expr::Field { .. } => Err(RuntimeError::Custom("フィールドアクセスは未実装".to_string())),
+            Expr::Field { object, field, .. } => self.eval_field_access(object, field),
+            Expr::StructInit { name, fields, .. } => self.eval_struct_init(name, fields),
+            Expr::FieldAssign { object, field, value, .. } => {
+                self.eval_field_assign(object, field, value)
+            }
+            // T-2 (enum) は未実装 → エラー
+            Expr::EnumInit { enum_name, variant, .. } => Err(RuntimeError::Custom(
+                format!("enum '{}::{}' は未実装です (T-2 フェーズ)", enum_name, variant)
+            )),
         }
     }
 
@@ -489,6 +544,18 @@ impl Interpreter {
     }
 
     fn eval_method_call(&mut self, object: &Expr, method: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+        // TypeName::method() のような静的メソッド呼び出しを先に処理
+        if let Expr::Ident(type_name, _) = object {
+            if is_type_name_str(type_name) && self.type_registry.structs.contains_key(type_name.as_str()) {
+                let type_name_cloned = type_name.clone();
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                // static メソッド呼び出し: self として Unit を渡す
+                return self.eval_struct_static_method(&type_name_cloned, method, arg_vals);
+            }
+        }
+
         let obj = self.eval_expr(object)?;
         let arg_vals: Vec<Value> = args.iter()
             .map(|a| self.eval_expr(a))
@@ -496,11 +563,82 @@ impl Interpreter {
 
         match obj {
             Value::List(items) => self.eval_list_method(items, method, arg_vals),
+            Value::Struct { ref type_name, .. } => {
+                let type_name_cloned = type_name.clone();
+                self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
+            }
+            Value::Closure { .. } | Value::NativeFunction(_) => {
+                self.call_value(obj, arg_vals)
+            }
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は {} に対して未実装です",
                 method, other.type_name()
             ))),
         }
+    }
+
+    /// TypeName::method() のような静的メソッド呼び出し
+    fn eval_struct_static_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // instance() は特別処理
+        if method == "instance" {
+            let is_singleton = self.type_registry.structs
+                .get(type_name)
+                .map(|info| info.derives.iter().any(|d| d == "Singleton"))
+                .unwrap_or(false);
+
+            if is_singleton {
+                if let Some(cached) = self.type_registry.singletons.get(type_name).cloned() {
+                    return Ok(cached);
+                }
+                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                    .get(type_name)
+                    .map(|i| i.fields.clone())
+                    .unwrap_or_default();
+                let mut field_map = HashMap::new();
+                for (fname, tann) in &fields {
+                    field_map.insert(fname.clone(), zero_value_for_type(tann));
+                }
+                let instance = Value::Struct {
+                    type_name: type_name.to_string(),
+                    fields: Rc::new(RefCell::new(field_map)),
+                };
+                self.type_registry.singletons.insert(type_name.to_string(), instance.clone());
+                return Ok(instance);
+            }
+        }
+
+        // default() / new() は @derive(Default) で有効化
+        if method == "default" || method == "new" {
+            let has_default = self.type_registry.structs
+                .get(type_name)
+                .map(|info| info.derives.iter().any(|d| d == "Default"))
+                .unwrap_or(false);
+
+            if has_default {
+                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                    .get(type_name)
+                    .map(|i| i.fields.clone())
+                    .unwrap_or_default();
+                let mut field_map = HashMap::new();
+                for (fname, tann) in &fields {
+                    field_map.insert(fname.clone(), zero_value_for_type(tann));
+                }
+                return Ok(Value::Struct {
+                    type_name: type_name.to_string(),
+                    fields: Rc::new(RefCell::new(field_map)),
+                });
+            }
+        }
+
+        Err(RuntimeError::Custom(format!(
+            "型 '{}' に静的メソッド '{}' は存在しません",
+            type_name, method
+        )))
     }
 
     /// リスト値に対するメソッド呼び出しをディスパッチする（Phase 3-A 全メソッド）
@@ -893,6 +1031,330 @@ impl Interpreter {
             (o, i) => Err(type_err("list[number]", &format!("{}[{}]", o.type_name(), i.type_name()))),
         }
     }
+
+    // ── T-1-D: struct サポート ─────────────────────────────────────────────
+
+    fn eval_struct_def(
+        &mut self,
+        name: String,
+        fields: Vec<(String, TypeAnn)>,
+        derives: Vec<String>,
+    ) -> Result<Value, RuntimeError> {
+        let info = StructInfo {
+            fields: fields.clone(),
+            derives: derives.clone(),
+            methods: HashMap::new(),
+        };
+        self.type_registry.structs.insert(name.clone(), info);
+
+        // @derive 自動メソッドの生成
+        for derive in &derives {
+            self.apply_derive(&name, derive, &fields)?;
+        }
+
+        Ok(Value::Unit)
+    }
+
+    fn apply_derive(
+        &mut self,
+        type_name: &str,
+        derive: &str,
+        fields: &[(String, TypeAnn)],
+    ) -> Result<(), RuntimeError> {
+        match derive {
+            "Debug" => {
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if let Some(Value::Struct { type_name: ref actual_tn, ref fields }) = args.first() {
+                        let fields = fields.borrow();
+                        let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
+                        sorted.sort_by_key(|(k, _)| k.as_str());
+                        let field_str = sorted.iter()
+                            .map(|(k, v)| format!("{}: {}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        Ok(Value::String(format!("{} {{ {} }}", actual_tn, field_str)))
+                    } else {
+                        Err("display() は struct でのみ使用可能です".to_string())
+                    }
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("display".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Clone" => {
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if let Some(v @ Value::Struct { .. }) = args.first() {
+                        Ok(v.deep_clone())
+                    } else {
+                        Err("clone() は struct でのみ使用可能です".to_string())
+                    }
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("clone".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Accessor" => {
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                for field_name in field_names {
+                    // getter
+                    let fn_clone = field_name.clone();
+                    let getter_native = NativeFn(Rc::new(move |args: Vec<Value>| {
+                        if let Some(Value::Struct { ref fields, .. }) = args.first() {
+                            fields.borrow().get(&fn_clone)
+                                .cloned()
+                                .ok_or_else(|| format!("フィールド '{}' が存在しません", fn_clone))
+                        } else {
+                            Err("getter は struct でのみ使用可能です".to_string())
+                        }
+                    }));
+                    let getter_name = format!("get_{}", field_name);
+                    if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                        info.methods.insert(getter_name, MethodImpl::Native(getter_native));
+                    }
+
+                    // setter
+                    let fn_clone2 = field_name.clone();
+                    let setter_native = NativeFn(Rc::new(move |args: Vec<Value>| {
+                        if args.len() < 2 {
+                            return Err(format!("set_{}() は2引数必要です", fn_clone2));
+                        }
+                        if let Value::Struct { ref fields, .. } = args[0] {
+                            fields.borrow_mut().insert(fn_clone2.clone(), args[1].clone());
+                            Ok(Value::Unit)
+                        } else {
+                            Err("setter は struct でのみ使用可能です".to_string())
+                        }
+                    }));
+                    let setter_name = format!("set_{}", field_name);
+                    if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                        info.methods.insert(setter_name, MethodImpl::Native(setter_native));
+                    }
+                }
+            }
+            "Singleton" => {
+                // Singleton は instance() メソッドで特別処理する
+                // ここでは "singleton" フラグとして derives に記録されているだけで十分
+            }
+            "Eq" => {
+                // Value::Struct の PartialEq は value.rs で実装済み
+                // eq() メソッドも追加
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() < 2 {
+                        return Err("eq() は2引数必要です".to_string());
+                    }
+                    Ok(Value::Bool(args[0] == args[1]))
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("eq".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Hash" => {
+                // hash() メソッドを生成: struct のハッシュ値を number として返す
+                use std::hash::{Hash, Hasher};
+                use std::collections::hash_map::DefaultHasher;
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if let Some(v @ Value::Struct { .. }) = args.first() {
+                        let mut hasher = DefaultHasher::new();
+                        v.hash(&mut hasher);
+                        Ok(Value::Int(hasher.finish() as i64))
+                    } else {
+                        Err("hash() は struct でのみ使用可能です".to_string())
+                    }
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("hash".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Ord" => {
+                // @derive(Ord) は compare_values の struct 対応で < / > 等を有効にする
+                // compare() メソッドも提供: -1 / 0 / 1 を返す
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                let native = NativeFn(Rc::new(move |args: Vec<Value>| {
+                    if args.len() < 2 {
+                        return Err("compare() は2引数必要です".to_string());
+                    }
+                    let ord = compare_struct_fields(&args[0], &args[1], &field_names)
+                        .map_err(|e| format!("{:?}", e))?;
+                    let result = match ord {
+                        std::cmp::Ordering::Less    => -1_i64,
+                        std::cmp::Ordering::Equal   =>  0_i64,
+                        std::cmp::Ordering::Greater =>  1_i64,
+                    };
+                    Ok(Value::Int(result))
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("compare".to_string(), MethodImpl::Native(native));
+                    // Ord フラグを derives に記録（compare_values で参照）
+                    if !info.derives.contains(&"Ord".to_string()) {
+                        info.derives.push("Ord".to_string());
+                    }
+                }
+            }
+            "Default" => {
+                // TypeName::default() / TypeName::new() でゼロ値インスタンスを生成
+                // derives に "Default" が記録されていれば eval_static_method で処理する
+                // ここでは derives への記録のみ（eval_static_method 側で対応）
+            }
+            _ => {} // 未知の derive は無視
+        }
+        Ok(())
+    }
+
+    fn eval_impl_block(
+        &mut self,
+        target: String,
+        methods: Vec<FnDef>,
+    ) -> Result<Value, RuntimeError> {
+        if !self.type_registry.structs.contains_key(&target) {
+            self.type_registry.structs.insert(target.clone(), StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: HashMap::new(),
+            });
+        }
+        if let Some(info) = self.type_registry.structs.get_mut(&target) {
+            for method in methods {
+                info.methods.insert(method.name.clone(), MethodImpl::Forge(method));
+            }
+        }
+        Ok(Value::Unit)
+    }
+
+    fn eval_struct_init(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+    ) -> Result<Value, RuntimeError> {
+        let mut field_map: HashMap<String, Value> = HashMap::new();
+        for (field_name, expr) in fields {
+            let val = self.eval_expr(expr)?;
+            field_map.insert(field_name.clone(), val);
+        }
+        Ok(Value::Struct {
+            type_name: name.to_string(),
+            fields: Rc::new(RefCell::new(field_map)),
+        })
+    }
+
+    fn eval_field_access(&mut self, object: &Expr, field: &str) -> Result<Value, RuntimeError> {
+        let obj = self.eval_expr(object)?;
+        match obj {
+            Value::Struct { ref fields, .. } => {
+                fields.borrow().get(field)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::Custom(
+                        format!("フィールド '{}' が存在しません", field)
+                    ))
+            }
+            _ => Err(RuntimeError::Custom(format!(
+                "フィールドアクセスは struct でのみ使用可能です (got {})", obj.type_name()
+            ))),
+        }
+    }
+
+    fn eval_field_assign(
+        &mut self,
+        object: &Expr,
+        field: &str,
+        value: &Expr,
+    ) -> Result<Value, RuntimeError> {
+        let val = self.eval_expr(value)?;
+        let obj = self.eval_expr(object)?;
+        match obj {
+            Value::Struct { ref fields, .. } => {
+                fields.borrow_mut().insert(field.to_string(), val);
+                Ok(Value::Unit)
+            }
+            _ => Err(RuntimeError::Custom(format!(
+                "フィールド代入は struct でのみ使用可能です (got {})", obj.type_name()
+            ))),
+        }
+    }
+
+    fn eval_struct_method(
+        &mut self,
+        self_val: Value,
+        type_name: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // Singleton::instance() の特別処理
+        if method == "instance" {
+            let is_singleton = self.type_registry.structs
+                .get(type_name)
+                .map(|info| info.derives.iter().any(|d| d == "Singleton"))
+                .unwrap_or(false);
+
+            if is_singleton {
+                if let Some(cached) = self.type_registry.singletons.get(type_name).cloned() {
+                    return Ok(cached);
+                }
+                // 初回: ゼロ値で struct を作る
+                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                    .get(type_name)
+                    .map(|i| i.fields.clone())
+                    .unwrap_or_default();
+                let mut field_map = HashMap::new();
+                for (fname, tann) in &fields {
+                    field_map.insert(fname.clone(), zero_value_for_type(tann));
+                }
+                let instance = Value::Struct {
+                    type_name: type_name.to_string(),
+                    fields: Rc::new(RefCell::new(field_map)),
+                };
+                self.type_registry.singletons.insert(type_name.to_string(), instance.clone());
+                return Ok(instance);
+            }
+        }
+
+        // 型レジストリからメソッドを検索
+        let method_impl = self.type_registry.structs
+            .get(type_name)
+            .and_then(|info| info.methods.get(method))
+            .cloned();
+
+        match method_impl {
+            Some(MethodImpl::Native(NativeFn(f))) => {
+                let mut all_args = vec![self_val];
+                all_args.extend(args);
+                f(all_args).map_err(RuntimeError::Custom)
+            }
+            Some(MethodImpl::Forge(fn_def)) => {
+                // self を暗黙引数として束縛してメソッドを呼び出す
+                let saved = std::mem::take(&mut self.scopes);
+                let mut initial: HashMap<String, Binding> = HashMap::new();
+
+                // グローバルスコープをベースにする
+                if let Some(global) = saved.first() {
+                    for (k, v) in global {
+                        initial.insert(k.clone(), v.clone());
+                    }
+                }
+
+                // self を束縛（has_state_self なら mutable）
+                initial.insert("self".to_string(), (self_val.clone(), fn_def.has_state_self));
+
+                // パラメータを束縛
+                for (param, arg) in fn_def.params.iter().zip(args) {
+                    initial.insert(param.name.clone(), (arg, false));
+                }
+
+                self.scopes = vec![initial];
+                let result = self.eval_expr(&fn_def.body.clone());
+                self.scopes = saved;
+
+                match result {
+                    Ok(v) => Ok(v),
+                    Err(RuntimeError::Return(v)) => Ok(v),
+                    Err(e) => Err(e),
+                }
+            }
+            None => Err(RuntimeError::Custom(format!(
+                "メソッド '{}' は struct '{}' に存在しません",
+                method, type_name
+            ))),
+        }
+    }
 }
 
 impl Default for Interpreter {
@@ -908,7 +1370,7 @@ fn mk_list(items: Vec<Value>) -> Value {
     Value::List(Rc::new(RefCell::new(items)))
 }
 
-/// 2つの Value を大小比較する（Int / Float / String のみ対応）
+/// 2つの Value を大小比較する（Int / Float / String / @derive(Ord) な Struct 対応）
 fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeError> {
     use std::cmp::Ordering::Equal;
     match (a, b) {
@@ -917,9 +1379,57 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeErr
         (Value::Int(x),    Value::Float(y))  => Ok((*x as f64).partial_cmp(y).unwrap_or(Equal)),
         (Value::Float(x),  Value::Int(y))    => Ok(x.partial_cmp(&(*y as f64)).unwrap_or(Equal)),
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
+        (Value::Struct { fields: fa, .. }, Value::Struct { fields: fb, .. }) => {
+            // フィールドをキー順でソートして辞書順比較
+            let borrow_a = fa.borrow();
+            let borrow_b = fb.borrow();
+            let mut keys_a: Vec<&String> = borrow_a.keys().collect();
+            keys_a.sort();
+            for key in keys_a {
+                let va = borrow_a.get(key).ok_or_else(|| RuntimeError::Custom(
+                    format!("フィールド '{}' が存在しません", key)
+                ))?;
+                let vb = borrow_b.get(key).ok_or_else(|| RuntimeError::Custom(
+                    format!("比較対象にフィールド '{}' がありません", key)
+                ))?;
+                let ord = compare_values(va, vb)?;
+                if ord != std::cmp::Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(std::cmp::Ordering::Equal)
+        }
         _ => Err(RuntimeError::Custom(format!(
             "比較できない型: {} と {}", a.type_name(), b.type_name()
         ))),
+    }
+}
+
+/// @derive(Ord) の compare() メソッド用: フィールド宣言順で辞書順比較
+fn compare_struct_fields(
+    a: &Value,
+    b: &Value,
+    field_order: &[String],
+) -> Result<std::cmp::Ordering, RuntimeError> {
+    match (a, b) {
+        (Value::Struct { fields: fa, .. }, Value::Struct { fields: fb, .. }) => {
+            let borrow_a = fa.borrow();
+            let borrow_b = fb.borrow();
+            for key in field_order {
+                let va = borrow_a.get(key).ok_or_else(|| RuntimeError::Custom(
+                    format!("フィールド '{}' が存在しません", key)
+                ))?;
+                let vb = borrow_b.get(key).ok_or_else(|| RuntimeError::Custom(
+                    format!("比較対象にフィールド '{}' がありません", key)
+                ))?;
+                let ord = compare_values(va, vb)?;
+                if ord != std::cmp::Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(std::cmp::Ordering::Equal)
+        }
+        _ => compare_values(a, b),
     }
 }
 
@@ -1015,10 +1525,20 @@ fn cmp_op(
     int_pred: impl Fn(i64, i64) -> bool,
     float_pred: impl Fn(f64, f64) -> bool,
 ) -> Result<Value, RuntimeError> {
-    match (l, r) {
-        (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(int_pred(a, b))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(float_pred(a, b))),
-        (l, r) => Err(type_err("number", &format!("{} vs {}", l.type_name(), r.type_name()))),
+    match (&l, &r) {
+        (Value::Int(a),    Value::Int(b))    => Ok(Value::Bool(int_pred(*a, *b))),
+        (Value::Float(a),  Value::Float(b))  => Ok(Value::Bool(float_pred(*a, *b))),
+        (Value::Struct { .. }, Value::Struct { .. }) => {
+            let ord = compare_values(&l, &r)?;
+            // int_pred を ordering に対応させる: (a, b) として -1/0/1 に変換
+            let (ai, bi): (i64, i64) = match ord {
+                std::cmp::Ordering::Less    => (-1, 0),
+                std::cmp::Ordering::Equal   => ( 0, 0),
+                std::cmp::Ordering::Greater => ( 1, 0),
+            };
+            Ok(Value::Bool(int_pred(ai, bi)))
+        }
+        _ => Err(type_err("number", &format!("{} vs {}", l.type_name(), r.type_name()))),
     }
 }
 
@@ -1054,6 +1574,23 @@ pub fn eval_source(source: &str) -> Result<Value, RuntimeError> {
     let module = parse_source(source)
         .map_err(|e| RuntimeError::Custom(e.to_string()))?;
     Interpreter::new().eval(&module)
+}
+
+/// 型名かどうかを判定（大文字から始まる識別子）
+fn is_type_name_str(name: &str) -> bool {
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+}
+
+/// TypeAnn から型のゼロ値を生成する（@derive(Singleton) の初期化用）
+fn zero_value_for_type(ann: &TypeAnn) -> Value {
+    match ann {
+        TypeAnn::Number => Value::Int(0),
+        TypeAnn::Float  => Value::Float(0.0),
+        TypeAnn::String => Value::String(String::new()),
+        TypeAnn::Bool   => Value::Bool(false),
+        TypeAnn::Option(_) => Value::Option(None),
+        _ => Value::Unit,
+    }
 }
 
 // ── テスト ────────────────────────────────────────────────────────────────
@@ -1273,5 +1810,281 @@ mod tests {
     #[test]
     fn test_native_type_of() {
         assert_eq!(run("type_of(42)"), Ok(Value::String("number".to_string())));
+    }
+
+    // ── Phase T-1 tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_struct_basic() {
+        let src = r#"
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 1, y: 2 }
+p.x
+"#;
+        assert_eq!(run(src), Ok(Value::Int(1)));
+
+        let src2 = r#"
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 3, y: 4 }
+p.y
+"#;
+        assert_eq!(run(src2), Ok(Value::Int(4)));
+    }
+
+    #[test]
+    fn test_struct_impl() {
+        let src = r#"
+struct Rectangle {
+    width: number
+    height: number
+}
+
+impl Rectangle {
+    fn area() -> number {
+        self.width * self.height
+    }
+}
+
+let r = Rectangle { width: 3, height: 4 }
+r.area()
+"#;
+        assert_eq!(run(src), Ok(Value::Int(12)));
+    }
+
+    #[test]
+    fn test_struct_self_mutation() {
+        let src = r#"
+struct Counter {
+    count: number
+}
+
+impl Counter {
+    fn increment(state self) {
+        self.count = self.count + 1
+    }
+
+    fn get_count() -> number {
+        self.count
+    }
+}
+
+let c = Counter { count: 0 }
+c.increment()
+c.get_count()
+"#;
+        assert_eq!(run(src), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn test_derive_debug() {
+        let src = r#"
+@derive(Debug)
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 1, y: 2 }
+p.display()
+"#;
+        let result = run(src).expect("eval failed");
+        match result {
+            Value::String(s) => {
+                assert!(s.contains("Point"), "should contain type name: {}", s);
+                assert!(s.contains("x: 1"), "should contain x: 1: {}", s);
+                assert!(s.contains("y: 2"), "should contain y: 2: {}", s);
+            }
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_derive_clone() {
+        let src = r#"
+@derive(Clone)
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 1, y: 2 }
+let q = p.clone()
+q.x
+"#;
+        assert_eq!(run(src), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn test_derive_eq() {
+        let src = r#"
+@derive(Eq)
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 1, y: 2 }
+let q = Point { x: 1, y: 2 }
+p == q
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+
+        let src2 = r#"
+@derive(Eq)
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 1, y: 2 }
+let q = Point { x: 3, y: 4 }
+p == q
+"#;
+        assert_eq!(run(src2), Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_derive_accessor() {
+        let src = r#"
+@derive(Accessor)
+struct User {
+    name: string
+    age: number
+}
+let u = User { name: "Alice", age: 30 }
+u.get_name()
+"#;
+        assert_eq!(run(src), Ok(Value::String("Alice".to_string())));
+
+        let src2 = r#"
+@derive(Accessor)
+struct User {
+    name: string
+    age: number
+}
+let u = User { name: "Alice", age: 30 }
+u.set_name("Bob")
+u.get_name()
+"#;
+        assert_eq!(run(src2), Ok(Value::String("Bob".to_string())));
+    }
+
+    #[test]
+    fn test_derive_singleton() {
+        let src = r#"
+@derive(Singleton)
+struct AppConfig {
+    db_url: string
+    port: number
+}
+let c1 = AppConfig::instance()
+let c2 = AppConfig::instance()
+c1.port == c2.port
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_derive_hash() {
+        // @derive(Hash) で hash() メソッドが使えること
+        // 同じフィールド値なら同じハッシュ値になること
+        let src = r#"
+@derive(Hash)
+struct Key {
+    id: number
+    label: string
+}
+let k1 = Key { id: 1, label: "hello" }
+let k2 = Key { id: 1, label: "hello" }
+k1.hash() == k2.hash()
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+
+        // フィールドが異なれば（高確率で）ハッシュ値が異なること
+        let src2 = r#"
+@derive(Hash)
+struct Key {
+    id: number
+    label: string
+}
+let k1 = Key { id: 1, label: "hello" }
+let k2 = Key { id: 2, label: "world" }
+let h1 = k1.hash()
+let h2 = k2.hash()
+h1 == h2
+"#;
+        // 異なる値は同じハッシュになる可能性が理論上はあるが実用上 false
+        assert_eq!(run(src2), Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_derive_ord() {
+        // @derive(Ord) で < / > 演算子が struct に使えること
+        let src = r#"
+@derive(Ord)
+struct Point {
+    x: number
+    y: number
+}
+let p1 = Point { x: 1, y: 2 }
+let p2 = Point { x: 3, y: 0 }
+p1 < p2
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+
+        // order_by でリストをソートできること
+        let src2 = r#"
+@derive(Ord)
+struct Point {
+    x: number
+    y: number
+}
+let points = [Point { x: 3, y: 1 }, Point { x: 1, y: 2 }, Point { x: 2, y: 0 }]
+let sorted = points.order_by(p => p.x)
+sorted.first().x
+"#;
+        assert_eq!(run(src2), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn test_derive_default() {
+        // @derive(Default) で TypeName::default() がゼロ値インスタンスを返すこと
+        let src = r#"
+@derive(Default)
+struct Config {
+    host: string
+    port: number
+    debug: bool
+}
+let c = Config::default()
+c.port
+"#;
+        assert_eq!(run(src), Ok(Value::Int(0)));
+
+        let src2 = r#"
+@derive(Default)
+struct Config {
+    host: string
+    port: number
+    debug: bool
+}
+let c = Config::default()
+c.host
+"#;
+        assert_eq!(run(src2), Ok(Value::String("".to_string())));
+
+        let src3 = r#"
+@derive(Default)
+struct Config {
+    host: string
+    port: number
+    debug: bool
+}
+let c = Config::default()
+c.debug
+"#;
+        assert_eq!(run(src3), Ok(Value::Bool(false)));
     }
 }

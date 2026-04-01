@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use forge_compiler::ast::Expr;
@@ -54,6 +55,11 @@ pub enum Value {
     },
     /// ネイティブ（Rust）関数
     NativeFunction(NativeFn),
+    /// struct インスタンス
+    Struct {
+        type_name: String,
+        fields: Rc<RefCell<HashMap<String, Value>>>,
+    },
 }
 
 impl PartialEq for Value {
@@ -68,8 +74,48 @@ impl PartialEq for Value {
             (Value::Result(Ok(a)),  Value::Result(Ok(b)))  => a == b,
             (Value::Result(Err(a)), Value::Result(Err(b))) => a == b,
             (Value::List(a), Value::List(b)) => *a.borrow() == *b.borrow(),
+            (Value::Struct { type_name: ta, fields: fa }, Value::Struct { type_name: tb, fields: fb }) => {
+                ta == tb && *fa.borrow() == *fb.borrow()
+            }
             // クロージャ・ネイティブ関数は参照等価性なし
             _ => false,
+        }
+    }
+}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // discriminant でバリアントを区別
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Int(n)    => n.hash(state),
+            Value::Float(f)  => f.to_bits().hash(state),
+            Value::String(s) => s.hash(state),
+            Value::Bool(b)   => b.hash(state),
+            Value::Unit      => {},
+            Value::Option(Some(v)) => v.hash(state),
+            Value::Option(None)    => {},
+            Value::Result(Ok(v))   => v.hash(state),
+            Value::Result(Err(e))  => e.hash(state),
+            Value::List(items) => {
+                for item in items.borrow().iter() {
+                    item.hash(state);
+                }
+            }
+            Value::Struct { type_name, fields } => {
+                type_name.hash(state);
+                // フィールドをキー順でソートしてハッシュ化（決定論的）
+                let borrow = fields.borrow();
+                let mut pairs: Vec<(&String, &Value)> = borrow.iter().collect();
+                pairs.sort_by_key(|(k, _)| k.as_str());
+                for (k, v) in pairs {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            // クロージャ・ネイティブ関数はハッシュ不可 → ポインタアドレスで代替
+            Value::Closure { .. }    => 0_u8.hash(state),
+            Value::NativeFunction(_) => 1_u8.hash(state),
         }
     }
 }
@@ -99,6 +145,19 @@ impl std::fmt::Display for Value {
             }
             Value::Closure { .. }    => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<function>"),
+            Value::Struct { type_name, fields } => {
+                write!(f, "{} {{", type_name)?;
+                let fields = fields.borrow();
+                let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
+                sorted.sort_by_key(|(k, _)| k.as_str());
+                for (i, (k, v)) in sorted.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, " {}: {}", k, v)?;
+                }
+                write!(f, " }}")
+            }
         }
     }
 }
@@ -117,6 +176,36 @@ impl Value {
             Value::List(_)           => "list",
             Value::Closure { .. }    => "closure",
             Value::NativeFunction(_) => "function",
+            Value::Struct { .. }     => "struct",
+        }
+    }
+
+    /// struct の場合、型名を動的に返す
+    pub fn dynamic_type_name(&self) -> String {
+        match self {
+            Value::Struct { type_name, .. } => type_name.clone(),
+            _ => self.type_name().to_string(),
+        }
+    }
+
+    /// struct フィールドを深くクローンする（@derive(Clone) 用）
+    pub fn deep_clone(&self) -> Value {
+        match self {
+            Value::Struct { type_name, fields } => {
+                let cloned: HashMap<String, Value> = fields.borrow()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.deep_clone()))
+                    .collect();
+                Value::Struct {
+                    type_name: type_name.clone(),
+                    fields: Rc::new(RefCell::new(cloned)),
+                }
+            }
+            Value::List(items) => {
+                let cloned: Vec<Value> = items.borrow().iter().map(|v| v.deep_clone()).collect();
+                Value::List(Rc::new(RefCell::new(cloned)))
+            }
+            other => other.clone(),
         }
     }
 }

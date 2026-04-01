@@ -90,6 +90,8 @@ impl CodeGenerator {
             Stmt::Return(Some(expr), _) => self.expr_needs_anyhow(expr),
             Stmt::Return(None, _) => false,
             Stmt::Expr(expr) => self.expr_needs_anyhow(expr),
+            // T-1/T-2: struct/impl/enum は現時点ではトランスパイル非対応
+            Stmt::StructDef { .. } | Stmt::ImplBlock { .. } | Stmt::EnumDef { .. } => false,
         }
     }
 
@@ -175,6 +177,17 @@ impl CodeGenerator {
                 let s = self.gen_expr(expr, false);
                 // ブロック式などはセミコロン不要な場合があるが、文として使う場合は付ける
                 format!("{}{};\n", self.indent_str(), s)
+            }
+            // T-1: struct/impl は現時点ではトランスパイル非対応（スタブ）
+            Stmt::StructDef { name, .. } => {
+                format!("{}// struct {} (transpile pending)\n", self.indent_str(), name)
+            }
+            Stmt::ImplBlock { target, .. } => {
+                format!("{}// impl {} (transpile pending)\n", self.indent_str(), target)
+            }
+            // T-2: enum は現時点ではトランスパイル非対応（スタブ）
+            Stmt::EnumDef { name, .. } => {
+                format!("{}// enum {} (transpile pending)\n", self.indent_str(), name)
             }
         }
     }
@@ -358,6 +371,20 @@ impl CodeGenerator {
             Expr::Question(inner, _) => {
                 let val = self.gen_expr(inner, false);
                 format!("{}?", val)
+            }
+
+            // T-1: struct 関連は現時点ではトランスパイル非対応（スタブ）
+            Expr::StructInit { name, .. } => {
+                format!("/* StructInit({}) */todo!()", name)
+            }
+            Expr::FieldAssign { object, field, value, .. } => {
+                let obj = self.gen_expr(object, false);
+                let val = self.gen_expr(value, false);
+                format!("{}.{} = {}", obj, field, val)
+            }
+            // T-2: enum インスタンス化は現時点ではトランスパイル非対応（スタブ）
+            Expr::EnumInit { enum_name, variant, .. } => {
+                format!("/* EnumInit({}::{}) */todo!()", enum_name, variant)
             }
         }
     }

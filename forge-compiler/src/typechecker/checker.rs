@@ -112,6 +112,9 @@ impl TypeChecker {
             }
 
             Stmt::Expr(expr) => { self.infer_expr(expr); }
+
+            // T-1: 型定義は型チェッカーでは現在スキップ（将来対応）
+            Stmt::StructDef { .. } | Stmt::ImplBlock { .. } | Stmt::EnumDef { .. } => {}
         }
     }
 
