@@ -733,6 +733,27 @@ fn gen_pattern(pat: &Pattern) -> String {
                 format!("{}..{}", s, e)
             }
         }
+        // T-2: enum パターン（トランスパイラでは未サポート → todo!() で後続フェーズに委ねる）
+        Pattern::EnumUnit { enum_name, variant } => {
+            match enum_name {
+                Some(en) => format!("{}::{}", en, variant),
+                None => variant.clone(),
+            }
+        }
+        Pattern::EnumTuple { enum_name, variant, bindings } => {
+            let bindings_str = bindings.join(", ");
+            match enum_name {
+                Some(en) => format!("{}::{}({})", en, variant, bindings_str),
+                None => format!("{}({})", variant, bindings_str),
+            }
+        }
+        Pattern::EnumStruct { enum_name, variant, fields } => {
+            let fields_str = fields.join(", ");
+            match enum_name {
+                Some(en) => format!("{}::{}{{ {} }}", en, variant, fields_str),
+                None => format!("{}{{ {} }}", variant, fields_str),
+            }
+        }
     }
 }
 

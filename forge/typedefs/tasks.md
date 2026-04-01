@@ -51,9 +51,9 @@
 - [x] `@derive(Debug)` → `display()` メソッド自動生成
 - [x] `@derive(Clone)` → `clone()` メソッド自動生成
 - [x] `@derive(Eq)` → `==` / `!=` 演算子の対応
-- [ ] `@derive(Hash)` → ハッシュ化対応
-- [ ] `@derive(Ord)` → 大小比較・`order_by` 対応
-- [ ] `@derive(Default)` → `Default::new()` 生成
+- [x] `@derive(Hash)` → ハッシュ化対応
+- [x] `@derive(Ord)` → 大小比較・`order_by` 対応
+- [x] `@derive(Default)` → `Default::new()` 生成
 - [x] `@derive(Accessor)` → `get_<field>()` / `set_<field>(val)` 自動生成
 - [x] `@derive(Singleton)` → 型レジストリでインスタンスキャッシュ管理
 
@@ -77,36 +77,36 @@
 
 ### T-2-A: AST 拡張
 
-- [ ] `Stmt::EnumDef { name, variants, derives }` を追加
-- [ ] `EnumVariant::Unit(name)` を追加
-- [ ] `EnumVariant::Tuple(name, Vec<TypeAnn>)` を追加
-- [ ] `EnumVariant::Struct(name, Vec<(String, TypeAnn)>)` を追加
-- [ ] `Expr::EnumInit { enum_name, variant, data }` を追加
+- [x] `Stmt::EnumDef { name, variants, derives }` を追加
+- [x] `EnumVariant::Unit(name)` を追加
+- [x] `EnumVariant::Tuple(name, Vec<TypeAnn>)` を追加
+- [x] `EnumVariant::Struct(name, Vec<(String, TypeAnn)>)` を追加
+- [x] `Expr::EnumInit { enum_name, variant, data }` を追加
 
 ### T-2-B: パーサー拡張
 
-- [ ] `enum Name { Variant, ... }` のパース
-- [ ] `Name::Variant` のパース
-- [ ] `Name::Variant(expr, ...)` のパース
-- [ ] `Name::Variant { field: expr, ... }` のパース
+- [x] `enum Name { Variant, ... }` のパース
+- [x] `Name::Variant` のパース
+- [x] `Name::Variant(expr, ...)` のパース
+- [x] `Name::Variant { field: expr, ... }` のパース
 
 ### T-2-C: インタープリタ拡張
 
-- [ ] `Value::Enum { type_name, variant, data }` を追加
-- [ ] `EnumDef` → 型レジストリへの登録
-- [ ] `EnumInit` → `Value::Enum` の生成
-- [ ] `match` パターン: Unit バリアント対応
-- [ ] `match` パターン: Tuple バリアント対応（変数束縛）
-- [ ] `match` パターン: Struct バリアント対応（フィールド束縛）
+- [x] `Value::Enum { type_name, variant, data }` を追加
+- [x] `EnumDef` → 型レジストリへの登録
+- [x] `EnumInit` → `Value::Enum` の生成
+- [x] `match` パターン: Unit バリアント対応
+- [x] `match` パターン: Tuple バリアント対応（変数束縛）
+- [x] `match` パターン: Struct バリアント対応（フィールド束縛）
 
 ### T-2-D: テスト
 
-- [ ] テスト: `test_enum_unit` — データなしバリアントの定義と match
-- [ ] テスト: `test_enum_tuple` — タプルバリアントの束縛
-- [ ] テスト: `test_enum_struct_variant` — 名前付きフィールドバリアント
-- [ ] テスト: `test_enum_derive` — `@derive(Debug, Clone, Eq)` の動作
-- [ ] E2E テスト: `enum_basic.forge`
-- [ ] E2E テスト: `enum_match.forge`
+- [x] テスト: `test_enum_unit` — データなしバリアントの定義と match
+- [x] テスト: `test_enum_tuple` — タプルバリアントの束縛
+- [x] テスト: `test_enum_struct_variant` — 名前付きフィールドバリアント
+- [x] テスト: `test_enum_derive` — `@derive(Debug, Clone, Eq)` の動作
+- [x] E2E テスト: `enum_basic.forge`
+- [x] E2E テスト: `enum_match.forge`
 
 ---
 

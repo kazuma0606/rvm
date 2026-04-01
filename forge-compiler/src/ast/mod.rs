@@ -230,6 +230,12 @@ pub enum Pattern {
     Err(Box<Pattern>),
     /// 範囲パターン: 1..=10
     Range { start: Literal, end: Literal, inclusive: bool },
+    /// enum Unit バリアント: Direction::North または単に North
+    EnumUnit { enum_name: Option<String>, variant: String },
+    /// enum Tuple バリアント: Shape::Circle(r) または Circle(r)
+    EnumTuple { enum_name: Option<String>, variant: String, bindings: Vec<String> },
+    /// enum Struct バリアント: Message::Move { x, y } または Move { x, y }
+    EnumStruct { enum_name: Option<String>, variant: String, fields: Vec<String> },
 }
 
 /// enum バリアント定義

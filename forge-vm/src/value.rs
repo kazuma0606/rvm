@@ -27,6 +27,17 @@ impl Clone for NativeFn {
     }
 }
 
+/// enum バリアントが保持するデータ
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnumData {
+    /// データなし
+    Unit,
+    /// タプル形式
+    Tuple(Vec<Value>),
+    /// 名前付きフィールド
+    Struct(HashMap<String, Value>),
+}
+
 /// ランタイム値
 /// Nil は廃止 — Option は Value::Option(None/Some) で表現する
 #[derive(Debug, Clone)]
@@ -60,6 +71,12 @@ pub enum Value {
         type_name: String,
         fields: Rc<RefCell<HashMap<String, Value>>>,
     },
+    /// enum バリアントインスタンス
+    Enum {
+        type_name: String,
+        variant: String,
+        data: EnumData,
+    },
 }
 
 impl PartialEq for Value {
@@ -76,6 +93,10 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => *a.borrow() == *b.borrow(),
             (Value::Struct { type_name: ta, fields: fa }, Value::Struct { type_name: tb, fields: fb }) => {
                 ta == tb && *fa.borrow() == *fb.borrow()
+            }
+            (Value::Enum { type_name: ta, variant: va, data: da },
+             Value::Enum { type_name: tb, variant: vb, data: db }) => {
+                ta == tb && va == vb && da == db
             }
             // クロージャ・ネイティブ関数は参照等価性なし
             _ => false,
@@ -113,6 +134,28 @@ impl Hash for Value {
                     v.hash(state);
                 }
             }
+            Value::Enum { type_name, variant, data } => {
+                type_name.hash(state);
+                variant.hash(state);
+                match data {
+                    EnumData::Unit => 0_u8.hash(state),
+                    EnumData::Tuple(items) => {
+                        1_u8.hash(state);
+                        for item in items {
+                            item.hash(state);
+                        }
+                    }
+                    EnumData::Struct(fields) => {
+                        2_u8.hash(state);
+                        let mut pairs: Vec<(&String, &Value)> = fields.iter().collect();
+                        pairs.sort_by_key(|(k, _)| k.as_str());
+                        for (k, v) in pairs {
+                            k.hash(state);
+                            v.hash(state);
+                        }
+                    }
+                }
+            }
             // クロージャ・ネイティブ関数はハッシュ不可 → ポインタアドレスで代替
             Value::Closure { .. }    => 0_u8.hash(state),
             Value::NativeFunction(_) => 1_u8.hash(state),
@@ -145,6 +188,29 @@ impl std::fmt::Display for Value {
             }
             Value::Closure { .. }    => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<function>"),
+            Value::Enum { type_name, variant, data } => {
+                match data {
+                    EnumData::Unit => write!(f, "{}::{}", type_name, variant),
+                    EnumData::Tuple(items) => {
+                        write!(f, "{}::{}(", type_name, variant)?;
+                        for (i, item) in items.iter().enumerate() {
+                            if i > 0 { write!(f, ", ")?; }
+                            write!(f, "{}", item)?;
+                        }
+                        write!(f, ")")
+                    }
+                    EnumData::Struct(fields) => {
+                        write!(f, "{}::{}{{", type_name, variant)?;
+                        let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
+                        sorted.sort_by_key(|(k, _)| k.as_str());
+                        for (i, (k, v)) in sorted.iter().enumerate() {
+                            if i > 0 { write!(f, ", ")?; }
+                            write!(f, " {}: {}", k, v)?;
+                        }
+                        write!(f, " }}")
+                    }
+                }
+            }
             Value::Struct { type_name, fields } => {
                 write!(f, "{} {{", type_name)?;
                 let fields = fields.borrow();
@@ -177,13 +243,15 @@ impl Value {
             Value::Closure { .. }    => "closure",
             Value::NativeFunction(_) => "function",
             Value::Struct { .. }     => "struct",
+            Value::Enum { .. }       => "enum",
         }
     }
 
-    /// struct の場合、型名を動的に返す
+    /// struct / enum の場合、型名を動的に返す
     pub fn dynamic_type_name(&self) -> String {
         match self {
             Value::Struct { type_name, .. } => type_name.clone(),
+            Value::Enum { type_name, .. }   => type_name.clone(),
             _ => self.type_name().to_string(),
         }
     }
@@ -204,6 +272,22 @@ impl Value {
             Value::List(items) => {
                 let cloned: Vec<Value> = items.borrow().iter().map(|v| v.deep_clone()).collect();
                 Value::List(Rc::new(RefCell::new(cloned)))
+            }
+            Value::Enum { type_name, variant, data } => {
+                let cloned_data = match data {
+                    EnumData::Unit => EnumData::Unit,
+                    EnumData::Tuple(items) => {
+                        EnumData::Tuple(items.iter().map(|v| v.deep_clone()).collect())
+                    }
+                    EnumData::Struct(fields) => {
+                        EnumData::Struct(fields.iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect())
+                    }
+                };
+                Value::Enum {
+                    type_name: type_name.clone(),
+                    variant: variant.clone(),
+                    data: cloned_data,
+                }
             }
             other => other.clone(),
         }

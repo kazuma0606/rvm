@@ -619,3 +619,23 @@ println(u.get_name())
     let out = run_forge(src).unwrap();
     assert_eq!(out, "Alice\n30\nBob\n");
 }
+
+// ── Phase T-2: enum E2E テスト ──────────────────────────────────────────
+
+#[test]
+fn e2e_enum_basic() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/enum_basic.forge")
+    ).expect("enum_basic.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "up\nother\n");
+}
+
+#[test]
+fn e2e_enum_match() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/enum_match.forge")
+    ).expect("enum_match.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "radius=5\n3x4\nmove 10,20\nhello\n");
+}

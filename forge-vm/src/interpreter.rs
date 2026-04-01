@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use forge_compiler::ast::*;
-use crate::value::{CapturedEnv, NativeFn, Value};
+use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
 #[derive(Clone)]
@@ -34,10 +34,18 @@ struct StructInfo {
     methods: HashMap<String, MethodImpl>,
 }
 
-/// 型レジストリ（struct 定義とメソッドを格納）
+/// enum 型の定義情報（型レジストリに格納）
+#[derive(Debug, Clone)]
+struct EnumInfo {
+    variants: Vec<EnumVariant>,
+    derives: Vec<String>,
+}
+
+/// 型レジストリ（struct / enum 定義とメソッドを格納）
 #[derive(Default)]
 struct TypeRegistry {
     structs: HashMap<String, StructInfo>,
+    enums: HashMap<String, EnumInfo>,
     /// Singleton インスタンスキャッシュ
     singletons: HashMap<String, Value>,
 }
@@ -293,8 +301,9 @@ impl Interpreter {
             Stmt::ImplBlock { target, trait_name: _, methods, .. } => {
                 self.eval_impl_block(target.clone(), methods.clone())
             }
-            // T-2 (enum) は未実装 → Unit を返す
-            Stmt::EnumDef { .. } => Ok(Value::Unit),
+            Stmt::EnumDef { name, variants, derives, .. } => {
+                self.eval_enum_def(name.clone(), variants.clone(), derives.clone())
+            }
         }
     }
 
@@ -331,10 +340,9 @@ impl Interpreter {
             Expr::FieldAssign { object, field, value, .. } => {
                 self.eval_field_assign(object, field, value)
             }
-            // T-2 (enum) は未実装 → エラー
-            Expr::EnumInit { enum_name, variant, .. } => Err(RuntimeError::Custom(
-                format!("enum '{}::{}' は未実装です (T-2 フェーズ)", enum_name, variant)
-            )),
+            Expr::EnumInit { enum_name, variant, data, .. } => {
+                self.eval_enum_init(enum_name, variant, data)
+            }
         }
     }
 
@@ -554,6 +562,14 @@ impl Interpreter {
                 // static メソッド呼び出し: self として Unit を渡す
                 return self.eval_struct_static_method(&type_name_cloned, method, arg_vals);
             }
+            // enum の静的メソッド呼び出し（Unit バリアントアクセス等）
+            if is_type_name_str(type_name) && self.type_registry.enums.contains_key(type_name.as_str()) {
+                let type_name_cloned = type_name.clone();
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return self.eval_enum_static_method(&type_name_cloned, method, arg_vals);
+            }
         }
 
         let obj = self.eval_expr(object)?;
@@ -566,6 +582,10 @@ impl Interpreter {
             Value::Struct { ref type_name, .. } => {
                 let type_name_cloned = type_name.clone();
                 self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
+            }
+            Value::Enum { ref type_name, .. } => {
+                let type_name_cloned = type_name.clone();
+                self.eval_enum_method(obj.clone(), &type_name_cloned, method, arg_vals)
             }
             Value::Closure { .. } | Value::NativeFunction(_) => {
                 self.call_value(obj, arg_vals)
@@ -1200,6 +1220,201 @@ impl Interpreter {
         Ok(())
     }
 
+    // ── T-2-C: enum サポート ──────────────────────────────────────────────
+
+    fn eval_enum_def(
+        &mut self,
+        name: String,
+        variants: Vec<EnumVariant>,
+        derives: Vec<String>,
+    ) -> Result<Value, RuntimeError> {
+        let info = EnumInfo {
+            variants,
+            derives: derives.clone(),
+        };
+        self.type_registry.enums.insert(name.clone(), info);
+
+        // @derive 自動処理
+        for derive in &derives {
+            self.apply_enum_derive(&name, derive)?;
+        }
+
+        Ok(Value::Unit)
+    }
+
+    fn apply_enum_derive(&mut self, type_name: &str, derive: &str) -> Result<(), RuntimeError> {
+        match derive {
+            "Debug" => {
+                // enum のデフォルト Display が既に to_string() を提供しているので
+                // display() メソッドも同様に実装
+                if !self.type_registry.structs.contains_key(type_name) {
+                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
+                        fields: vec![],
+                        derives: vec![],
+                        methods: HashMap::new(),
+                    });
+                }
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if let Some(v @ Value::Enum { .. }) = args.first() {
+                        Ok(Value::String(v.to_string()))
+                    } else {
+                        Err("display() は enum でのみ使用可能です".to_string())
+                    }
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("display".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Clone" => {
+                if !self.type_registry.structs.contains_key(type_name) {
+                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
+                        fields: vec![],
+                        derives: vec![],
+                        methods: HashMap::new(),
+                    });
+                }
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if let Some(v @ Value::Enum { .. }) = args.first() {
+                        Ok(v.deep_clone())
+                    } else {
+                        Err("clone() は enum でのみ使用可能です".to_string())
+                    }
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("clone".to_string(), MethodImpl::Native(native));
+                }
+            }
+            "Eq" => {
+                if !self.type_registry.structs.contains_key(type_name) {
+                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
+                        fields: vec![],
+                        derives: vec![],
+                        methods: HashMap::new(),
+                    });
+                }
+                let native = NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() < 2 {
+                        return Err("eq() は2引数必要です".to_string());
+                    }
+                    Ok(Value::Bool(args[0] == args[1]))
+                }));
+                if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+                    info.methods.insert("eq".to_string(), MethodImpl::Native(native));
+                }
+            }
+            _ => {} // 未知の derive は無視
+        }
+        Ok(())
+    }
+
+    fn eval_enum_init(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        data: &EnumInitData,
+    ) -> Result<Value, RuntimeError> {
+        let enum_data = match data {
+            EnumInitData::None => EnumData::Unit,
+            EnumInitData::Tuple(exprs) => {
+                let vals: Vec<Value> = exprs.iter()
+                    .map(|e| self.eval_expr(e))
+                    .collect::<Result<_, _>>()?;
+                EnumData::Tuple(vals)
+            }
+            EnumInitData::Struct(field_exprs) => {
+                let mut fields = HashMap::new();
+                for (field_name, expr) in field_exprs {
+                    let val = self.eval_expr(expr)?;
+                    fields.insert(field_name.clone(), val);
+                }
+                EnumData::Struct(fields)
+            }
+        };
+
+        Ok(Value::Enum {
+            type_name: enum_name.to_string(),
+            variant: variant.to_string(),
+            data: enum_data,
+        })
+    }
+
+    fn eval_enum_method(
+        &mut self,
+        self_val: Value,
+        type_name: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // struct レジストリ経由でメソッドを探す（derive で登録）
+        let method_impl = self.type_registry.structs
+            .get(type_name)
+            .and_then(|info| info.methods.get(method))
+            .cloned();
+
+        match method_impl {
+            Some(MethodImpl::Native(NativeFn(f))) => {
+                let mut all_args = vec![self_val];
+                all_args.extend(args);
+                f(all_args).map_err(RuntimeError::Custom)
+            }
+            Some(MethodImpl::Forge(fn_def)) => {
+                let saved = std::mem::take(&mut self.scopes);
+                let mut initial: HashMap<String, Binding> = HashMap::new();
+                if let Some(global) = saved.first() {
+                    for (k, v) in global {
+                        initial.insert(k.clone(), v.clone());
+                    }
+                }
+                initial.insert("self".to_string(), (self_val, fn_def.has_state_self));
+                for (param, arg) in fn_def.params.iter().zip(args) {
+                    initial.insert(param.name.clone(), (arg, false));
+                }
+                self.scopes = vec![initial];
+                let result = self.eval_expr(&fn_def.body.clone());
+                self.scopes = saved;
+                match result {
+                    Ok(v) => Ok(v),
+                    Err(RuntimeError::Return(v)) => Ok(v),
+                    Err(e) => Err(e),
+                }
+            }
+            None => Err(RuntimeError::Custom(format!(
+                "メソッド '{}' は enum '{}' に存在しません",
+                method, type_name
+            ))),
+        }
+    }
+
+    fn eval_enum_static_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        _args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // enum のバリアントを Unit として返す（TypeName::VariantName() の形式）
+        let variant_exists = self.type_registry.enums
+            .get(type_name)
+            .map(|info| info.variants.iter().any(|v| match v {
+                EnumVariant::Unit(n) => n == method,
+                EnumVariant::Tuple(n, _) => n == method,
+                EnumVariant::Struct(n, _) => n == method,
+            }))
+            .unwrap_or(false);
+
+        if variant_exists {
+            return Ok(Value::Enum {
+                type_name: type_name.to_string(),
+                variant: method.to_string(),
+                data: EnumData::Unit,
+            });
+        }
+
+        Err(RuntimeError::Custom(format!(
+            "enum '{}' にバリアントまたは静的メソッド '{}' は存在しません",
+            type_name, method
+        )))
+    }
+
     fn eval_impl_block(
         &mut self,
         target: String,
@@ -1246,6 +1461,24 @@ impl Interpreter {
                         format!("フィールド '{}' が存在しません", field)
                     ))
             }
+            // Option(Some(struct)) → 中身の struct に対してフィールドアクセスを透過させる
+            Value::Option(Some(ref inner)) => {
+                match inner.as_ref() {
+                    Value::Struct { ref fields, .. } => {
+                        fields.borrow().get(field)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::Custom(
+                                format!("フィールド '{}' が存在しません", field)
+                            ))
+                    }
+                    _ => Err(RuntimeError::Custom(format!(
+                        "フィールドアクセスは struct でのみ使用可能です (got option<{}>)", inner.type_name()
+                    ))),
+                }
+            }
+            Value::Option(None) => Err(RuntimeError::Custom(
+                format!("none に対してフィールド '{}' にアクセスできません", field)
+            )),
             _ => Err(RuntimeError::Custom(format!(
                 "フィールドアクセスは struct でのみ使用可能です (got {})", obj.type_name()
             ))),
@@ -1562,6 +1795,47 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             let e = match end   { Literal::Int(i) => *i, _ => return None };
             let hit = if *inclusive { s <= *n && *n <= e } else { s <= *n && *n < e };
             if hit { Some(vec![]) } else { None }
+        }
+        // ── enum パターン ─────────────────────────────────────────────────
+        (Pattern::EnumUnit { enum_name, variant }, Value::Enum { type_name, variant: val_variant, data: EnumData::Unit }) => {
+            // enum_name が Some の場合は型名も確認する
+            if let Some(en) = enum_name {
+                if en != type_name { return None; }
+            }
+            if variant == val_variant { Some(vec![]) } else { None }
+        }
+        (Pattern::EnumTuple { enum_name, variant, bindings }, Value::Enum { type_name, variant: val_variant, data: EnumData::Tuple(items) }) => {
+            if let Some(en) = enum_name {
+                if en != type_name { return None; }
+            }
+            if variant != val_variant { return None; }
+            if bindings.len() != items.len() { return None; }
+            let mut result = Vec::new();
+            for (name, val) in bindings.iter().zip(items.iter()) {
+                if name == "_" {
+                    // ワイルドカードはスキップ
+                } else {
+                    result.push((name.clone(), val.clone()));
+                }
+            }
+            Some(result)
+        }
+        (Pattern::EnumStruct { enum_name, variant, fields }, Value::Enum { type_name, variant: val_variant, data: EnumData::Struct(field_map) }) => {
+            if let Some(en) = enum_name {
+                if en != type_name { return None; }
+            }
+            if variant != val_variant { return None; }
+            let mut result = Vec::new();
+            for field_name in fields {
+                if field_name == "_" {
+                    continue;
+                }
+                match field_map.get(field_name) {
+                    Some(val) => result.push((field_name.clone(), val.clone())),
+                    None => return None,
+                }
+            }
+            Some(result)
         }
         _ => None,
     }
@@ -2086,5 +2360,161 @@ let c = Config::default()
 c.debug
 "#;
         assert_eq!(run(src3), Ok(Value::Bool(false)));
+    }
+
+    // ── Phase T-2 tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_enum_unit() {
+        let src = r#"
+enum Direction {
+    North
+    South
+    East
+    West
+}
+let d = Direction::North
+match d {
+    Direction::North => "up"
+    Direction::South => "down"
+    _ => "other"
+}
+"#;
+        assert_eq!(run(src), Ok(Value::String("up".to_string())));
+
+        let src2 = r#"
+enum Direction {
+    North
+    South
+    East
+    West
+}
+let d = Direction::West
+match d {
+    Direction::North => "up"
+    Direction::South => "down"
+    _ => "other"
+}
+"#;
+        assert_eq!(run(src2), Ok(Value::String("other".to_string())));
+    }
+
+    #[test]
+    fn test_enum_tuple() {
+        let src = r#"
+enum Shape {
+    Circle(number)
+    Rectangle(number, number)
+}
+let s = Shape::Circle(5)
+match s {
+    Shape::Circle(r) => r
+    Shape::Rectangle(w, h) => w + h
+}
+"#;
+        assert_eq!(run(src), Ok(Value::Int(5)));
+
+        let src2 = r#"
+enum Shape {
+    Circle(number)
+    Rectangle(number, number)
+}
+let s = Shape::Rectangle(3, 4)
+match s {
+    Shape::Circle(r) => r
+    Shape::Rectangle(w, h) => w + h
+}
+"#;
+        assert_eq!(run(src2), Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn test_enum_struct_variant() {
+        let src = r#"
+enum Message {
+    Quit
+    Move { x: number, y: number }
+    Write(string)
+}
+let m = Message::Move { x: 10, y: 20 }
+match m {
+    Message::Quit => "quit"
+    Message::Move { x, y } => "moved"
+    Message::Write(text) => text
+}
+"#;
+        assert_eq!(run(src), Ok(Value::String("moved".to_string())));
+
+        let src2 = r#"
+enum Message {
+    Quit
+    Move { x: number, y: number }
+    Write(string)
+}
+let m = Message::Move { x: 10, y: 20 }
+match m {
+    Message::Move { x, y } => x + y
+    _ => 0
+}
+"#;
+        assert_eq!(run(src2), Ok(Value::Int(30)));
+    }
+
+    #[test]
+    fn test_enum_derive() {
+        // @derive(Debug) - display() メソッド
+        let src = r#"
+@derive(Debug, Clone, Eq)
+enum Status {
+    Active
+    Inactive
+    Pending(string)
+}
+let s = Status::Active
+s.display()
+"#;
+        assert_eq!(run(src), Ok(Value::String("Status::Active".to_string())));
+
+        // @derive(Clone)
+        let src2 = r#"
+@derive(Debug, Clone, Eq)
+enum Status {
+    Active
+    Inactive
+    Pending(string)
+}
+let s = Status::Pending("review")
+let c = s.clone()
+c.display()
+"#;
+        assert_eq!(run(src2), Ok(Value::String("Status::Pending(review)".to_string())));
+
+        // @derive(Eq) - == 比較
+        let src3 = r#"
+@derive(Debug, Clone, Eq)
+enum Status {
+    Active
+    Inactive
+    Pending(string)
+}
+let a = Status::Active
+let b = Status::Active
+let c = Status::Inactive
+a == b
+"#;
+        assert_eq!(run(src3), Ok(Value::Bool(true)));
+
+        let src4 = r#"
+@derive(Debug, Clone, Eq)
+enum Status {
+    Active
+    Inactive
+    Pending(string)
+}
+let a = Status::Active
+let c = Status::Inactive
+a == c
+"#;
+        assert_eq!(run(src4), Ok(Value::Bool(false)));
     }
 }

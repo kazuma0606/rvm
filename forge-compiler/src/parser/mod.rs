@@ -171,6 +171,13 @@ impl Parser {
     // ── パース: 文 ────────────────────────────────────────────────────────
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        // `enum` は Ident("enum") として届く
+        if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+            if name == "enum" {
+                self.advance(); // consume 'enum'
+                return self.parse_enum_def_body(vec![]);
+            }
+        }
         match self.peek_kind().clone() {
             TokenKind::Let    => self.parse_let(),
             TokenKind::State  => self.parse_state(),
@@ -444,18 +451,87 @@ impl Parser {
                     expr = Expr::Question(Box::new(expr), span);
                 }
                 TokenKind::ColonColon => {
-                    // TypeName::method() または TypeName::instance() など
+                    // TypeName::method() / TypeName::Variant / TypeName::Variant(expr) / TypeName::Variant { field: expr }
                     let span = self.current_span();
                     self.advance(); // consume '::'
-                    let (method, _) = self.expect_name()?;
+                    let (name, _) = self.expect_name()?;
                     if matches!(self.peek_kind(), TokenKind::LParen) {
-                        self.advance();
-                        let args = self.parse_call_args()?;
-                        self.expect_token(&TokenKind::RParen)?;
-                        expr = Expr::MethodCall { object: Box::new(expr), method, args, span };
+                        // TypeName::Variant(expr, ...) または TypeName::method(args)
+                        // enum_name が大文字かどうか、Variant が大文字かどうかで判定
+                        let is_enum_variant = if let Expr::Ident(ref type_name, _) = expr {
+                            is_type_name(type_name) && is_type_name(&name)
+                        } else {
+                            false
+                        };
+                        self.advance(); // consume '('
+                        if is_enum_variant {
+                            let args = self.parse_call_args()?;
+                            self.expect_token(&TokenKind::RParen)?;
+                            let enum_name = if let Expr::Ident(ref n, _) = expr { n.clone() } else { unreachable!() };
+                            expr = Expr::EnumInit {
+                                enum_name,
+                                variant: name,
+                                data: EnumInitData::Tuple(args),
+                                span,
+                            };
+                        } else {
+                            let args = self.parse_call_args()?;
+                            self.expect_token(&TokenKind::RParen)?;
+                            expr = Expr::MethodCall { object: Box::new(expr), method: name, args, span };
+                        }
+                    } else if matches!(self.peek_kind(), TokenKind::LBrace) {
+                        // TypeName::Variant { field: expr, ... } — enum struct variant init
+                        let is_enum_variant = if let Expr::Ident(ref type_name, _) = expr {
+                            is_type_name(type_name) && is_type_name(&name)
+                        } else {
+                            false
+                        };
+                        if is_enum_variant {
+                            self.advance(); // consume '{'
+                            let mut fields: Vec<(String, Expr)> = Vec::new();
+                            loop {
+                                self.skip_sep();
+                                if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                                    break;
+                                }
+                                let (field_name, _) = self.expect_ident()?;
+                                self.expect_token(&TokenKind::Colon)?;
+                                let value = self.parse_expr()?;
+                                fields.push((field_name, value));
+                                if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                                    self.advance();
+                                }
+                            }
+                            self.expect_token(&TokenKind::RBrace)?;
+                            let enum_name = if let Expr::Ident(ref n, _) = expr { n.clone() } else { unreachable!() };
+                            expr = Expr::EnumInit {
+                                enum_name,
+                                variant: name,
+                                data: EnumInitData::Struct(fields),
+                                span,
+                            };
+                        } else {
+                            // 通常のフィールドアクセスとして処理
+                            expr = Expr::Field { object: Box::new(expr), field: name, span };
+                        }
                     } else {
-                        // TypeName::VARIANT など（将来の enum 用）
-                        expr = Expr::Field { object: Box::new(expr), field: method, span };
+                        // TypeName::Variant（Unit）または TypeName::method
+                        let is_enum_variant = if let Expr::Ident(ref type_name, _) = expr {
+                            is_type_name(type_name) && is_type_name(&name)
+                        } else {
+                            false
+                        };
+                        if is_enum_variant {
+                            let enum_name = if let Expr::Ident(ref n, _) = expr { n.clone() } else { unreachable!() };
+                            expr = Expr::EnumInit {
+                                enum_name,
+                                variant: name,
+                                data: EnumInitData::None,
+                                span,
+                            };
+                        } else {
+                            expr = Expr::Field { object: Box::new(expr), field: name, span };
+                        }
                     }
                 }
                 TokenKind::Dot => {
@@ -610,6 +686,14 @@ impl Parser {
                 break;
             }
 
+            // `enum` は Ident("enum") として届く（ブロック内でも対応）
+            if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+                if name == "enum" {
+                    self.advance(); // consume 'enum'
+                    stmts.push(self.parse_enum_def_body(vec![])?);
+                    continue;
+                }
+            }
             match self.peek_kind().clone() {
                 TokenKind::Let    => stmts.push(self.parse_let()?),
                 TokenKind::State  => stmts.push(self.parse_state()?),
@@ -761,13 +845,17 @@ impl Parser {
             }
             self.skip_sep();
         }
-        // アノテーションの直後に struct が来ることを期待
+        // アノテーションの直後に struct または enum が来ることを期待
         match self.peek_kind().clone() {
             TokenKind::Struct => self.parse_struct_def(derives),
+            TokenKind::Ident(ref name) if name == "enum" => {
+                self.advance(); // consume 'enum'
+                self.parse_enum_def_body(derives)
+            }
             _ => {
                 let tok = self.peek().clone();
                 Err(ParseError::UnexpectedToken {
-                    expected: "struct after annotation".to_string(),
+                    expected: "struct or enum after annotation".to_string(),
                     found: tok.kind,
                     span: tok.span,
                 })
@@ -914,6 +1002,67 @@ impl Parser {
         Ok(Expr::StructInit { name, fields, span })
     }
 
+    /// `enum` キーワードを消費した後の本体をパース
+    fn parse_enum_def_body(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut variants: Vec<EnumVariant> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            // バリアント名（大文字から始まる識別子を期待）
+            let (variant_name, _) = self.expect_ident()?;
+
+            if matches!(self.peek_kind(), TokenKind::LParen) {
+                // Tuple バリアント: Variant(Type, Type, ...)
+                self.advance(); // consume '('
+                let mut types: Vec<TypeAnn> = Vec::new();
+                while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                    types.push(self.parse_type_ann()?);
+                    if matches!(self.peek_kind(), TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RParen)?;
+                variants.push(EnumVariant::Tuple(variant_name, types));
+            } else if matches!(self.peek_kind(), TokenKind::LBrace) {
+                // Struct バリアント: Variant { field: Type, ... }
+                self.advance(); // consume '{'
+                let mut fields: Vec<(String, TypeAnn)> = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    let (field_name, _) = self.expect_ident()?;
+                    self.expect_token(&TokenKind::Colon)?;
+                    let type_ann = self.parse_type_ann()?;
+                    fields.push((field_name, type_ann));
+                    if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                variants.push(EnumVariant::Struct(variant_name, fields));
+            } else {
+                // Unit バリアント
+                variants.push(EnumVariant::Unit(variant_name));
+            }
+
+            // バリアント間のカンマ・セミコロンは省略可能
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::EnumDef { name, variants, derives, span })
+    }
+
     fn parse_bracket_expr(&mut self) -> Result<Expr, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::LBracket)?;
@@ -1014,10 +1163,26 @@ impl Parser {
             TokenKind::Ident(name) => {
                 self.advance();
                 if name == "_" {
-                    Ok(Pattern::Wildcard)
-                } else {
-                    Ok(Pattern::Ident(name))
+                    return Ok(Pattern::Wildcard);
                 }
+                // TypeName::Variant のパターン（大文字で始まる識別子 + ::）
+                if is_type_name(&name) && matches!(self.peek_kind(), TokenKind::ColonColon) {
+                    self.advance(); // consume '::'
+                    let (variant, _) = self.expect_ident()?;
+                    return self.parse_enum_pattern_tail(Some(name), variant);
+                }
+                // 大文字で始まる識別子 + ( または { はバリアントパターンの可能性
+                if is_type_name(&name) {
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        return self.parse_enum_pattern_tail(None, name);
+                    }
+                    if matches!(self.peek_kind(), TokenKind::LBrace) {
+                        return self.parse_enum_pattern_tail(None, name);
+                    }
+                    // Unit バリアントとして扱う
+                    return Ok(Pattern::EnumUnit { enum_name: None, variant: name });
+                }
+                Ok(Pattern::Ident(name))
             }
             TokenKind::Some => {
                 self.advance();
@@ -1049,6 +1214,44 @@ impl Parser {
                 found: tok.kind,
                 span: tok.span,
             }),
+        }
+    }
+
+    /// バリアント名の後のパターン本体をパース
+    fn parse_enum_pattern_tail(&mut self, enum_name: Option<String>, variant: String) -> Result<Pattern, ParseError> {
+        if matches!(self.peek_kind(), TokenKind::LParen) {
+            // Tuple パターン: Variant(x, y, ...)
+            self.advance(); // consume '('
+            let mut bindings: Vec<String> = Vec::new();
+            while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                let (binding, _) = self.expect_ident()?;
+                bindings.push(binding);
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect_token(&TokenKind::RParen)?;
+            Ok(Pattern::EnumTuple { enum_name, variant, bindings })
+        } else if matches!(self.peek_kind(), TokenKind::LBrace) {
+            // Struct パターン: Variant { x, y }
+            self.advance(); // consume '{'
+            let mut fields: Vec<String> = Vec::new();
+            loop {
+                self.skip_sep();
+                if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                let (field, _) = self.expect_ident()?;
+                fields.push(field);
+                if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                    self.advance();
+                }
+            }
+            self.expect_token(&TokenKind::RBrace)?;
+            Ok(Pattern::EnumStruct { enum_name, variant, fields })
+        } else {
+            // Unit パターン
+            Ok(Pattern::EnumUnit { enum_name, variant })
         }
     }
 }
