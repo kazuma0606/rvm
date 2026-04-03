@@ -1,0 +1,15 @@
+// T-4 E2E: data キーワードの基本動作
+// data は Debug, Clone, Eq, Hash, Accessor を自動 derive する
+
+data UserProfile {
+    id:   number
+    name: string
+}
+
+let u = UserProfile { id: 1, name: "Alice" }
+println(u.get_name())
+println(u.get_id())
+
+// Accessor の setter も確認
+u.set_name("Bob")
+println(u.get_name())

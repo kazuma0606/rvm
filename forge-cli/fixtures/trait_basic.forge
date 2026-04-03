@@ -1,0 +1,35 @@
+// trait_basic.forge: trait の基本動作 E2E テスト
+
+trait Printable {
+    fn display() -> string
+}
+
+trait Loggable {
+    fn label() -> string
+
+    fn log() {
+        self.label()
+    }
+}
+
+struct Post {
+    title: string
+    created_at: string
+}
+
+impl Printable for Post {
+    fn display() -> string {
+        self.title
+    }
+}
+
+impl Loggable for Post {
+    fn label() -> string {
+        self.title
+    }
+}
+
+let p = Post { title: "Hello", created_at: "2026-01-01" }
+println(p.display())
+println(p.log())
+println(p.label())

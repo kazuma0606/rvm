@@ -185,8 +185,11 @@ impl Parser {
             TokenKind::Fn     => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Struct => self.parse_struct_def(vec![]),
-            TokenKind::Impl   => self.parse_impl_block(),
+            TokenKind::Impl   => self.parse_impl_or_impl_trait(),
+            TokenKind::Trait  => self.parse_trait_def(),
+            TokenKind::Mixin  => self.parse_mixin_def(),
             TokenKind::At     => self.parse_annotated_stmt(),
+            TokenKind::Data   => self.parse_data_def(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
@@ -701,8 +704,11 @@ impl Parser {
                 TokenKind::Fn     => stmts.push(self.parse_fn()?),
                 TokenKind::Return => stmts.push(self.parse_return()?),
                 TokenKind::Struct => stmts.push(self.parse_struct_def(vec![])?),
-                TokenKind::Impl   => stmts.push(self.parse_impl_block()?),
+                TokenKind::Impl   => stmts.push(self.parse_impl_or_impl_trait()?),
+                TokenKind::Trait  => stmts.push(self.parse_trait_def()?),
+                TokenKind::Mixin  => stmts.push(self.parse_mixin_def()?),
                 TokenKind::At     => stmts.push(self.parse_annotated_stmt()?),
+                TokenKind::Data   => stmts.push(self.parse_data_def()?),
                 _ => {
                     let expr = self.parse_expr()?;
                     if matches!(self.peek_kind(), TokenKind::Semicolon) {
@@ -822,6 +828,164 @@ impl Parser {
         };
 
         Ok(Expr::Closure { params, body: Box::new(body), span })
+    }
+
+    // ── T-3-B: trait / mixin / impl for パース ────────────────────────────
+
+    fn parse_trait_def(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Trait)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut methods: Vec<TraitMethod> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            methods.push(self.parse_trait_method()?);
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::TraitDef { name, methods, span })
+    }
+
+    /// trait 内のメソッドをパース（抽象 or デフォルト実装）
+    fn parse_trait_method(&mut self) -> Result<TraitMethod, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+        let mut has_state_self = false;
+
+        // 最初のパラメータが `state self` または `self` の場合を処理
+        if matches!(self.peek_kind(), TokenKind::State) {
+            self.advance(); // consume 'state'
+            if matches!(self.peek_kind(), TokenKind::SelfVal) {
+                self.advance(); // consume 'self'
+                has_state_self = true;
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                }
+            }
+        } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
+            self.advance(); // consume 'self'
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let (param_name, param_span) = self.expect_ident()?;
+            let type_ann = if matches!(self.peek_kind(), TokenKind::Colon) {
+                self.advance();
+                Some(self.parse_type_ann()?)
+            } else {
+                None
+            };
+            params.push(Param { name: param_name, type_ann, span: param_span });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RParen)?;
+
+        let return_type = if matches!(self.peek_kind(), TokenKind::ThinArrow) {
+            self.advance();
+            Some(self.parse_type_ann()?)
+        } else {
+            None
+        };
+
+        // body が `{` で始まるならデフォルト実装、そうでなければ抽象
+        if matches!(self.peek_kind(), TokenKind::LBrace) {
+            let body = self.parse_block()?;
+            Ok(TraitMethod::Default {
+                name,
+                params,
+                return_type,
+                body: Box::new(body),
+                has_state_self,
+                span,
+            })
+        } else {
+            // 抽象メソッド: セミコロンがあれば消費する
+            if matches!(self.peek_kind(), TokenKind::Semicolon) {
+                self.advance();
+            }
+            Ok(TraitMethod::Abstract { name, params, return_type, span })
+        }
+    }
+
+    fn parse_mixin_def(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Mixin)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut methods: Vec<FnDef> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            methods.push(self.parse_fn_def()?);
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::MixinDef { name, methods, span })
+    }
+
+    /// `impl ...` を見て、`impl Trait for Type` か `impl Name { }` かを判断する
+    fn parse_impl_or_impl_trait(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Impl)?;
+
+        let first_name = self.expect_ident()?.0;
+
+        // `impl Name for Type ...` 形式か判断（for は TokenKind::For として届く）
+        let is_for = matches!(self.peek_kind(), TokenKind::For);
+        if is_for {
+            self.advance(); // consume 'for'
+            let (target, _) = self.expect_ident()?;
+
+            // body があるか（`{` が来れば本体あり）
+            if matches!(self.peek_kind(), TokenKind::LBrace) {
+                self.expect_token(&TokenKind::LBrace)?;
+                let mut methods: Vec<FnDef> = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    methods.push(self.parse_fn_def()?);
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(Stmt::ImplTrait { trait_name: first_name, target, methods, span })
+            } else {
+                // 本体なし: `impl MixinName for TypeName` — セミコロンは省略可
+                if matches!(self.peek_kind(), TokenKind::Semicolon) {
+                    self.advance();
+                }
+                Ok(Stmt::ImplTrait { trait_name: first_name, target, methods: vec![], span })
+            }
+        } else {
+            // 旧来の `impl Name { ... }` 形式（trait_name: None の ImplBlock）
+            self.expect_token(&TokenKind::LBrace)?;
+            let mut methods: Vec<FnDef> = Vec::new();
+            loop {
+                self.skip_sep();
+                if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                methods.push(self.parse_fn_def()?);
+            }
+            self.expect_token(&TokenKind::RBrace)?;
+            Ok(Stmt::ImplBlock { target: first_name, trait_name: None, methods, span })
+        }
     }
 
     // ── T-1-C: struct / impl / @derive パース ──────────────────────────────
@@ -1211,6 +1375,256 @@ impl Parser {
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "pattern".to_string(),
+                found: tok.kind,
+                span: tok.span,
+            }),
+        }
+    }
+
+    // ── T-4-B: data キーワードのパース ───────────────────────────────────
+
+    fn parse_data_def(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Data)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut fields: Vec<(String, TypeAnn)> = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let type_ann = self.parse_type_ann()?;
+            fields.push((field_name, type_ann));
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+
+        // validate ブロック（オプション）
+        let validate_rules = if matches!(self.peek_kind(), TokenKind::Ident(ref s) if s == "validate") {
+            self.advance(); // consume 'validate'
+            self.parse_validate_block()?
+        } else {
+            vec![]
+        };
+
+        Ok(Stmt::DataDef { name, fields, validate_rules, span })
+    }
+
+    /// validate { field: constraint, constraint, ... } をパース
+    fn parse_validate_block(&mut self) -> Result<Vec<ValidateRule>, ParseError> {
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut rules: Vec<ValidateRule> = Vec::new();
+
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+
+            let mut constraints: Vec<Constraint> = Vec::new();
+            // 最初の制約を必ずパース
+            constraints.push(self.parse_constraint()?);
+            // カンマで区切られた追加制約
+            while matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance(); // consume ','
+                // 次が識別子なら制約、そうでなければ次のフィールドの開始（改行後）
+                // セミコロンや改行で区切られたフィールド境界の判定:
+                // 次の識別子の後に `:` が来るなら新しいフィールドの開始
+                if !self.is_next_constraint() {
+                    break;
+                }
+                constraints.push(self.parse_constraint()?);
+            }
+            // セミコロンをスキップ
+            if matches!(self.peek_kind(), TokenKind::Semicolon) {
+                self.advance();
+            }
+
+            rules.push(ValidateRule { field: field_name, constraints });
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(rules)
+    }
+
+    /// 次のトークンが制約かどうかを判定（先読み）
+    /// `ident ':'` のパターンなら新しいフィールド定義なので false
+    fn is_next_constraint(&self) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(_) => {
+                // ident の後に ':' が来れば新しいフィールド
+                match self.kind_at(1) {
+                    Some(TokenKind::Colon) => false,
+                    _ => true,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// 単一の制約をパース
+    fn parse_constraint(&mut self) -> Result<Constraint, ParseError> {
+        let tok = self.peek().clone();
+        match &tok.kind {
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                match name.as_str() {
+                    "length" => {
+                        self.expect_token(&TokenKind::LParen)?;
+                        let (min, max) = self.parse_length_args()?;
+                        self.expect_token(&TokenKind::RParen)?;
+                        Ok(Constraint::Length { min, max })
+                    }
+                    "alphanumeric" => Ok(Constraint::Alphanumeric),
+                    "email_format" => Ok(Constraint::EmailFormat),
+                    "url_format"   => Ok(Constraint::UrlFormat),
+                    "range" => {
+                        self.expect_token(&TokenKind::LParen)?;
+                        let (min, max) = self.parse_range_args()?;
+                        self.expect_token(&TokenKind::RParen)?;
+                        Ok(Constraint::Range { min, max })
+                    }
+                    "contains_digit"     => Ok(Constraint::ContainsDigit),
+                    "contains_uppercase" => Ok(Constraint::ContainsUppercase),
+                    "contains_lowercase" => Ok(Constraint::ContainsLowercase),
+                    "not_empty"          => Ok(Constraint::NotEmpty),
+                    "matches" => {
+                        self.expect_token(&TokenKind::LParen)?;
+                        let tok = self.peek().clone();
+                        // 文字列リテラルを期待
+                        let regex_str = match tok.kind {
+                            TokenKind::Str(ref s) => s.clone(),
+                            TokenKind::StrInterp(ref parts) => {
+                                // 補間なし文字列として処理（Literal パーツのみ結合）
+                                parts.iter().map(|p| match p {
+                                    StrPart::Literal(s) => s.clone(),
+                                    StrPart::Expr(_) => String::new(),
+                                }).collect::<String>()
+                            }
+                            _ => return Err(ParseError::UnexpectedToken {
+                                expected: "string literal for matches()".to_string(),
+                                found: tok.kind,
+                                span: tok.span,
+                            }),
+                        };
+                        self.advance();
+                        self.expect_token(&TokenKind::RParen)?;
+                        Ok(Constraint::Matches(regex_str))
+                    }
+                    other => Err(ParseError::UnexpectedToken {
+                        expected: "constraint name (length, alphanumeric, email_format, ...)".to_string(),
+                        found: TokenKind::Ident(other.to_string()),
+                        span: tok.span,
+                    }),
+                }
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "constraint name".to_string(),
+                found: tok.kind,
+                span: tok.span,
+            }),
+        }
+    }
+
+    /// length() の引数をパース: `min..max` / `min: n` / `max: n` / `n..m`
+    fn parse_length_args(&mut self) -> Result<(Option<usize>, Option<usize>), ParseError> {
+        // `min:` か `max:` か数値リテラルかを判定
+        if let TokenKind::Ident(ref kw) = self.peek_kind().clone() {
+            if kw == "min" {
+                self.advance(); // consume 'min'
+                self.expect_token(&TokenKind::Colon)?;
+                let n = self.parse_usize_literal()?;
+                return Ok((Some(n), None));
+            } else if kw == "max" {
+                self.advance(); // consume 'max'
+                self.expect_token(&TokenKind::Colon)?;
+                let n = self.parse_usize_literal()?;
+                return Ok((None, Some(n)));
+            }
+        }
+        // 数値リテラル: `n..m` / `n`
+        let min = self.parse_usize_literal()?;
+        if matches!(self.peek_kind(), TokenKind::DotDot) {
+            self.advance(); // consume '..'
+            let max = self.parse_usize_literal()?;
+            Ok((Some(min), Some(max)))
+        } else {
+            Ok((Some(min), None))
+        }
+    }
+
+    /// range() の引数をパース: `min..max` / `min: n` / `max: n`
+    fn parse_range_args(&mut self) -> Result<(Option<f64>, Option<f64>), ParseError> {
+        if let TokenKind::Ident(ref kw) = self.peek_kind().clone() {
+            if kw == "min" {
+                self.advance();
+                self.expect_token(&TokenKind::Colon)?;
+                let n = self.parse_f64_literal()?;
+                return Ok((Some(n), None));
+            } else if kw == "max" {
+                self.advance();
+                self.expect_token(&TokenKind::Colon)?;
+                let n = self.parse_f64_literal()?;
+                return Ok((None, Some(n)));
+            }
+        }
+        let min = self.parse_f64_literal()?;
+        if matches!(self.peek_kind(), TokenKind::DotDot) {
+            self.advance();
+            let max = self.parse_f64_literal()?;
+            Ok((Some(min), Some(max)))
+        } else {
+            Ok((Some(min), None))
+        }
+    }
+
+    /// 非負整数リテラルをパース
+    fn parse_usize_literal(&mut self) -> Result<usize, ParseError> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Int(n) => {
+                self.advance();
+                if n < 0 {
+                    Err(ParseError::UnexpectedToken {
+                        expected: "non-negative integer".to_string(),
+                        found: TokenKind::Int(n),
+                        span: tok.span,
+                    })
+                } else {
+                    Ok(n as usize)
+                }
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "integer literal".to_string(),
+                found: tok.kind,
+                span: tok.span,
+            }),
+        }
+    }
+
+    /// f64 リテラルをパース（整数も許容）
+    fn parse_f64_literal(&mut self) -> Result<f64, ParseError> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Int(n) => {
+                self.advance();
+                Ok(n as f64)
+            }
+            TokenKind::Float(f) => {
+                self.advance();
+                Ok(f)
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "number literal".to_string(),
                 found: tok.kind,
                 span: tok.span,
             }),

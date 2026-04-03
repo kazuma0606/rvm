@@ -1,0 +1,25 @@
+// T-4 E2E: data の validate ブロック
+
+data UserRegistration {
+    username: string
+    email:    string
+    password: string
+} validate {
+    username: length(3..20), alphanumeric
+    email:    email_format
+    password: length(min: 8), contains_digit, contains_uppercase
+}
+
+// バリデーション成功ケース
+let reg = UserRegistration { username: "alice", email: "alice@example.com", password: "Pass1234" }
+match reg.validate() {
+    ok(r)    => println("valid: {r.get_username()}")
+    err(msg) => println("invalid: {msg}")
+}
+
+// バリデーション失敗ケース (username が短すぎる)
+let bad = UserRegistration { username: "a", email: "not-email", password: "weak" }
+match bad.validate() {
+    ok(r)    => println("valid")
+    err(msg) => println("invalid: {msg}")
+}

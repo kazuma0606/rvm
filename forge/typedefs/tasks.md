@@ -114,36 +114,36 @@
 
 ### T-3-A: AST 拡張
 
-- [ ] `Stmt::TraitDef { name, methods }` を追加
-- [ ] `Stmt::MixinDef { name, methods }` を追加
-- [ ] `Stmt::ImplTrait { trait_name, target, methods }` を追加
-- [ ] `TraitMethod::Abstract { name, params, return_type }` を追加
-- [ ] `TraitMethod::Default { name, params, return_type, body }` を追加
+- [x] `Stmt::TraitDef { name, methods }` を追加
+- [x] `Stmt::MixinDef { name, methods }` を追加
+- [x] `Stmt::ImplTrait { trait_name, target, methods }` を追加
+- [x] `TraitMethod::Abstract { name, params, return_type }` を追加
+- [x] `TraitMethod::Default { name, params, return_type, body }` を追加
 
 ### T-3-B: パーサー拡張
 
-- [ ] `trait Name { fn ... }` のパース（デフォルト実装あり・なし混在）
-- [ ] `mixin Name { fn ... }` のパース
-- [ ] `impl Trait for Type { fn ... }` のパース
-- [ ] `impl Mixin for Type` （本体なし）のパース
+- [x] `trait Name { fn ... }` のパース（デフォルト実装あり・なし混在）
+- [x] `mixin Name { fn ... }` のパース
+- [x] `impl Trait for Type { fn ... }` のパース
+- [x] `impl Mixin for Type` （本体なし）のパース
 
 ### T-3-C: インタープリタ拡張
 
-- [ ] `TraitDef` / `MixinDef` → trait レジストリへの登録
-- [ ] `ImplTrait` → メソッドを型に紐付け
-- [ ] `impl Mixin for Type`（本体なし）→ デフォルトメソッドをそのまま紐付け
-- [ ] メソッド解決順序: 直接 impl → trait デフォルト → mixin デフォルト
-- [ ] mixin メソッド名衝突 → コンパイルエラー
+- [x] `TraitDef` / `MixinDef` → trait レジストリへの登録
+- [x] `ImplTrait` → メソッドを型に紐付け
+- [x] `impl Mixin for Type`（本体なし）→ デフォルトメソッドをそのまま紐付け
+- [x] メソッド解決順序: 直接 impl → trait デフォルト → mixin デフォルト
+- [x] mixin メソッド名衝突 → コンパイルエラー
 
 ### T-3-D: テスト
 
-- [ ] テスト: `test_trait_impl` — 基本的な trait の定義と実装
-- [ ] テスト: `test_trait_default` — デフォルト実装の継承と上書き
-- [ ] テスト: `test_mixin_basic` — mixin のデフォルト実装
-- [ ] テスト: `test_mixin_multi` — 複数 mixin の組み合わせ
-- [ ] テスト: `test_mixin_conflict` — メソッド名衝突のエラー検出
-- [ ] E2E テスト: `trait_basic.forge`
-- [ ] E2E テスト: `mixin_basic.forge`
+- [x] テスト: `test_trait_impl` — 基本的な trait の定義と実装
+- [x] テスト: `test_trait_default` — デフォルト実装の継承と上書き
+- [x] テスト: `test_mixin_basic` — mixin のデフォルト実装
+- [x] テスト: `test_mixin_multi` — 複数 mixin の組み合わせ
+- [x] テスト: `test_mixin_conflict` — メソッド名衝突のエラー検出
+- [x] E2E テスト: `trait_basic.forge`
+- [x] E2E テスト: `mixin_basic.forge`
 
 ---
 
@@ -151,30 +151,30 @@
 
 ### T-4-A: AST 拡張
 
-- [ ] `Stmt::DataDef { name, fields, validate_rules }` を追加
-- [ ] `ValidateRule { field, constraints }` を追加
+- [x] `Stmt::DataDef { name, fields, validate_rules }` を追加
+- [x] `ValidateRule { field, constraints }` を追加
 
 ### T-4-B: パーサー拡張
 
-- [ ] `data Name { field: Type, ... }` のパース
-- [ ] `data Name { ... } validate { field: constraint, ... }` のパース
-- [ ] バリデーター構文のパース（`length(3..20)`, `email_format` 等）
+- [x] `data Name { field: Type, ... }` のパース
+- [x] `data Name { ... } validate { field: constraint, ... }` のパース
+- [x] バリデーター構文のパース（`length(3..20)`, `email_format` 等）
 
 ### T-4-C: インタープリタ拡張
 
-- [ ] `DataDef` → 全 derive を付与した StructDef として処理
-- [ ] `validate` ブロック → `.validate()` メソッドの自動生成
-- [ ] 組み込みバリデーター: `length`, `alphanumeric`, `email_format`
-- [ ] 組み込みバリデーター: `range`, `contains_digit`, `contains_uppercase`
-- [ ] 組み込みバリデーター: `not_empty`, `matches`
+- [x] `DataDef` → 全 derive を付与した StructDef として処理
+- [x] `validate` ブロック → `.validate()` メソッドの自動生成
+- [x] 組み込みバリデーター: `length`, `alphanumeric`, `email_format`
+- [x] 組み込みバリデーター: `range`, `contains_digit`, `contains_uppercase`
+- [x] 組み込みバリデーター: `not_empty`, `matches`
 
 ### T-4-D: テスト
 
-- [ ] テスト: `test_data_basic` — 定義・インスタンス化・自動 derive 確認
-- [ ] テスト: `test_data_validate_ok` — バリデーション成功
-- [ ] テスト: `test_data_validate_err` — バリデーション失敗とエラーメッセージ
-- [ ] E2E テスト: `data_basic.forge`
-- [ ] E2E テスト: `data_validate.forge`
+- [x] テスト: `test_data_basic` — 定義・インスタンス化・自動 derive 確認
+- [x] テスト: `test_data_validate_ok` — バリデーション成功
+- [x] テスト: `test_data_validate_err` — バリデーション失敗とエラーメッセージ
+- [x] E2E テスト: `data_basic.forge`
+- [x] E2E テスト: `data_validate.forge`
 
 ---
 

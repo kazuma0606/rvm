@@ -41,11 +41,28 @@ struct EnumInfo {
     derives: Vec<String>,
 }
 
-/// 型レジストリ（struct / enum 定義とメソッドを格納）
+/// trait の定義情報
+#[derive(Debug, Clone)]
+struct TraitInfo {
+    /// 抽象メソッド名（実装必須）
+    abstract_methods: Vec<String>,
+    /// デフォルト実装（メソッド名 → FnDef）
+    default_methods: HashMap<String, FnDef>,
+}
+
+/// mixin の定義情報（デフォルト実装のみ）
+#[derive(Debug, Clone)]
+struct MixinInfo {
+    methods: HashMap<String, FnDef>,
+}
+
+/// 型レジストリ（struct / enum / trait / mixin 定義とメソッドを格納）
 #[derive(Default)]
 struct TypeRegistry {
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
+    traits: HashMap<String, TraitInfo>,
+    mixins: HashMap<String, MixinInfo>,
     /// Singleton インスタンスキャッシュ
     singletons: HashMap<String, Value>,
 }
@@ -303,6 +320,18 @@ impl Interpreter {
             }
             Stmt::EnumDef { name, variants, derives, .. } => {
                 self.eval_enum_def(name.clone(), variants.clone(), derives.clone())
+            }
+            Stmt::TraitDef { name, methods, .. } => {
+                self.eval_trait_def(name.clone(), methods.clone())
+            }
+            Stmt::MixinDef { name, methods, .. } => {
+                self.eval_mixin_def(name.clone(), methods.clone())
+            }
+            Stmt::ImplTrait { trait_name, target, methods, .. } => {
+                self.eval_impl_trait(trait_name.clone(), target.clone(), methods.clone())
+            }
+            Stmt::DataDef { name, fields, validate_rules, .. } => {
+                self.eval_data_def(name.clone(), fields.clone(), validate_rules.clone())
             }
         }
     }
@@ -1075,6 +1104,72 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    // ── T-4-C: data キーワードのサポート ──────────────────────────────────
+
+    fn eval_data_def(
+        &mut self,
+        name: String,
+        fields: Vec<(String, TypeAnn)>,
+        validate_rules: Vec<forge_compiler::ast::ValidateRule>,
+    ) -> Result<Value, RuntimeError> {
+        // data は全 derive を自動付与した StructDef として処理
+        let auto_derives = vec![
+            "Debug".to_string(),
+            "Clone".to_string(),
+            "Eq".to_string(),
+            "Hash".to_string(),
+            "Accessor".to_string(),
+        ];
+        self.eval_struct_def(name.clone(), fields.clone(), auto_derives)?;
+
+        // validate ブロックがある場合、.validate() メソッドを自動生成
+        if !validate_rules.is_empty() {
+            self.register_validate_method(&name, &fields, validate_rules)?;
+        }
+
+        Ok(Value::Unit)
+    }
+
+    fn register_validate_method(
+        &mut self,
+        type_name: &str,
+        _fields: &[(String, TypeAnn)],
+        validate_rules: Vec<forge_compiler::ast::ValidateRule>,
+    ) -> Result<(), RuntimeError> {
+        let rules = std::rc::Rc::new(validate_rules);
+
+        let native = NativeFn(Rc::new(move |args: Vec<Value>| {
+            let self_val = match args.first() {
+                Some(v @ Value::Struct { .. }) => v.clone(),
+                Some(v) => return Err(format!("validate() は struct でのみ使用可能です (got {})", v.type_name())),
+                None => return Err("validate() の第1引数が必要です".to_string()),
+            };
+
+            let fields = match &self_val {
+                Value::Struct { fields, .. } => fields.borrow().clone(),
+                _ => unreachable!(),
+            };
+
+            for rule in rules.as_ref() {
+                for constraint in &rule.constraints {
+                    let field_val = fields.get(&rule.field);
+                    let violation = check_constraint(field_val, constraint);
+                    if let Some(constraint_name) = violation {
+                        let msg = format!("{}: {}", rule.field, constraint_name);
+                        return Ok(Value::Result(Err(msg)));
+                    }
+                }
+            }
+
+            Ok(Value::Result(Ok(Box::new(self_val))))
+        }));
+
+        if let Some(info) = self.type_registry.structs.get_mut(type_name) {
+            info.methods.insert("validate".to_string(), MethodImpl::Native(native));
+        }
+        Ok(())
+    }
+
     fn apply_derive(
         &mut self,
         type_name: &str,
@@ -1435,6 +1530,126 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    // ── T-3-C: trait / mixin / impl trait サポート ────────────────────────
+
+    fn eval_trait_def(&mut self, name: String, methods: Vec<TraitMethod>) -> Result<Value, RuntimeError> {
+        let mut abstract_methods = Vec::new();
+        let mut default_methods = HashMap::new();
+
+        for method in methods {
+            match method {
+                TraitMethod::Abstract { name: method_name, .. } => {
+                    abstract_methods.push(method_name);
+                }
+                TraitMethod::Default {
+                    name: method_name,
+                    params,
+                    return_type,
+                    body,
+                    has_state_self,
+                    span,
+                } => {
+                    let fn_def = FnDef {
+                        name: method_name.clone(),
+                        params,
+                        return_type,
+                        body,
+                        has_state_self,
+                        span,
+                    };
+                    default_methods.insert(method_name, fn_def);
+                }
+            }
+        }
+
+        let info = TraitInfo { abstract_methods, default_methods };
+        self.type_registry.traits.insert(name, info);
+        Ok(Value::Unit)
+    }
+
+    fn eval_mixin_def(&mut self, name: String, methods: Vec<FnDef>) -> Result<Value, RuntimeError> {
+        let mut method_map = HashMap::new();
+        for method in methods {
+            method_map.insert(method.name.clone(), method);
+        }
+        let info = MixinInfo { methods: method_map };
+        self.type_registry.mixins.insert(name, info);
+        Ok(Value::Unit)
+    }
+
+    fn eval_impl_trait(
+        &mut self,
+        trait_name: String,
+        target: String,
+        methods: Vec<FnDef>,
+    ) -> Result<Value, RuntimeError> {
+        // 型レジストリに struct が存在しない場合は作成
+        if !self.type_registry.structs.contains_key(&target) {
+            self.type_registry.structs.insert(target.clone(), StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: HashMap::new(),
+            });
+        }
+
+        // 明示的に実装されたメソッドを型に登録（優先度: 直接 impl）
+        let explicit_method_names: Vec<String> = methods.iter().map(|m| m.name.clone()).collect();
+        if let Some(info) = self.type_registry.structs.get_mut(&target) {
+            for method in &methods {
+                info.methods.insert(method.name.clone(), MethodImpl::Forge(method.clone()));
+            }
+        }
+
+        // trait のデフォルト実装を（明示的 impl がない場合のみ）型に登録
+        let trait_defaults: Option<HashMap<String, FnDef>> = self.type_registry.traits
+            .get(&trait_name)
+            .map(|ti| ti.default_methods.clone());
+
+        if let Some(defaults) = trait_defaults {
+            if let Some(struct_info) = self.type_registry.structs.get_mut(&target) {
+                for (method_name, fn_def) in defaults {
+                    if !explicit_method_names.contains(&method_name) {
+                        // デフォルト実装を登録（明示的 impl がない場合のみ）
+                        struct_info.methods
+                            .entry(method_name)
+                            .or_insert(MethodImpl::Forge(fn_def));
+                    }
+                }
+            }
+        }
+
+        // mixin の場合: デフォルトメソッドを登録（名前衝突チェックあり）
+        let mixin_methods: Option<HashMap<String, FnDef>> = self.type_registry.mixins
+            .get(&trait_name)
+            .map(|mi| mi.methods.clone());
+
+        if let Some(mixin_map) = mixin_methods {
+            // 既に他の mixin から同名メソッドが登録されているか確認
+            // mixin に由来するメソッドを識別するためにマーキングが必要だが
+            // ここではシンプルに: 既存メソッドがある場合にエラーを発生させる
+            // ただし、同一の trait/impl で登録したものは除外する
+            for (method_name, fn_def) in &mixin_map {
+                if let Some(struct_info) = self.type_registry.structs.get(&target) {
+                    if struct_info.methods.contains_key(method_name) {
+                        // 既存メソッドが存在する場合: 明示的 impl か他の mixin か？
+                        // mixin 衝突として扱う（実行時エラー）
+                        return Err(RuntimeError::Custom(format!(
+                            "mixin '{}' のメソッド '{}' は型 '{}' で既に定義されています（名前衝突）",
+                            trait_name, method_name, target
+                        )));
+                    }
+                }
+            }
+            if let Some(struct_info) = self.type_registry.structs.get_mut(&target) {
+                for (method_name, fn_def) in mixin_map {
+                    struct_info.methods.insert(method_name, MethodImpl::Forge(fn_def));
+                }
+            }
+        }
+
+        Ok(Value::Unit)
+    }
+
     fn eval_struct_init(
         &mut self,
         name: &str,
@@ -1719,6 +1934,125 @@ fn sort_by_key(
         return Err(e);
     }
     Ok(mk_list(keyed.into_iter().map(|(_, v)| v).collect()))
+}
+
+/// T-4-C: バリデーション制約チェック
+/// 違反があれば制約名を返し、問題なければ None を返す
+fn check_constraint(
+    field_val: Option<&Value>,
+    constraint: &forge_compiler::ast::Constraint,
+) -> Option<&'static str> {
+    use forge_compiler::ast::Constraint;
+
+    // Option 型のフィールドは None なら制約をスキップ（nullable）
+    let val = match field_val {
+        None => return Some("field_missing"),
+        Some(Value::Option(None)) => return None,  // None なら制約スキップ
+        Some(Value::Option(Some(inner))) => inner.as_ref(),
+        Some(v) => v,
+    };
+
+    match constraint {
+        Constraint::Length { min, max } => {
+            let s = match val {
+                Value::String(s) => s,
+                _ => return Some("length"),
+            };
+            let len = s.chars().count();
+            if let Some(m) = min {
+                if len < *m { return Some("length"); }
+            }
+            if let Some(m) = max {
+                if len > *m { return Some("length"); }
+            }
+            None
+        }
+        Constraint::Alphanumeric => {
+            match val {
+                Value::String(s) if s.chars().all(|c| c.is_alphanumeric()) => None,
+                Value::String(_) => Some("alphanumeric"),
+                _ => Some("alphanumeric"),
+            }
+        }
+        Constraint::EmailFormat => {
+            match val {
+                Value::String(s) => {
+                    if s.contains('@') && s.contains('.') {
+                        None
+                    } else {
+                        Some("email_format")
+                    }
+                }
+                _ => Some("email_format"),
+            }
+        }
+        Constraint::UrlFormat => {
+            match val {
+                Value::String(s) => {
+                    if s.starts_with("http://") || s.starts_with("https://") {
+                        None
+                    } else {
+                        Some("url_format")
+                    }
+                }
+                _ => Some("url_format"),
+            }
+        }
+        Constraint::Range { min, max } => {
+            let n = match val {
+                Value::Int(n)   => *n as f64,
+                Value::Float(f) => *f,
+                _ => return Some("range"),
+            };
+            if let Some(m) = min {
+                if n < *m { return Some("range"); }
+            }
+            if let Some(m) = max {
+                if n > *m { return Some("range"); }
+            }
+            None
+        }
+        Constraint::ContainsDigit => {
+            match val {
+                Value::String(s) if s.chars().any(|c| c.is_ascii_digit()) => None,
+                Value::String(_) => Some("contains_digit"),
+                _ => Some("contains_digit"),
+            }
+        }
+        Constraint::ContainsUppercase => {
+            match val {
+                Value::String(s) if s.chars().any(|c| c.is_uppercase()) => None,
+                Value::String(_) => Some("contains_uppercase"),
+                _ => Some("contains_uppercase"),
+            }
+        }
+        Constraint::ContainsLowercase => {
+            match val {
+                Value::String(s) if s.chars().any(|c| c.is_lowercase()) => None,
+                Value::String(_) => Some("contains_lowercase"),
+                _ => Some("contains_lowercase"),
+            }
+        }
+        Constraint::NotEmpty => {
+            match val {
+                Value::String(s) if !s.is_empty() => None,
+                Value::String(_) => Some("not_empty"),
+                Value::List(list) if !list.borrow().is_empty() => None,
+                Value::List(_) => Some("not_empty"),
+                _ => Some("not_empty"),
+            }
+        }
+        Constraint::Matches(pattern) => {
+            // 簡易的な正規表現マッチ（シンプル実装: 完全一致のみ）
+            // 本格的な正規表現ライブラリは依存追加が必要なので
+            // ここでは文字列が含まれているかのシンプルチェック
+            match val {
+                Value::String(s) if s.contains(pattern.as_str()) => None,
+                Value::String(_) => Some("matches"),
+                _ => Some("matches"),
+            }
+        }
+    }
 }
 
 fn eval_literal(lit: &Literal) -> Value {
@@ -2516,5 +2850,240 @@ let c = Status::Inactive
 a == c
 "#;
         assert_eq!(run(src4), Ok(Value::Bool(false)));
+    }
+
+    // ── Phase T-3 tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_trait_impl() {
+        // 基本的な trait の定義と実装
+        let src = r#"
+trait Printable {
+    fn display() -> string
+}
+
+struct User {
+    name: string
+}
+
+impl Printable for User {
+    fn display() -> string {
+        self.name
+    }
+}
+
+let u = User { name: "Alice" }
+u.display()
+"#;
+        assert_eq!(run(src), Ok(Value::String("Alice".to_string())));
+    }
+
+    #[test]
+    fn test_trait_default() {
+        // デフォルト実装の継承と上書き
+        let src = r#"
+trait Loggable {
+    fn label() -> string
+
+    fn log() {
+        self.label()
+    }
+}
+
+struct Post {
+    title: string
+}
+
+impl Loggable for Post {
+    fn label() -> string {
+        self.title
+    }
+}
+
+let p = Post { title: "Hello" }
+p.log()
+"#;
+        // log() はデフォルト実装で label() を呼ぶ → "Hello" を返す
+        assert_eq!(run(src), Ok(Value::String("Hello".to_string())));
+
+        // デフォルト実装を上書きするケース
+        let src2 = r#"
+trait Loggable {
+    fn label() -> string
+
+    fn log() {
+        self.label()
+    }
+}
+
+struct Post {
+    title: string
+}
+
+impl Loggable for Post {
+    fn label() -> string {
+        self.title
+    }
+    fn log() {
+        "overridden"
+    }
+}
+
+let p = Post { title: "Hello" }
+p.log()
+"#;
+        assert_eq!(run(src2), Ok(Value::String("overridden".to_string())));
+    }
+
+    #[test]
+    fn test_mixin_basic() {
+        // mixin のデフォルト実装
+        let src = r#"
+mixin Timestamped {
+    fn created_label() -> string {
+        self.created_at
+    }
+}
+
+struct Post {
+    title: string
+    created_at: string
+}
+
+impl Timestamped for Post
+
+let p = Post { title: "Hello", created_at: "2026-01-01" }
+p.created_label()
+"#;
+        assert_eq!(run(src), Ok(Value::String("2026-01-01".to_string())));
+    }
+
+    #[test]
+    fn test_mixin_multi() {
+        // 複数 mixin の組み合わせ
+        let src = r#"
+mixin Walker {
+    fn walk() -> string {
+        self.name
+    }
+}
+
+mixin Talker {
+    fn talk() -> string {
+        self.name
+    }
+}
+
+struct Dog {
+    name: string
+}
+
+impl Walker for Dog
+impl Talker for Dog
+
+let d = Dog { name: "Rex" }
+let w = d.walk()
+let t = d.talk()
+w == t
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_mixin_conflict() {
+        // mixin のメソッド名衝突はランタイムエラー
+        let src = r#"
+mixin MixinA {
+    fn shared() -> string {
+        "A"
+    }
+}
+
+mixin MixinB {
+    fn shared() -> string {
+        "B"
+    }
+}
+
+struct Foo {
+    x: number
+}
+
+impl MixinA for Foo
+impl MixinB for Foo
+"#;
+        let result = run(src);
+        assert!(
+            matches!(result, Err(RuntimeError::Custom(ref msg)) if msg.contains("名前衝突")),
+            "expected mixin conflict error, got {:?}",
+            result
+        );
+    }
+
+    // ── Phase T-4: data キーワードのテスト ───────────────────────────────
+
+    #[test]
+    fn test_data_basic() {
+        // data 定義・インスタンス化・自動 derive 確認（Accessor の get_name() 等が使える）
+        let src = r#"
+data UserProfile {
+    id:    number
+    name:  string
+}
+
+let u = UserProfile { id: 1, name: "Alice" }
+u.get_name()
+"#;
+        let result = run(src);
+        assert_eq!(result, Ok(Value::String("Alice".to_string())));
+    }
+
+    #[test]
+    fn test_data_validate_ok() {
+        // バリデーション成功で ok(instance) を返す
+        let src = r#"
+data UserRegistration {
+    username: string
+    email:    string
+    password: string
+} validate {
+    username: length(3..20), alphanumeric
+    email:    email_format
+    password: length(min: 8), contains_digit, contains_uppercase
+}
+
+let reg = UserRegistration { username: "alice", email: "alice@example.com", password: "Pass1234" }
+match reg.validate() {
+    ok(r)    => r.get_username()
+    err(msg) => msg
+}
+"#;
+        let result = run(src);
+        assert_eq!(result, Ok(Value::String("alice".to_string())));
+    }
+
+    #[test]
+    fn test_data_validate_err() {
+        // バリデーション失敗で err("field: constraint") を返す
+        let src = r#"
+data UserRegistration {
+    username: string
+    email:    string
+    password: string
+} validate {
+    username: length(3..20), alphanumeric
+    email:    email_format
+    password: length(min: 8), contains_digit, contains_uppercase
+}
+
+let bad = UserRegistration { username: "a", email: "not-email", password: "weak" }
+match bad.validate() {
+    ok(r)    => "valid"
+    err(msg) => msg
+}
+"#;
+        let result = run(src);
+        // username の length チェックで失敗（最初の違反のみ）
+        assert_eq!(result, Ok(Value::String("username: length".to_string())));
     }
 }

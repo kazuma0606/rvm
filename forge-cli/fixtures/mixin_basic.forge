@@ -1,0 +1,26 @@
+// mixin_basic.forge: mixin の基本動作 E2E テスト
+
+mixin Timestamped {
+    fn created_label() -> string {
+        self.created_at
+    }
+}
+
+mixin Walker {
+    fn walk() -> string {
+        self.name
+    }
+}
+
+struct Post {
+    title: string
+    created_at: string
+    name: string
+}
+
+impl Timestamped for Post
+impl Walker for Post
+
+let p = Post { title: "Hello", created_at: "2026-01-01", name: "post-1" }
+println(p.created_label())
+println(p.walk())

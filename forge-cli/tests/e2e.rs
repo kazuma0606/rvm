@@ -639,3 +639,43 @@ fn e2e_enum_match() {
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "radius=5\n3x4\nmove 10,20\nhello\n");
 }
+
+// ── Phase T-3: trait / mixin E2E テスト ─────────────────────────────────
+
+#[test]
+fn e2e_trait_basic() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/trait_basic.forge")
+    ).expect("trait_basic.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "Hello\nHello\nHello\n");
+}
+
+#[test]
+fn e2e_mixin_basic() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mixin_basic.forge")
+    ).expect("mixin_basic.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "2026-01-01\npost-1\n");
+}
+
+// ── Phase T-4: data E2E テスト ───────────────────────────────────────────
+
+#[test]
+fn e2e_data_basic() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data_basic.forge")
+    ).expect("data_basic.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "Alice\n1\nBob\n");
+}
+
+#[test]
+fn e2e_data_validate() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data_validate.forge")
+    ).expect("data_validate.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "valid: alice\ninvalid: username: length\n");
+}

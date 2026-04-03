@@ -92,6 +92,10 @@ impl CodeGenerator {
             Stmt::Expr(expr) => self.expr_needs_anyhow(expr),
             // T-1/T-2: struct/impl/enum は現時点ではトランスパイル非対応
             Stmt::StructDef { .. } | Stmt::ImplBlock { .. } | Stmt::EnumDef { .. } => false,
+            // T-3: trait/mixin/impl trait も現時点ではトランスパイル非対応
+            Stmt::TraitDef { .. } | Stmt::MixinDef { .. } | Stmt::ImplTrait { .. } => false,
+            // T-4: data キーワードも現時点ではトランスパイル非対応
+            Stmt::DataDef { .. } => false,
         }
     }
 
@@ -188,6 +192,20 @@ impl CodeGenerator {
             // T-2: enum は現時点ではトランスパイル非対応（スタブ）
             Stmt::EnumDef { name, .. } => {
                 format!("{}// enum {} (transpile pending)\n", self.indent_str(), name)
+            }
+            // T-3: trait/mixin/impl trait は現時点ではトランスパイル非対応（スタブ）
+            Stmt::TraitDef { name, .. } => {
+                format!("{}// trait {} (transpile pending)\n", self.indent_str(), name)
+            }
+            Stmt::MixinDef { name, .. } => {
+                format!("{}// mixin {} (transpile pending)\n", self.indent_str(), name)
+            }
+            Stmt::ImplTrait { trait_name, target, .. } => {
+                format!("{}// impl {} for {} (transpile pending)\n", self.indent_str(), trait_name, target)
+            }
+            // T-4: data は現時点ではトランスパイル非対応（スタブ）
+            Stmt::DataDef { name, .. } => {
+                format!("{}// data {} (transpile pending)\n", self.indent_str(), name)
             }
         }
     }

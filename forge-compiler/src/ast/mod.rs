@@ -67,6 +67,64 @@ pub enum Stmt {
         derives: Vec<String>,
         span: Span,
     },
+    /// trait Name { fn abstract() -> T \n fn default() { body } }
+    TraitDef {
+        name: String,
+        methods: Vec<TraitMethod>,
+        span: Span,
+    },
+    /// mixin Name { fn method() { body } }
+    MixinDef {
+        name: String,
+        methods: Vec<FnDef>,
+        span: Span,
+    },
+    /// impl TraitName for TypeName { fn ... }  または  impl MixinName for TypeName
+    ImplTrait {
+        trait_name: String,
+        target: String,
+        methods: Vec<FnDef>,
+        span: Span,
+    },
+    /// data Name { field: Type, ... } validate { ... }
+    DataDef {
+        name: String,
+        fields: Vec<(String, TypeAnn)>,
+        validate_rules: Vec<ValidateRule>,
+        span: Span,
+    },
+}
+
+/// バリデーションルール: フィールドに対する制約の集合
+#[derive(Debug, Clone)]
+pub struct ValidateRule {
+    pub field: String,
+    pub constraints: Vec<Constraint>,
+}
+
+/// バリデーション制約の種類
+#[derive(Debug, Clone)]
+pub enum Constraint {
+    /// 文字列長チェック: length(3..20) / length(min: 8) / length(max: 20)
+    Length { min: Option<usize>, max: Option<usize> },
+    /// 英数字のみ
+    Alphanumeric,
+    /// メールフォーマット（@と.を含む簡易チェック）
+    EmailFormat,
+    /// URLフォーマット
+    UrlFormat,
+    /// 数値範囲チェック: range(0..150) / range(min: 0)
+    Range { min: Option<f64>, max: Option<f64> },
+    /// 数字を1文字以上含む
+    ContainsDigit,
+    /// 大文字を1文字以上含む
+    ContainsUppercase,
+    /// 小文字を1文字以上含む
+    ContainsLowercase,
+    /// 空文字列でない
+    NotEmpty,
+    /// 正規表現マッチ
+    Matches(String),
 }
 
 /// 式
@@ -289,6 +347,27 @@ pub struct Param {
     pub name: String,
     pub type_ann: Option<TypeAnn>,
     pub span: Span,
+}
+
+/// trait メソッド（抽象 or デフォルト実装）
+#[derive(Debug, Clone)]
+pub enum TraitMethod {
+    /// 抽象メソッド（実装必須）: fn name(params) -> T
+    Abstract {
+        name: String,
+        params: Vec<Param>,
+        return_type: Option<TypeAnn>,
+        span: Span,
+    },
+    /// デフォルト実装: fn name(params) -> T { body }
+    Default {
+        name: String,
+        params: Vec<Param>,
+        return_type: Option<TypeAnn>,
+        body: Box<Expr>,
+        has_state_self: bool,
+        span: Span,
+    },
 }
 
 /// impl ブロック内のメソッド定義
