@@ -3,3 +3,4 @@ pub mod ast;
 pub mod parser;
 pub mod typechecker;
 pub mod loader;
+pub mod deps;

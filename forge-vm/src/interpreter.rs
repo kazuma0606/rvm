@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use forge_compiler::ast::*;
 use forge_compiler::loader::{ModuleLoader, ModForgeExport};
+use forge_compiler::deps::DepsManager;
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
@@ -147,6 +148,8 @@ pub struct Interpreter {
     type_registry: TypeRegistry,
     /// モジュールローダー（forge run でのみ有効）
     module_loader: Option<ModuleLoader>,
+    /// 外部クレート依存関係マネージャー（forge build 連携用）
+    pub deps_manager: DepsManager,
 }
 
 impl Interpreter {
@@ -155,6 +158,7 @@ impl Interpreter {
             scopes: vec![HashMap::new()],
             type_registry: TypeRegistry::default(),
             module_loader: None,
+            deps_manager: DepsManager::new(),
         };
         interp.register_builtins();
         interp
@@ -166,6 +170,7 @@ impl Interpreter {
             scopes: vec![HashMap::new()],
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::from_file_path(path)),
+            deps_manager: DepsManager::new(),
         };
         interp.register_builtins();
         interp
@@ -177,6 +182,7 @@ impl Interpreter {
             scopes: vec![HashMap::new()],
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::new(project_root)),
+            deps_manager: DepsManager::new(),
         };
         interp.register_builtins();
         interp
@@ -422,8 +428,14 @@ impl Interpreter {
                     self.eval_file_use(use_path, symbols)
                 }
             }
-            UsePath::External(_) | UsePath::Stdlib(_) => {
-                // forge run では外部クレートと標準ライブラリはスキップ（警告なし）
+            UsePath::External(crate_name) => {
+                // forge run では外部クレートのインポートをスキップ（警告なし）
+                // クレート名を DepsManager に記録して forge build 連携に備える
+                self.deps_manager.add(crate_name);
+                Ok(Value::Unit)
+            }
+            UsePath::Stdlib(_) => {
+                // forge run では標準ライブラリはスキップ（警告なし）
                 Ok(Value::Unit)
             }
         }

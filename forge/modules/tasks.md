@@ -116,21 +116,21 @@
 
 ### M-3-A: パーサー拡張
 
-- [ ] `use serde` のパース（`./` なし → `UsePath::External`）
-- [ ] `use reqwest.{Client, Response}` のパース
-- [ ] `use forge/std/io.read_file` のパース（`UsePath::Stdlib`）
+- [x] `use serde` のパース（`./` なし → `UsePath::External`）
+- [x] `use reqwest.{Client, Response}` のパース
+- [x] `use forge/std/io.read_file` のパース（`UsePath::Stdlib`）
 
 ### M-3-B: 依存関係マネージャー実装
 
-- [ ] `forge-compiler/src/deps/` ディレクトリを作成
-- [ ] `DepsManager` 構造体を実装（外部クレート名の収集）
-- [ ] `forge.toml` の `[dependencies]` への追記（べき等）
-- [ ] 重複クレートのスキップ
+- [x] `forge-compiler/src/deps/` ディレクトリを作成
+- [x] `DepsManager` 構造体を実装（外部クレート名の収集）
+- [x] `forge.toml` の `[dependencies]` への追記（べき等）
+- [x] 重複クレートのスキップ
 
 ### M-3-C: テスト
 
-- [ ] テスト: `test_external_crate_detection` — 外部クレート名の収集
-- [ ] テスト: `test_cargo_toml_update` — Cargo.toml への追記（重複なし）
+- [x] テスト: `test_external_crate_detection` — 外部クレート名の収集
+- [x] テスト: `test_cargo_toml_update` — Cargo.toml への追記（重複なし）
 
 ---
 
