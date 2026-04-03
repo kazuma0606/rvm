@@ -98,6 +98,8 @@ impl CodeGenerator {
             Stmt::DataDef { .. } => false,
             // T-5: typestate も現時点ではトランスパイル非対応
             Stmt::TypestateDef { .. } => false,
+            // M-0: use 宣言は現時点ではトランスパイル非対応
+            Stmt::UseDecl { .. } => false,
         }
     }
 
@@ -212,6 +214,10 @@ impl CodeGenerator {
             // T-5: typestate は現時点ではトランスパイル非対応（スタブ）
             Stmt::TypestateDef { name, .. } => {
                 format!("{}// typestate {} (transpile pending)\n", self.indent_str(), name)
+            }
+            // M-0: use 宣言は現時点ではトランスパイル非対応（スタブ）
+            Stmt::UseDecl { .. } => {
+                format!("{}// use (transpile pending)\n", self.indent_str())
             }
         }
     }

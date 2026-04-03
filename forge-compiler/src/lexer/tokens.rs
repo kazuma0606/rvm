@@ -47,6 +47,11 @@ pub enum TokenKind {
     Mixin,
     Data,
     Typestate,
+    // ── モジュールキーワード (Phase M-0) ─────
+    Use,        // use
+    Pub,        // pub
+    As,         // as
+    When,       // when
     // ── アノテーション ────────────────────────
     At,         // @
 

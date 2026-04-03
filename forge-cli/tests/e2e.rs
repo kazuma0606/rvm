@@ -2,6 +2,20 @@
 
 use std::process::Command;
 
+/// ForgeScript ファイルパスを `forge-new run` で実行し、stdout を返す
+fn run_forge_file(path: &str) -> Result<String, String> {
+    let result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args(["run", path])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if result.status.success() {
+        Ok(String::from_utf8_lossy(&result.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&result.stderr).to_string())
+    }
+}
+
 /// ForgeScript ソースを `forge-new run` で実行し、stdout を返す
 fn run_forge(source: &str) -> Result<String, String> {
     // スレッドIDをファイル名に使って並列テストでも衝突しない
@@ -698,4 +712,14 @@ fn e2e_typestate_door() {
     ).expect("typestate_door.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "done\n");
+}
+
+#[test]
+fn e2e_modules_basic() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/basic/main.forge"
+    );
+    let out = run_forge_file(main_path).unwrap();
+    assert_eq!(out, "7\n7\nHello, World!\n");
 }

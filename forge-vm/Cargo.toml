@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 forge-compiler = { path = "../forge-compiler" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,10 @@
+use ./utils/helper.add
+use ./utils/helper.{subtract, greet}
+
+fn main() {
+    println(add(3, 4))
+    println(subtract(10, 3))
+    println(greet("World"))
+}
+
+main()

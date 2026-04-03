@@ -10,6 +10,28 @@ pub struct Module {
     pub stmts: Vec<Stmt>,
 }
 
+/// use パスの種類
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsePath {
+    /// `./utils/helper` — ./ で始まるローカルファイル
+    Local(String),
+    /// `serde` — 裸の識別子（外部クレート）
+    External(String),
+    /// `forge/std/io` — forge/std/ で始まる標準ライブラリ
+    Stdlib(String),
+}
+
+/// use でインポートするシンボルの指定方法
+#[derive(Debug, Clone, PartialEq)]
+pub enum UseSymbols {
+    /// `.add` — 単一シンボル（エイリアスあり）
+    Single(String, Option<String>),
+    /// `.{add, subtract as sub}` — 複数シンボル（(名前, エイリアス) のリスト）
+    Multiple(Vec<(String, Option<String>)>),
+    /// `.*` — 全シンボル
+    All,
+}
+
 /// 文
 #[derive(Debug, Clone)]
 pub enum Stmt {
@@ -98,6 +120,13 @@ pub enum Stmt {
         name: String,
         states: Vec<String>,
         state_methods: Vec<TypestateState>,
+        span: Span,
+    },
+    /// use ./path/module.symbol [as alias]
+    UseDecl {
+        path: UsePath,
+        symbols: UseSymbols,
+        is_pub: bool,
         span: Span,
     },
 }

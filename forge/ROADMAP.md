@@ -67,12 +67,18 @@
 
 ### モジュールシステム 📐
 
-### モジュールシステム 📐
-
-- **参照**: `forge/modules/spec.md`
-- **内容**: `use ./module` / `mod.forge` / pub 可視性 / when キーワード / 循環参照検出
-- **次のアクション**: `forge/modules/` に plan.md / tasks.md を作成して実装着手
-- **ブロッカー**: struct/enum が先に必要（型をまたいだインポートに影響）
+- **参照**: `forge/modules/spec.md` / `forge/modules/plan.md` / `forge/modules/tasks.md`
+- **内容**:
+  - M-0: `use ./path/module.symbol` ローカルファイル解決・エイリアス
+  - M-1: `pub` 可視性（公開・非公開アクセス制御）
+  - M-2: `mod.forge` ファサード・`pub use` re-export
+  - M-3: 外部クレート（`use serde` → `Cargo.toml` 自動追記）
+  - M-4: 静的解析（未使用インポート・循環参照・シンボル衝突）
+  - M-5: `when` キーワード（条件付きコンパイル）
+  - M-6: `use raw {}` ブロック（生 Rust 埋め込み）
+  - M-7: REPL でのモジュールインポート（`:modules` / `:reload`）
+- **次のアクション**: `forge/modules/tasks.md` の M-0 から実装着手
+- **ブロッカー**: なし（型定義実装済み）
 
 ### トランスパイラ残タスク 📐
 
@@ -92,11 +98,7 @@
 
 | 機能 | 設計状況 | 参照 |
 |---|---|---|
-| `data` キーワード | 方針確定（`struct` と分離・シリアライズ自動） | design-v3.md |
-| `validate` ブロック + `Validated<T>` | 方針確定（gardeの問題を解決） | design-v3.md |
-| `mixin` / `interface` / `@derive` | 方針確定（trait/implの代替） | design-v3.md |
-| `typestate` キーワード | 方針確定（型状態パターンの言語組み込み） | design-v3.md |
-| `when` キーワード | 方針確定（#[cfg(...)]の代替） | forge/modules/spec.md |
+| `when` キーワード | 方針確定（modules/spec.md に仕様あり・M-5 で実装予定） | forge/modules/spec.md |
 | `async` / `await` | 方針確定（.await検出で自動昇格・tokio自動挿入） | design-v3.md |
 | 名前付き引数・デフォルト引数 | 方針確定（Builderパターン自動生成） | design-v3.md |
 | REPL コード補完 | 方針確定（3段階: 静的→動的→型対応） | future_task |
@@ -113,7 +115,7 @@
 | LSP（言語サーバー） | future_task に概要のみ。型チェッカーを活用 |
 | Playground（WASM） | future_task に概要のみ。forge-wasm クレートが必要 |
 | `forge.toml` パッケージ管理 | design-v3.md に最小仕様あり。詳細未設計 |
-| `use raw {}` ブロック | design-v3.md に方針あり。パーサー拡張が必要 |
+| `use raw {}` ブロック | modules/spec.md に仕様あり。M-6 で実装予定 |
 | ジェネリクス `<T>` | spec に「将来」として記載のみ |
 | `forge fmt` | design-v3.md に言及のみ |
 | `forge generate` | design-v3.md に言及のみ |
@@ -125,30 +127,26 @@
 ## 推奨実装順序
 
 ```
+✅ 完了済み
+  ├─ [1] struct / enum / trait / mixin / data / typestate 実装
+  │       → forge/typedefs/ に spec/plan/tasks 完備
+  │
 今すぐ着手可能
   │
-  ├─ [1] struct / enum / trait の仕様策定 + 実装
-  │       → forge/v0.1.0/spec_v0.1.0.md を作成
-  │       → インタープリタ対応 → トランスパイラ対応（B-5）
-  │
-  struct/enum 実装後
-  │
-  ├─ [2] モジュールシステム実装
-  │       → forge/modules/plan.md + tasks.md を作成
-  │       → トランスパイラ対応（B-6）
+  ├─ [2] モジュールシステム実装（M-0〜M-7）
+  │       → forge/modules/tasks.md の M-0 から着手
+  │       → トランスパイラ対応（B-6）は M-2 以降と並走
   │
   モジュール実装後
   │
-  ├─ [3] data / validate / Validated<T>
-  ├─ [4] mixin / interface / @derive
-  ├─ [5] forge test + test "..." ブロック
+  ├─ [3] forge test + test "..." ブロック（M-5 when と連携）
   │
   言語仕様安定後
   │
-  ├─ [6] LSP（言語サーバー）
-  ├─ [7] Playground（WASM）
-  ├─ [8] async / await
-  └─ [9] セルフホスティング
+  ├─ [4] LSP（言語サーバー）
+  ├─ [5] Playground（WASM）
+  ├─ [6] async / await
+  └─ [7] セルフホスティング
 ```
 
 ---

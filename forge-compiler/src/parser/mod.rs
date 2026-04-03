@@ -191,10 +191,164 @@ impl Parser {
             TokenKind::At       => self.parse_annotated_stmt(),
             TokenKind::Data     => self.parse_data_def(),
             TokenKind::Typestate => self.parse_typestate_def(),
+            TokenKind::Use      => self.parse_use_decl(false),
+            TokenKind::Pub      => self.parse_pub_stmt(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
                 Ok(Stmt::Expr(expr))
+            }
+        }
+    }
+
+    // ── パース: pub 文 ──────────────────────────────────────────────────
+
+    fn parse_pub_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.expect_token(&TokenKind::Pub)?;
+        match self.peek_kind().clone() {
+            TokenKind::Use => self.parse_use_decl(true),
+            TokenKind::Fn  => {
+                // pub fn は通常の fn として扱う（M-1 で is_pub フラグ追加予定）
+                self.parse_fn()
+            }
+            _ => {
+                let tok = self.peek().clone();
+                Err(ParseError::UnexpectedToken {
+                    expected: "use または fn".to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    // ── パース: use 宣言 ────────────────────────────────────────────────
+
+    fn parse_use_decl(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Use)?;
+
+        // パスを読み取る
+        // ローカル: ./utils/helper
+        // 外部: serde
+        // 標準ライブラリ: forge/std/io
+        let path = self.parse_use_path()?;
+
+        // . の後にシンボルを読み取る（オプション: パスのみの場合もある）
+        let symbols = if matches!(self.peek_kind(), TokenKind::Dot) {
+            self.advance(); // consume '.'
+            self.parse_use_symbols()?
+        } else {
+            // シンボルなし → 外部クレート全体のインポート（符号なし）
+            UseSymbols::All
+        };
+
+        self.skip_sep();
+        Ok(Stmt::UseDecl { path, symbols, is_pub, span })
+    }
+
+    /// `./utils/helper` / `serde` / `forge/std/io` をパース
+    /// 返す文字列はプレフィックス除いたパス
+    fn parse_use_path(&mut self) -> Result<UsePath, ParseError> {
+        let tok = self.peek().clone();
+
+        // `./` で始まるローカルパス
+        if matches!(tok.kind, TokenKind::Dot) {
+            // ./ かどうか確認
+            if matches!(self.kind_at(1), Some(TokenKind::Slash)) {
+                self.advance(); // consume '.'
+                self.advance(); // consume '/'
+                // パスセグメントを読み取る: utils/helper
+                let path = self.read_path_segments()?;
+                return Ok(UsePath::Local(path));
+            }
+        }
+
+        // 識別子（外部クレートまたは forge/std/...）
+        let (first_ident, _) = self.expect_ident()?;
+
+        // `forge` で始まる場合は `forge/std/...` の可能性
+        if first_ident == "forge" && matches!(self.peek_kind(), TokenKind::Slash) {
+            self.advance(); // consume '/'
+            let (second, _) = self.expect_ident()?;
+            if second == "std" && matches!(self.peek_kind(), TokenKind::Slash) {
+                self.advance(); // consume '/'
+                let rest = self.read_path_segments()?;
+                return Ok(UsePath::Stdlib(format!("forge/std/{}", rest)));
+            }
+            // forge/something/... → 外部扱い
+            if matches!(self.peek_kind(), TokenKind::Slash) {
+                self.advance();
+                let rest = self.read_path_segments()?;
+                return Ok(UsePath::External(format!("{}/{}/{}", first_ident, second, rest)));
+            }
+            return Ok(UsePath::External(format!("{}/{}", first_ident, second)));
+        }
+
+        // それ以外はすべて外部クレート
+        // 追加のパスセグメント（reqwest/client など）があれば読む
+        let mut path = first_ident;
+        while matches!(self.peek_kind(), TokenKind::Slash) {
+            self.advance(); // consume '/'
+            let (seg, _) = self.expect_ident()?;
+            path.push('/');
+            path.push_str(&seg);
+        }
+        Ok(UsePath::External(path))
+    }
+
+    /// `/` 区切りのパスセグメントを読み取る（`utils/helper` など）
+    fn read_path_segments(&mut self) -> Result<String, ParseError> {
+        let (first, _) = self.expect_ident()?;
+        let mut path = first;
+        while matches!(self.peek_kind(), TokenKind::Slash) {
+            self.advance(); // consume '/'
+            let (seg, _) = self.expect_ident()?;
+            path.push('/');
+            path.push_str(&seg);
+        }
+        Ok(path)
+    }
+
+    /// `.` の後のシンボル指定をパース
+    /// `add` / `{add, subtract}` / `*`
+    fn parse_use_symbols(&mut self) -> Result<UseSymbols, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::Star => {
+                self.advance(); // consume '*'
+                Ok(UseSymbols::All)
+            }
+            TokenKind::LBrace => {
+                self.advance(); // consume '{'
+                let mut symbols = Vec::new();
+                while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    let (name, _) = self.expect_ident()?;
+                    let alias = if matches!(self.peek_kind(), TokenKind::As) {
+                        self.advance(); // consume 'as'
+                        let (alias_name, _) = self.expect_ident()?;
+                        Some(alias_name)
+                    } else {
+                        None
+                    };
+                    symbols.push((name, alias));
+                    if matches!(self.peek_kind(), TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(UseSymbols::Multiple(symbols))
+            }
+            _ => {
+                // 単一シンボル: add [as alias]
+                let (name, _) = self.expect_ident()?;
+                let alias = if matches!(self.peek_kind(), TokenKind::As) {
+                    self.advance(); // consume 'as'
+                    let (alias_name, _) = self.expect_ident()?;
+                    Some(alias_name)
+                } else {
+                    None
+                };
+                Ok(UseSymbols::Single(name, alias))
             }
         }
     }

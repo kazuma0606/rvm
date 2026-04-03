@@ -121,6 +121,8 @@ impl TypeChecker {
             Stmt::DataDef { .. } => {}
             // T-5: typestate も現在スキップ
             Stmt::TypestateDef { .. } => {}
+            // M-0: use 宣言は型チェッカーでは現在スキップ
+            Stmt::UseDecl { .. } => {}
         }
     }
 

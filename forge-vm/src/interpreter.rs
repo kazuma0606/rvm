@@ -3,9 +3,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use forge_compiler::ast::*;
+use forge_compiler::loader::ModuleLoader;
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
@@ -143,6 +145,8 @@ pub struct Interpreter {
     scopes: Vec<HashMap<String, Binding>>,
     /// 型レジストリ（struct 定義・メソッドを保持）
     type_registry: TypeRegistry,
+    /// モジュールローダー（forge run でのみ有効）
+    module_loader: Option<ModuleLoader>,
 }
 
 impl Interpreter {
@@ -150,6 +154,29 @@ impl Interpreter {
         let mut interp = Self {
             scopes: vec![HashMap::new()],
             type_registry: TypeRegistry::default(),
+            module_loader: None,
+        };
+        interp.register_builtins();
+        interp
+    }
+
+    /// ファイルパスを指定してモジュールローダーを初期化する
+    pub fn with_file_path(path: &std::path::Path) -> Self {
+        let mut interp = Self {
+            scopes: vec![HashMap::new()],
+            type_registry: TypeRegistry::default(),
+            module_loader: Some(ModuleLoader::from_file_path(path)),
+        };
+        interp.register_builtins();
+        interp
+    }
+
+    /// プロジェクトルートを指定してモジュールローダーを初期化する
+    pub fn with_project_root(project_root: PathBuf) -> Self {
+        let mut interp = Self {
+            scopes: vec![HashMap::new()],
+            type_registry: TypeRegistry::default(),
+            module_loader: Some(ModuleLoader::new(project_root)),
         };
         interp.register_builtins();
         interp
@@ -363,7 +390,101 @@ impl Interpreter {
             Stmt::TypestateDef { name, states, state_methods, .. } => {
                 self.eval_typestate_def(name.clone(), states.clone(), state_methods.clone())
             }
+            Stmt::UseDecl { path, symbols, .. } => {
+                self.eval_use_decl(path, symbols)
+            }
         }
+    }
+
+    // ── UseDecl の評価 ────────────────────────────────────────────────────
+
+    fn eval_use_decl(&mut self, path: &UsePath, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
+        match path {
+            UsePath::Local(use_path) => {
+                // モジュールローダーが設定されていない場合はエラー
+                let loader = match self.module_loader.as_mut() {
+                    Some(l) => l,
+                    None => {
+                        return Err(RuntimeError::Custom(format!(
+                            "ローカルモジュール '{}' を読み込めません: モジュールローダーが初期化されていません",
+                            use_path
+                        )));
+                    }
+                };
+
+                // モジュールを読み込む
+                let stmts = loader.load(use_path).map_err(|e| {
+                    RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
+                })?;
+
+                // モジュールを別スコープで評価して、エクスポートを取得する
+                let exported = self.eval_module_stmts(&stmts)?;
+
+                // シンボルを現在のスコープにバインド
+                match symbols {
+                    UseSymbols::Single(name, alias) => {
+                        let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                        let value = exported.get(name).cloned().ok_or_else(|| {
+                            RuntimeError::Custom(format!(
+                                "モジュール '{}' にシンボル '{}' が見つかりません",
+                                use_path, name
+                            ))
+                        })?;
+                        self.define(bind_name, value, false);
+                    }
+                    UseSymbols::Multiple(names) => {
+                        for (name, alias) in names {
+                            let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                            let value = exported.get(name).cloned().ok_or_else(|| {
+                                RuntimeError::Custom(format!(
+                                    "モジュール '{}' にシンボル '{}' が見つかりません",
+                                    use_path, name
+                                ))
+                            })?;
+                            self.define(bind_name, value, false);
+                        }
+                    }
+                    UseSymbols::All => {
+                        for (name, value) in exported {
+                            self.define(&name, value, false);
+                        }
+                    }
+                }
+                Ok(Value::Unit)
+            }
+            UsePath::External(_) | UsePath::Stdlib(_) => {
+                // forge run では外部クレートと標準ライブラリはスキップ（警告なし）
+                Ok(Value::Unit)
+            }
+        }
+    }
+
+    /// モジュールの文を別スコープで評価して、定義されたシンボルをマップとして返す
+    fn eval_module_stmts(&mut self, stmts: &[Stmt]) -> Result<HashMap<String, Value>, RuntimeError> {
+        self.push_scope();
+
+        for stmt in stmts {
+            match self.eval_stmt(stmt) {
+                Ok(_) => {}
+                Err(RuntimeError::Return(_)) => {
+                    // モジュールトップレベルでの return は無視
+                }
+                Err(e) => {
+                    self.pop_scope();
+                    return Err(e);
+                }
+            }
+        }
+
+        // 現在のスコープのシンボルをすべて取得
+        let scope = self.scopes.last().cloned().unwrap_or_default();
+        let exported: HashMap<String, Value> = scope
+            .into_iter()
+            .map(|(name, (value, _mutable))| (name, value))
+            .collect();
+
+        self.pop_scope();
+        Ok(exported)
     }
 
     // ── 式の評価 ──────────────────────────────────────────────────────────
@@ -3378,5 +3499,95 @@ conn2.query("SELECT 1")
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("query"), "エラーメッセージに 'query' が含まれていません: {}", err_msg);
+    }
+
+    // ── Phase M-0 tests ───────────────────────────────────────────────────
+
+    /// 一時ファイルを作成してモジュールテストを実行するヘルパー
+    fn run_with_module(main_src: &str, module_path: &str, module_src: &str) -> Result<Value, RuntimeError> {
+        use std::fs;
+        use forge_compiler::parser::parse_source;
+
+        // 一時ディレクトリを作成
+        let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        // モジュールファイルを作成
+        let mod_file = tmp.path().join(module_path);
+        if let Some(parent) = mod_file.parent() {
+            fs::create_dir_all(parent).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        }
+        fs::write(&mod_file, module_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        // main ファイルを作成（project_root の解決のために main.forge を配置）
+        let main_file = tmp.path().join("main.forge");
+        fs::write(&main_file, main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        // インタープリタを初期化（ファイルパスから ModuleLoader を生成）
+        let module = parse_source(main_src)
+            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let mut interp = Interpreter::with_file_path(&main_file);
+        interp.eval(&module)
+    }
+
+    #[test]
+    fn test_use_local_single() {
+        // 単一シンボルのインポートと使用
+        let module_src = r#"
+fn add(a: number, b: number) -> number { a + b }
+fn subtract(a: number, b: number) -> number { a - b }
+"#;
+        let main_src = r#"
+use ./math.add
+add(3, 4)
+"#;
+        let result = run_with_module(main_src, "math.forge", module_src);
+        assert_eq!(result, Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn test_use_local_multiple() {
+        // 複数シンボルのインポート
+        let module_src = r#"
+fn add(a: number, b: number) -> number { a + b }
+fn subtract(a: number, b: number) -> number { a - b }
+"#;
+        let main_src = r#"
+use ./math.{add, subtract}
+add(10, subtract(5, 2))
+"#;
+        let result = run_with_module(main_src, "math.forge", module_src);
+        // subtract(5, 2) = 3, add(10, 3) = 13
+        assert_eq!(result, Ok(Value::Int(13)));
+    }
+
+    #[test]
+    fn test_use_alias() {
+        // `use ./module.add as add_numbers` でエイリアス
+        let module_src = r#"
+fn add(a: number, b: number) -> number { a + b }
+"#;
+        let main_src = r#"
+use ./math.add as add_numbers
+add_numbers(5, 6)
+"#;
+        let result = run_with_module(main_src, "math.forge", module_src);
+        assert_eq!(result, Ok(Value::Int(11)));
+    }
+
+    #[test]
+    fn test_use_wildcard() {
+        // `use ./module.*` で全シンボルをインポート
+        let module_src = r#"
+fn add(a: number, b: number) -> number { a + b }
+fn multiply(a: number, b: number) -> number { a * b }
+"#;
+        let main_src = r#"
+use ./math.*
+multiply(add(2, 3), 4)
+"#;
+        let result = run_with_module(main_src, "math.forge", module_src);
+        // add(2, 3) = 5, multiply(5, 4) = 20
+        assert_eq!(result, Ok(Value::Int(20)));
     }
 }

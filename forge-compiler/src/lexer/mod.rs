@@ -290,6 +290,10 @@ impl Lexer {
                         "mixin"     => TokenKind::Mixin,
                         "data"      => TokenKind::Data,
                         "typestate" => TokenKind::Typestate,
+                        "use"       => TokenKind::Use,
+                        "pub"       => TokenKind::Pub,
+                        "as"        => TokenKind::As,
+                        "when"      => TokenKind::When,
                         _           => TokenKind::Ident(ident),
                     };
                     tokens.push(Token { kind, span });

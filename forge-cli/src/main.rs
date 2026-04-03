@@ -89,7 +89,8 @@ fn run_file(path: &str) {
         }
     };
 
-    let mut interp = Interpreter::new();
+    let file_path = std::path::Path::new(path);
+    let mut interp = Interpreter::with_file_path(file_path);
     if let Err(e) = interp.eval(&module) {
         eprintln!("実行エラー: {}", e);
         std::process::exit(1);
