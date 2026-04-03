@@ -119,6 +119,8 @@ impl TypeChecker {
             Stmt::TraitDef { .. } | Stmt::MixinDef { .. } | Stmt::ImplTrait { .. } => {}
             // T-4: data キーワードも現在スキップ
             Stmt::DataDef { .. } => {}
+            // T-5: typestate も現在スキップ
+            Stmt::TypestateDef { .. } => {}
         }
     }
 

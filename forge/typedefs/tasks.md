@@ -182,24 +182,24 @@
 
 ### T-5-A: AST 拡張
 
-- [ ] `Stmt::TypestateDef { name, states, transitions }` を追加
-- [ ] `TypestateState { name, methods }` を追加
+- [x] `Stmt::TypestateDef { name, states, transitions }` を追加
+- [x] `TypestateState { name, methods }` を追加
 
 ### T-5-B: パーサー拡張
 
-- [ ] `typestate Name { states: [...], StateName { fn ... } }` のパース
-- [ ] `Name::new<StateName>()` のパース
+- [x] `typestate Name { states: [...], StateName { fn ... } }` のパース
+- [x] `Name::new<StateName>()` のパース
 
 ### T-5-C: インタープリタ拡張
 
-- [ ] `Value::Typestate { type_name, current_state, inner }` を追加
-- [ ] `Name::new<State>()` でインスタンス生成
-- [ ] メソッド呼び出し時の状態チェック（不正な遷移はランタイムエラー）
-- [ ] 状態遷移後に新しい `Value::Typestate` を返す
+- [x] `Value::Typestate { type_name, current_state, inner }` を追加
+- [x] `Name::new<State>()` でインスタンス生成
+- [x] メソッド呼び出し時の状態チェック（不正な遷移はランタイムエラー）
+- [x] 状態遷移後に新しい `Value::Typestate` を返す
 
 ### T-5-D: テスト
 
-- [ ] テスト: `test_typestate_basic` — 正常な状態遷移
-- [ ] テスト: `test_typestate_invalid` — 不正な状態でのメソッド呼び出しエラー
-- [ ] E2E テスト: `typestate_connection.forge`
-- [ ] E2E テスト: `typestate_door.forge`
+- [x] テスト: `test_typestate_basic` — 正常な状態遷移
+- [x] テスト: `test_typestate_invalid` — 不正な状態でのメソッド呼び出しエラー
+- [x] E2E テスト: `typestate_connection.forge`
+- [x] E2E テスト: `typestate_door.forge`

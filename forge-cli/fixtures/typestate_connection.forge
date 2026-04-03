@@ -1,0 +1,27 @@
+typestate Connection {
+    states: [Disconnected, Connected, Authenticated]
+
+    Disconnected {
+        fn connect(url: string) -> Connected!
+    }
+
+    Connected {
+        fn auth(token: string) -> Authenticated!
+        fn disconnect() -> Disconnected
+    }
+
+    Authenticated {
+        fn query(sql: string) -> string!
+        fn disconnect() -> Disconnected
+    }
+}
+
+fn main() {
+    let conn  = Connection::new<Disconnected>()
+    let conn2 = conn.connect("localhost")?
+    let conn3 = conn2.auth("secret")?
+    let rows  = conn3.query("SELECT 1")?
+    println(rows)
+}
+
+main()

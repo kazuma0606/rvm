@@ -1,0 +1,26 @@
+typestate Door {
+    states: [Closed, Open, Locked]
+
+    Closed {
+        fn open() -> Open
+        fn lock() -> Locked
+    }
+
+    Open {
+        fn close() -> Closed
+    }
+
+    Locked {
+        fn unlock(key: string) -> Closed
+    }
+}
+
+fn main() {
+    let door   = Door::new<Closed>()
+    let opened = door.open()
+    let closed = opened.close()
+    let locked = closed.lock()
+    println("done")
+}
+
+main()

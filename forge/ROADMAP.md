@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
-> 最終更新: 2026-03-31
-> テスト総数: 154本（全通過）
+> 最終更新: 2026-04-04
+> テスト総数: 199本（全通過）
 
 ---
 
@@ -44,6 +44,16 @@
 | B-4: コレクション | Vec + イテレータチェーン変換 | 2本（snapshot）|
 | ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 9本 |
 
+### 型定義（forge run）✅
+
+| 機能 | 詳細 | テスト数 |
+|---|---|---|
+| struct | 定義・impl・@derive(Debug/Clone/Eq/Hash/Ord/Default/Accessor/Singleton) | T-1: 11本 |
+| enum | Unit/Tuple/Struct バリアント・match パターンマッチ | T-2: 6本 |
+| trait / mixin | 純粋契約・デフォルト実装・impl Trait for Type | T-3: 7本 |
+| data | 全 derive 自動付与・validate ブロック | T-4: 5本 |
+| typestate | 状態遷移・ランタイム状態チェック | T-5: 4本 |
+
 ### ツール・周辺 ✅
 
 | 機能 | 詳細 |
@@ -55,17 +65,7 @@
 
 ## 設計済み・未実装 📐
 
-### 型定義（struct / enum / trait / mixin / data / typestate）📐
-
-- **参照**: `forge/typedefs/spec.md` / `forge/typedefs/plan.md` / `forge/typedefs/tasks.md`
-- **内容**:
-  - `struct` 定義・impl・`@derive(Debug/Clone/Eq/Accessor/Singleton)`
-  - `enum` データなし・タプル・名前付きフィールドバリアント・match
-  - `trait`（純粋契約）/ `mixin`（デフォルト実装）/ `impl Trait for Type`
-  - `data`（純粋データモデル・全 derive 自動付与・`validate` ブロック）
-  - `typestate`（型状態パターン・コンパイル時状態遷移検証）
-- **次のアクション**: `forge/typedefs/tasks.md` の T-1 から実装着手
-- **ブロッカー**: なし（今すぐ着手可能）
+### モジュールシステム 📐
 
 ### モジュールシステム 📐
 

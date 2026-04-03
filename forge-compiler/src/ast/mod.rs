@@ -93,6 +93,20 @@ pub enum Stmt {
         validate_rules: Vec<ValidateRule>,
         span: Span,
     },
+    /// typestate Name { states: [...], StateName { fn ... } ... }
+    TypestateDef {
+        name: String,
+        states: Vec<String>,
+        state_methods: Vec<TypestateState>,
+        span: Span,
+    },
+}
+
+/// typestate の各状態定義（状態名とその状態で使えるメソッド）
+#[derive(Debug, Clone)]
+pub struct TypestateState {
+    pub name: String,
+    pub methods: Vec<FnDef>,
 }
 
 /// バリデーションルール: フィールドに対する制約の集合

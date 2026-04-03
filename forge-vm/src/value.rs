@@ -77,6 +77,12 @@ pub enum Value {
         variant: String,
         data: EnumData,
     },
+    /// typestate インスタンス
+    Typestate {
+        type_name: String,
+        current_state: String,
+        fields: Rc<RefCell<HashMap<String, Value>>>,
+    },
 }
 
 impl PartialEq for Value {
@@ -97,6 +103,10 @@ impl PartialEq for Value {
             (Value::Enum { type_name: ta, variant: va, data: da },
              Value::Enum { type_name: tb, variant: vb, data: db }) => {
                 ta == tb && va == vb && da == db
+            }
+            (Value::Typestate { type_name: ta, current_state: sa, fields: fa },
+             Value::Typestate { type_name: tb, current_state: sb, fields: fb }) => {
+                ta == tb && sa == sb && *fa.borrow() == *fb.borrow()
             }
             // クロージャ・ネイティブ関数は参照等価性なし
             _ => false,
@@ -154,6 +164,17 @@ impl Hash for Value {
                             v.hash(state);
                         }
                     }
+                }
+            }
+            Value::Typestate { type_name, current_state, fields } => {
+                type_name.hash(state);
+                current_state.hash(state);
+                let borrow = fields.borrow();
+                let mut pairs: Vec<(&String, &Value)> = borrow.iter().collect();
+                pairs.sort_by_key(|(k, _)| k.as_str());
+                for (k, v) in pairs {
+                    k.hash(state);
+                    v.hash(state);
                 }
             }
             // クロージャ・ネイティブ関数はハッシュ不可 → ポインタアドレスで代替
@@ -224,6 +245,9 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, " }}")
             }
+            Value::Typestate { type_name, current_state, .. } => {
+                write!(f, "{}<{}>", type_name, current_state)
+            }
         }
     }
 }
@@ -244,14 +268,16 @@ impl Value {
             Value::NativeFunction(_) => "function",
             Value::Struct { .. }     => "struct",
             Value::Enum { .. }       => "enum",
+            Value::Typestate { .. }  => "typestate",
         }
     }
 
     /// struct / enum の場合、型名を動的に返す
     pub fn dynamic_type_name(&self) -> String {
         match self {
-            Value::Struct { type_name, .. } => type_name.clone(),
-            Value::Enum { type_name, .. }   => type_name.clone(),
+            Value::Struct { type_name, .. }    => type_name.clone(),
+            Value::Enum { type_name, .. }      => type_name.clone(),
+            Value::Typestate { type_name, .. } => type_name.clone(),
             _ => self.type_name().to_string(),
         }
     }
@@ -287,6 +313,17 @@ impl Value {
                     type_name: type_name.clone(),
                     variant: variant.clone(),
                     data: cloned_data,
+                }
+            }
+            Value::Typestate { type_name, current_state, fields } => {
+                let cloned: HashMap<String, Value> = fields.borrow()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.deep_clone()))
+                    .collect();
+                Value::Typestate {
+                    type_name: type_name.clone(),
+                    current_state: current_state.clone(),
+                    fields: Rc::new(RefCell::new(cloned)),
                 }
             }
             other => other.clone(),

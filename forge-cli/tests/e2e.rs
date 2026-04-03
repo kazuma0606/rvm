@@ -679,3 +679,23 @@ fn e2e_data_validate() {
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "valid: alice\ninvalid: username: length\n");
 }
+
+// ── Phase T-5: typestate E2E テスト ─────────────────────────────────────
+
+#[test]
+fn e2e_typestate_connection() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typestate_connection.forge")
+    ).expect("typestate_connection.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "SELECT 1\n");
+}
+
+#[test]
+fn e2e_typestate_door() {
+    let src = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typestate_door.forge")
+    ).expect("typestate_door.forge が見つかりません");
+    let out = run_forge(&src).unwrap();
+    assert_eq!(out, "done\n");
+}

@@ -56,13 +56,40 @@ struct MixinInfo {
     methods: HashMap<String, FnDef>,
 }
 
-/// 型レジストリ（struct / enum / trait / mixin 定義とメソッドを格納）
+/// typestate の各状態が持つメソッド情報
+#[derive(Debug, Clone)]
+struct TypestateStateInfo {
+    /// メソッド名 → (戻り値の状態名, 戻り値が Result か, パラメータリスト)
+    /// 戻り値の状態名が None の場合は通常の値を返す
+    methods: HashMap<String, TypestateMethodInfo>,
+}
+
+/// typestate メソッドの情報
+#[derive(Debug, Clone)]
+struct TypestateMethodInfo {
+    params: Vec<Param>,
+    /// 遷移先状態名（None = 状態遷移なし、通常値を返す）
+    next_state: Option<String>,
+    /// 戻り値が Result 型か（`!` 付き）
+    is_result: bool,
+}
+
+/// typestate 型の定義情報
+#[derive(Debug, Clone)]
+struct TypestateInfo {
+    states: Vec<String>,
+    /// 状態名 → その状態のメソッド情報
+    state_infos: HashMap<String, TypestateStateInfo>,
+}
+
+/// 型レジストリ（struct / enum / trait / mixin / typestate 定義とメソッドを格納）
 #[derive(Default)]
 struct TypeRegistry {
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
     traits: HashMap<String, TraitInfo>,
     mixins: HashMap<String, MixinInfo>,
+    typestates: HashMap<String, TypestateInfo>,
     /// Singleton インスタンスキャッシュ
     singletons: HashMap<String, Value>,
 }
@@ -333,6 +360,9 @@ impl Interpreter {
             Stmt::DataDef { name, fields, validate_rules, .. } => {
                 self.eval_data_def(name.clone(), fields.clone(), validate_rules.clone())
             }
+            Stmt::TypestateDef { name, states, state_methods, .. } => {
+                self.eval_typestate_def(name.clone(), states.clone(), state_methods.clone())
+            }
         }
     }
 
@@ -599,6 +629,14 @@ impl Interpreter {
                     .collect::<Result<_, _>>()?;
                 return self.eval_enum_static_method(&type_name_cloned, method, arg_vals);
             }
+            // typestate の静的メソッド呼び出し（new<State>() = new("StateName") として渡される）
+            if is_type_name_str(type_name) && self.type_registry.typestates.contains_key(type_name.as_str()) {
+                let type_name_cloned = type_name.clone();
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return self.eval_typestate_static_method(&type_name_cloned, method, arg_vals);
+            }
         }
 
         let obj = self.eval_expr(object)?;
@@ -615,6 +653,11 @@ impl Interpreter {
             Value::Enum { ref type_name, .. } => {
                 let type_name_cloned = type_name.clone();
                 self.eval_enum_method(obj.clone(), &type_name_cloned, method, arg_vals)
+            }
+            Value::Typestate { ref type_name, ref current_state, .. } => {
+                let type_name_cloned = type_name.clone();
+                let current_state_cloned = current_state.clone();
+                self.eval_typestate_method(obj.clone(), &type_name_cloned, &current_state_cloned, method, arg_vals)
             }
             Value::Closure { .. } | Value::NativeFunction(_) => {
                 self.call_value(obj, arg_vals)
@@ -1128,6 +1171,172 @@ impl Interpreter {
         }
 
         Ok(Value::Unit)
+    }
+
+    // ── T-5-C: typestate サポート ──────────────────────────────────────────
+
+    fn eval_typestate_def(
+        &mut self,
+        name: String,
+        states: Vec<String>,
+        state_methods: Vec<forge_compiler::ast::TypestateState>,
+    ) -> Result<Value, RuntimeError> {
+        let mut state_infos: HashMap<String, TypestateStateInfo> = HashMap::new();
+
+        for state in &state_methods {
+            let mut methods: HashMap<String, TypestateMethodInfo> = HashMap::new();
+            for method in &state.methods {
+                let (next_state, is_result) = extract_transition_info(&method.return_type);
+                methods.insert(method.name.clone(), TypestateMethodInfo {
+                    params: method.params.clone(),
+                    next_state,
+                    is_result,
+                });
+            }
+            state_infos.insert(state.name.clone(), TypestateStateInfo { methods });
+        }
+
+        self.type_registry.typestates.insert(name, TypestateInfo { states, state_infos });
+        Ok(Value::Unit)
+    }
+
+    /// `TypestateName::new("StateName")` の静的メソッド呼び出し
+    fn eval_typestate_static_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        if method == "new" {
+            // 最初の引数が初期状態名の文字列
+            let initial_state = match args.first() {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => return Err(RuntimeError::Custom(format!(
+                    "{}::new<State>() の State は文字列を期待しましたが {} でした",
+                    type_name, v.type_name()
+                ))),
+                None => return Err(RuntimeError::Custom(format!(
+                    "{}::new<State>() には状態名が必要です", type_name
+                ))),
+            };
+
+            // 状態が typestate に定義されているか確認
+            let valid = self.type_registry.typestates
+                .get(type_name)
+                .map(|info| info.states.contains(&initial_state))
+                .unwrap_or(false);
+
+            if !valid {
+                return Err(RuntimeError::Custom(format!(
+                    "状態 '{}' は typestate '{}' に定義されていません",
+                    initial_state, type_name
+                )));
+            }
+
+            return Ok(Value::Typestate {
+                type_name: type_name.to_string(),
+                current_state: initial_state,
+                fields: Rc::new(RefCell::new(HashMap::new())),
+            });
+        }
+
+        Err(RuntimeError::Custom(format!(
+            "typestate '{}' に静的メソッド '{}' は存在しません", type_name, method
+        )))
+    }
+
+    /// typestate インスタンスに対するメソッド呼び出し
+    fn eval_typestate_method(
+        &mut self,
+        self_val: Value,
+        type_name: &str,
+        current_state: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // 現在の状態でこのメソッドが使えるか確認
+        let method_info = self.type_registry.typestates
+            .get(type_name)
+            .and_then(|info| info.state_infos.get(current_state))
+            .and_then(|state_info| state_info.methods.get(method))
+            .cloned();
+
+        match method_info {
+            None => {
+                // 他の状態に存在するか確認してエラーメッセージを充実させる
+                let available_in_states: Vec<String> = self.type_registry.typestates
+                    .get(type_name)
+                    .map(|info| {
+                        info.state_infos.iter()
+                            .filter(|(_, si)| si.methods.contains_key(method))
+                            .map(|(s, _)| s.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if available_in_states.is_empty() {
+                    return Err(RuntimeError::Custom(format!(
+                        "typestate '{}' にメソッド '{}' は存在しません",
+                        type_name, method
+                    )));
+                } else {
+                    return Err(RuntimeError::Custom(format!(
+                        "'{}' 状態では '{}' は使用できません（使用可能な状態: {}）",
+                        current_state, method, available_in_states.join(", ")
+                    )));
+                }
+            }
+            Some(info) => {
+                // 引数の数チェック
+                if args.len() != info.params.len() {
+                    return Err(RuntimeError::Custom(format!(
+                        "メソッド '{}' は {} 個の引数を期待しましたが {} 個渡されました",
+                        method, info.params.len(), args.len()
+                    )));
+                }
+
+                // 遷移先状態がある場合は Value::Typestate を新しい状態で返す
+                let existing_fields = match &self_val {
+                    Value::Typestate { fields, .. } => Rc::clone(fields),
+                    _ => Rc::new(RefCell::new(HashMap::new())),
+                };
+
+                // 引数をフィールドとして保存（状態ごとのデータ保持）
+                {
+                    let mut field_map = existing_fields.borrow_mut();
+                    for (param, arg) in info.params.iter().zip(args.iter()) {
+                        field_map.insert(param.name.clone(), arg.clone());
+                    }
+                }
+
+                match info.next_state {
+                    Some(ref next_state) => {
+                        let new_val = Value::Typestate {
+                            type_name: type_name.to_string(),
+                            current_state: next_state.clone(),
+                            fields: existing_fields,
+                        };
+                        if info.is_result {
+                            Ok(Value::Result(Ok(Box::new(new_val))))
+                        } else {
+                            Ok(new_val)
+                        }
+                    }
+                    None => {
+                        // 状態遷移なし（string! などの通常値を返すメソッド）
+                        // args の最初の引数をそのまま返すか、フィールドから取得
+                        if info.is_result {
+                            // 通常値を Result で返す: ok("dummy") 相当
+                            let ret_val = args.into_iter().next().unwrap_or(Value::Unit);
+                            Ok(Value::Result(Ok(Box::new(ret_val))))
+                        } else {
+                            let ret_val = args.into_iter().next().unwrap_or(Value::Unit);
+                            Ok(ret_val)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn register_validate_method(
@@ -1850,6 +2059,25 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeErr
         _ => Err(RuntimeError::Custom(format!(
             "比較できない型: {} と {}", a.type_name(), b.type_name()
         ))),
+    }
+}
+
+/// typestate メソッドの戻り値型から遷移先状態名と Result かどうかを抽出する
+/// - `-> Connected!`    → (Some("Connected"), true)
+/// - `-> Disconnected`  → (Some("Disconnected"), false)
+/// - `-> string!`       → (None, true)
+/// - `-> string`        → (None, false)
+fn extract_transition_info(return_type: &Option<TypeAnn>) -> (Option<String>, bool) {
+    match return_type {
+        None => (None, false),
+        Some(TypeAnn::Named(state_name)) => (Some(state_name.clone()), false),
+        Some(TypeAnn::Result(inner)) => {
+            match inner.as_ref() {
+                TypeAnn::Named(state_name) => (Some(state_name.clone()), true),
+                _ => (None, true),
+            }
+        }
+        _ => (None, false),
     }
 }
 
@@ -3085,5 +3313,70 @@ match bad.validate() {
         let result = run(src);
         // username の length チェックで失敗（最初の違反のみ）
         assert_eq!(result, Ok(Value::String("username: length".to_string())));
+    }
+
+    // ── Phase T-5: typestate テスト ──────────────────────────────────────
+
+    #[test]
+    fn test_typestate_basic() {
+        // 正常な状態遷移: Disconnected → Connected → Authenticated → query
+        let src = r#"
+typestate Connection {
+    states: [Disconnected, Connected, Authenticated]
+
+    Disconnected {
+        fn connect(url: string) -> Connected!
+    }
+
+    Connected {
+        fn auth(token: string) -> Authenticated!
+        fn disconnect() -> Disconnected
+    }
+
+    Authenticated {
+        fn query(sql: string) -> string!
+        fn disconnect() -> Disconnected
+    }
+}
+
+let conn  = Connection::new<Disconnected>()
+let conn2 = conn.connect("localhost")?
+let conn3 = conn2.auth("secret")?
+let rows  = conn3.query("SELECT 1")?
+rows
+"#;
+        let result = run(src);
+        assert_eq!(result, Ok(Value::String("SELECT 1".to_string())));
+    }
+
+    #[test]
+    fn test_typestate_invalid() {
+        // 不正な状態でのメソッド呼び出しがランタイムエラーになる
+        let src = r#"
+typestate Connection {
+    states: [Disconnected, Connected, Authenticated]
+
+    Disconnected {
+        fn connect(url: string) -> Connected!
+    }
+
+    Connected {
+        fn auth(token: string) -> Authenticated!
+    }
+
+    Authenticated {
+        fn query(sql: string) -> string!
+    }
+}
+
+let conn  = Connection::new<Disconnected>()
+let conn2 = conn.connect("localhost")?
+conn2.query("SELECT 1")
+"#;
+        let result = run(src);
+        // Connected 状態では query は使えない → RuntimeError
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("query"), "エラーメッセージに 'query' が含まれていません: {}", err_msg);
     }
 }

@@ -188,8 +188,9 @@ impl Parser {
             TokenKind::Impl   => self.parse_impl_or_impl_trait(),
             TokenKind::Trait  => self.parse_trait_def(),
             TokenKind::Mixin  => self.parse_mixin_def(),
-            TokenKind::At     => self.parse_annotated_stmt(),
-            TokenKind::Data   => self.parse_data_def(),
+            TokenKind::At       => self.parse_annotated_stmt(),
+            TokenKind::Data     => self.parse_data_def(),
+            TokenKind::Typestate => self.parse_typestate_def(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
@@ -455,10 +456,28 @@ impl Parser {
                 }
                 TokenKind::ColonColon => {
                     // TypeName::method() / TypeName::Variant / TypeName::Variant(expr) / TypeName::Variant { field: expr }
+                    // TypeName::new<StateName>() — typestate インスタンス生成
                     let span = self.current_span();
                     self.advance(); // consume '::'
                     let (name, _) = self.expect_name()?;
-                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                    // TypeName::new<StateName>() — typestate 専用構文
+                    if matches!(self.peek_kind(), TokenKind::Lt) {
+                        self.advance(); // consume '<'
+                        let (state_name, state_span) = self.expect_ident()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        self.expect_token(&TokenKind::LParen)?;
+                        let extra_args = self.parse_call_args()?;
+                        self.expect_token(&TokenKind::RParen)?;
+                        // state_name を文字列リテラル引数として MethodCall に変換
+                        let mut all_args = vec![Expr::Literal(Literal::String(state_name), state_span)];
+                        all_args.extend(extra_args);
+                        expr = Expr::MethodCall {
+                            object: Box::new(expr),
+                            method: name,
+                            args: all_args,
+                            span,
+                        };
+                    } else if matches!(self.peek_kind(), TokenKind::LParen) {
                         // TypeName::Variant(expr, ...) または TypeName::method(args)
                         // enum_name が大文字かどうか、Variant が大文字かどうかで判定
                         let is_enum_variant = if let Expr::Ident(ref type_name, _) = expr {
@@ -707,8 +726,9 @@ impl Parser {
                 TokenKind::Impl   => stmts.push(self.parse_impl_or_impl_trait()?),
                 TokenKind::Trait  => stmts.push(self.parse_trait_def()?),
                 TokenKind::Mixin  => stmts.push(self.parse_mixin_def()?),
-                TokenKind::At     => stmts.push(self.parse_annotated_stmt()?),
-                TokenKind::Data   => stmts.push(self.parse_data_def()?),
+                TokenKind::At       => stmts.push(self.parse_annotated_stmt()?),
+                TokenKind::Data     => stmts.push(self.parse_data_def()?),
+                TokenKind::Typestate => stmts.push(self.parse_typestate_def()?),
                 _ => {
                     let expr = self.parse_expr()?;
                     if matches!(self.peek_kind(), TokenKind::Semicolon) {
@@ -1414,6 +1434,105 @@ impl Parser {
         };
 
         Ok(Stmt::DataDef { name, fields, validate_rules, span })
+    }
+
+    // ── T-5-B: typestate キーワードのパース ──────────────────────────────
+
+    fn parse_typestate_def(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Typestate)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut states: Vec<String> = Vec::new();
+        let mut state_methods: Vec<TypestateState> = Vec::new();
+
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+
+            // `states: [State1, State2, ...]` の宣言
+            if let TokenKind::Ident(ref kw) = self.peek_kind().clone() {
+                if kw == "states" {
+                    self.advance(); // consume 'states'
+                    self.expect_token(&TokenKind::Colon)?;
+                    self.expect_token(&TokenKind::LBracket)?;
+                    loop {
+                        self.skip_sep();
+                        if matches!(self.peek_kind(), TokenKind::RBracket | TokenKind::Eof) {
+                            break;
+                        }
+                        let (state_name, _) = self.expect_ident()?;
+                        states.push(state_name);
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect_token(&TokenKind::RBracket)?;
+                    continue;
+                }
+            }
+
+            // `StateName { fn ... }` の状態メソッドブロック
+            let (state_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::LBrace)?;
+
+            let mut methods: Vec<FnDef> = Vec::new();
+            loop {
+                self.skip_sep();
+                if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                if matches!(self.peek_kind(), TokenKind::Fn) {
+                    methods.push(self.parse_typestate_method_decl()?);
+                } else {
+                    break;
+                }
+            }
+            self.expect_token(&TokenKind::RBrace)?;
+            state_methods.push(TypestateState { name: state_name, methods });
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::TypestateDef { name, states, state_methods, span })
+    }
+
+    /// typestate 内のメソッド宣言をパース（ボディなし）
+    /// `fn name(params) -> ReturnType` の形式
+    fn parse_typestate_method_decl(&mut self) -> Result<FnDef, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let (param_name, param_span) = self.expect_ident()?;
+            let type_ann = if matches!(self.peek_kind(), TokenKind::Colon) {
+                self.advance();
+                Some(self.parse_type_ann()?)
+            } else {
+                None
+            };
+            params.push(Param { name: param_name, type_ann, span: param_span });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RParen)?;
+
+        let return_type = if matches!(self.peek_kind(), TokenKind::ThinArrow) {
+            self.advance();
+            Some(self.parse_type_ann()?)
+        } else {
+            None
+        };
+
+        // ボディなし: 空のブロック式をダミーボディとして使用
+        let body = Expr::Block { stmts: vec![], tail: None, span: span.clone() };
+        Ok(FnDef { name, params, return_type, body: Box::new(body), has_state_self: false, span })
     }
 
     /// validate { field: constraint, constraint, ... } をパース

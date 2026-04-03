@@ -96,6 +96,8 @@ impl CodeGenerator {
             Stmt::TraitDef { .. } | Stmt::MixinDef { .. } | Stmt::ImplTrait { .. } => false,
             // T-4: data キーワードも現時点ではトランスパイル非対応
             Stmt::DataDef { .. } => false,
+            // T-5: typestate も現時点ではトランスパイル非対応
+            Stmt::TypestateDef { .. } => false,
         }
     }
 
@@ -206,6 +208,10 @@ impl CodeGenerator {
             // T-4: data は現時点ではトランスパイル非対応（スタブ）
             Stmt::DataDef { name, .. } => {
                 format!("{}// data {} (transpile pending)\n", self.indent_str(), name)
+            }
+            // T-5: typestate は現時点ではトランスパイル非対応（スタブ）
+            Stmt::TypestateDef { name, .. } => {
+                format!("{}// typestate {} (transpile pending)\n", self.indent_str(), name)
             }
         }
     }
