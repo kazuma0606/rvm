@@ -418,13 +418,20 @@ impl Interpreter {
                 })?;
 
                 // モジュールを別スコープで評価して、エクスポートを取得する
-                let exported = self.eval_module_stmts(&stmts)?;
+                let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
 
                 // シンボルを現在のスコープにバインド
                 match symbols {
                     UseSymbols::Single(name, alias) => {
+                        // pub チェック: pub でないシンボルはエラー
+                        if !pub_names.contains(name.as_str()) {
+                            return Err(RuntimeError::Custom(format!(
+                                "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                                name, use_path
+                            )));
+                        }
                         let bind_name = alias.as_deref().unwrap_or(name.as_str());
-                        let value = exported.get(name).cloned().ok_or_else(|| {
+                        let value = all_symbols.get(name).cloned().ok_or_else(|| {
                             RuntimeError::Custom(format!(
                                 "モジュール '{}' にシンボル '{}' が見つかりません",
                                 use_path, name
@@ -434,8 +441,15 @@ impl Interpreter {
                     }
                     UseSymbols::Multiple(names) => {
                         for (name, alias) in names {
+                            // pub チェック
+                            if !pub_names.contains(name.as_str()) {
+                                return Err(RuntimeError::Custom(format!(
+                                    "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                                    name, use_path
+                                )));
+                            }
                             let bind_name = alias.as_deref().unwrap_or(name.as_str());
-                            let value = exported.get(name).cloned().ok_or_else(|| {
+                            let value = all_symbols.get(name).cloned().ok_or_else(|| {
                                 RuntimeError::Custom(format!(
                                     "モジュール '{}' にシンボル '{}' が見つかりません",
                                     use_path, name
@@ -445,8 +459,11 @@ impl Interpreter {
                         }
                     }
                     UseSymbols::All => {
-                        for (name, value) in exported {
-                            self.define(&name, value, false);
+                        // ワイルドカード: pub シンボルのみをインポート
+                        for (name, value) in all_symbols {
+                            if pub_names.contains(&name) {
+                                self.define(&name, value, false);
+                            }
                         }
                     }
                 }
@@ -459,9 +476,26 @@ impl Interpreter {
         }
     }
 
-    /// モジュールの文を別スコープで評価して、定義されたシンボルをマップとして返す
-    fn eval_module_stmts(&mut self, stmts: &[Stmt]) -> Result<HashMap<String, Value>, RuntimeError> {
+    /// モジュールの文を別スコープで評価して、定義されたシンボルをマップとして返す。
+    /// 戻り値は `(全シンボルマップ, pub シンボル名セット)` のタプル。
+    fn eval_module_stmts(&mut self, stmts: &[Stmt]) -> Result<(HashMap<String, Value>, std::collections::HashSet<String>), RuntimeError> {
         self.push_scope();
+
+        // pub シンボル名を収集（AST から静的に判断）
+        let mut pub_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Fn     { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::Let    { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::Const  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::StructDef { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::EnumDef   { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::DataDef   { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::TraitDef  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::MixinDef  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                _ => {}
+            }
+        }
 
         for stmt in stmts {
             match self.eval_stmt(stmt) {
@@ -478,13 +512,13 @@ impl Interpreter {
 
         // 現在のスコープのシンボルをすべて取得
         let scope = self.scopes.last().cloned().unwrap_or_default();
-        let exported: HashMap<String, Value> = scope
+        let all_symbols: HashMap<String, Value> = scope
             .into_iter()
             .map(|(name, (value, _mutable))| (name, value))
             .collect();
 
         self.pop_scope();
-        Ok(exported)
+        Ok((all_symbols, pub_names))
     }
 
     // ── 式の評価 ──────────────────────────────────────────────────────────
@@ -3534,8 +3568,8 @@ conn2.query("SELECT 1")
     fn test_use_local_single() {
         // 単一シンボルのインポートと使用
         let module_src = r#"
-fn add(a: number, b: number) -> number { a + b }
-fn subtract(a: number, b: number) -> number { a - b }
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn subtract(a: number, b: number) -> number { a - b }
 "#;
         let main_src = r#"
 use ./math.add
@@ -3549,8 +3583,8 @@ add(3, 4)
     fn test_use_local_multiple() {
         // 複数シンボルのインポート
         let module_src = r#"
-fn add(a: number, b: number) -> number { a + b }
-fn subtract(a: number, b: number) -> number { a - b }
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn subtract(a: number, b: number) -> number { a - b }
 "#;
         let main_src = r#"
 use ./math.{add, subtract}
@@ -3565,7 +3599,7 @@ add(10, subtract(5, 2))
     fn test_use_alias() {
         // `use ./module.add as add_numbers` でエイリアス
         let module_src = r#"
-fn add(a: number, b: number) -> number { a + b }
+pub fn add(a: number, b: number) -> number { a + b }
 "#;
         let main_src = r#"
 use ./math.add as add_numbers
@@ -3579,8 +3613,8 @@ add_numbers(5, 6)
     fn test_use_wildcard() {
         // `use ./module.*` で全シンボルをインポート
         let module_src = r#"
-fn add(a: number, b: number) -> number { a + b }
-fn multiply(a: number, b: number) -> number { a * b }
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn multiply(a: number, b: number) -> number { a * b }
 "#;
         let main_src = r#"
 use ./math.*
@@ -3589,5 +3623,45 @@ multiply(add(2, 3), 4)
         let result = run_with_module(main_src, "math.forge", module_src);
         // add(2, 3) = 5, multiply(5, 4) = 20
         assert_eq!(result, Ok(Value::Int(20)));
+    }
+
+    // ── Phase M-1 tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_pub_import_success() {
+        // pub シンボルのインポート成功
+        let module_src = r#"
+pub fn public_fn() -> string { "I am public" }
+fn private_fn() -> string { "I am private" }
+pub const PUBLIC_CONST: number = 42
+const PRIVATE_CONST: number = 99
+"#;
+        let main_src = r#"
+use ./secret.{public_fn, PUBLIC_CONST}
+public_fn()
+"#;
+        let result = run_with_module(main_src, "secret.forge", module_src);
+        assert_eq!(result, Ok(Value::String("I am public".to_string())));
+    }
+
+    #[test]
+    fn test_pub_import_private_error() {
+        // 非公開シンボルのインポートでエラー
+        let module_src = r#"
+pub fn public_fn() -> string { "I am public" }
+fn private_fn() -> string { "I am private" }
+"#;
+        let main_src = r#"
+use ./secret.private_fn
+private_fn()
+"#;
+        let result = run_with_module(main_src, "secret.forge", module_src);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("private_fn") && err_msg.contains("非公開"),
+            "エラーメッセージに 'private_fn' と '非公開' が含まれていません: {}",
+            err_msg
+        );
     }
 }

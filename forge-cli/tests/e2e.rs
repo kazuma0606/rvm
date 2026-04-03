@@ -723,3 +723,13 @@ fn e2e_modules_basic() {
     let out = run_forge_file(main_path).unwrap();
     assert_eq!(out, "7\n7\nHello, World!\n");
 }
+
+#[test]
+fn e2e_modules_pub_visibility() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/pub_visibility/main.forge"
+    );
+    let out = run_forge_file(main_path).unwrap();
+    assert_eq!(out, "I am public\n42\n");
+}

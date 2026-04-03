@@ -1,0 +1,8 @@
+use ./private/secret.{public_fn, PUBLIC_CONST}
+
+fn main() {
+    println(public_fn())
+    println(PUBLIC_CONST)
+}
+
+main()

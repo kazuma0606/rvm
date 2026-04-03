@@ -16,6 +16,8 @@ pub enum LoadError {
     Io { path: PathBuf, message: String },
     /// パースエラー
     Parse { path: PathBuf, message: String },
+    /// 非公開シンボルへのアクセス
+    PrivateSymbol { name: String, path: String },
 }
 
 impl std::fmt::Display for LoadError {
@@ -29,6 +31,13 @@ impl std::fmt::Display for LoadError {
             }
             LoadError::Parse { path, message } => {
                 write!(f, "パースエラー '{}': {}", path.display(), message)
+            }
+            LoadError::PrivateSymbol { name, path } => {
+                write!(
+                    f,
+                    "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                    name, path
+                )
             }
         }
     }

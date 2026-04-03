@@ -59,26 +59,26 @@
 
 ### M-1-A: AST 拡張
 
-- [ ] `Stmt::FnDef` に `is_pub: bool` フラグを追加
-- [ ] `Stmt::Let` / `Stmt::Const` に `is_pub: bool` フラグを追加
-- [ ] `Stmt::StructDef` / `Stmt::EnumDef` / `Stmt::DataDef` に `is_pub: bool` フラグを追加
+- [x] `Stmt::FnDef` に `is_pub: bool` フラグを追加
+- [x] `Stmt::Let` / `Stmt::Const` に `is_pub: bool` フラグを追加
+- [x] `Stmt::StructDef` / `Stmt::EnumDef` / `Stmt::DataDef` に `is_pub: bool` フラグを追加
 
 ### M-1-B: パーサー拡張
 
-- [ ] `pub fn ...` のパース
-- [ ] `pub let ...` / `pub const ...` のパース
-- [ ] `pub struct ...` / `pub enum ...` / `pub data ...` のパース
+- [x] `pub fn ...` のパース
+- [x] `pub let ...` / `pub const ...` のパース
+- [x] `pub struct ...` / `pub enum ...` / `pub data ...` のパース
 
 ### M-1-C: モジュールローダー拡張
 
-- [ ] インポート時に `is_pub` フラグを確認
-- [ ] 非公開シンボルへのアクセスでエラー: `"<symbol> は非公開です（pub キーワードがありません）"`
+- [x] インポート時に `is_pub` フラグを確認
+- [x] 非公開シンボルへのアクセスでエラー: `"<symbol> は非公開です（pub キーワードがありません）"`
 
 ### M-1-D: テスト
 
-- [ ] テスト: `test_pub_import_success` — pub シンボルのインポート成功
-- [ ] テスト: `test_pub_import_private_error` — 非公開シンボルのインポートでエラー
-- [ ] E2E テスト: `modules/pub_visibility/` — pub/非公開の境界テスト
+- [x] テスト: `test_pub_import_success` — pub シンボルのインポート成功
+- [x] テスト: `test_pub_import_private_error` — 非公開シンボルのインポートでエラー
+- [x] E2E テスト: `modules/pub_visibility/` — pub/非公開の境界テスト
 
 ---
 

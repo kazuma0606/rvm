@@ -40,6 +40,7 @@ pub enum Stmt {
         name: String,
         type_ann: Option<TypeAnn>,
         value: Expr,
+        is_pub: bool,
         span: Span,
     },
     /// state x: T = expr
@@ -54,6 +55,7 @@ pub enum Stmt {
         name: String,
         type_ann: Option<TypeAnn>,
         value: Expr,
+        is_pub: bool,
         span: Span,
     },
     /// fn name(params) -> T { body }
@@ -62,6 +64,7 @@ pub enum Stmt {
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
         body: Box<Expr>,
+        is_pub: bool,
         span: Span,
     },
     /// return expr
@@ -73,6 +76,7 @@ pub enum Stmt {
         name: String,
         fields: Vec<(String, TypeAnn)>,
         derives: Vec<String>,
+        is_pub: bool,
         span: Span,
     },
     /// impl Name { fn ... }  /  impl Trait for Name { fn ... }
@@ -87,18 +91,21 @@ pub enum Stmt {
         name: String,
         variants: Vec<EnumVariant>,
         derives: Vec<String>,
+        is_pub: bool,
         span: Span,
     },
     /// trait Name { fn abstract() -> T \n fn default() { body } }
     TraitDef {
         name: String,
         methods: Vec<TraitMethod>,
+        is_pub: bool,
         span: Span,
     },
     /// mixin Name { fn method() { body } }
     MixinDef {
         name: String,
         methods: Vec<FnDef>,
+        is_pub: bool,
         span: Span,
     },
     /// impl TraitName for TypeName { fn ... }  または  impl MixinName for TypeName
@@ -113,6 +120,7 @@ pub enum Stmt {
         name: String,
         fields: Vec<(String, TypeAnn)>,
         validate_rules: Vec<ValidateRule>,
+        is_pub: bool,
         span: Span,
     },
     /// typestate Name { states: [...], StateName { fn ... } ... }

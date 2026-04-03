@@ -206,15 +206,22 @@ impl Parser {
     fn parse_pub_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.expect_token(&TokenKind::Pub)?;
         match self.peek_kind().clone() {
-            TokenKind::Use => self.parse_use_decl(true),
-            TokenKind::Fn  => {
-                // pub fn は通常の fn として扱う（M-1 で is_pub フラグ追加予定）
-                self.parse_fn()
+            TokenKind::Use    => self.parse_use_decl(true),
+            TokenKind::Fn     => self.parse_fn_with_pub(true),
+            TokenKind::Let    => self.parse_let_with_pub(true),
+            TokenKind::Const  => self.parse_const_with_pub(true),
+            TokenKind::Struct => self.parse_struct_def_with_pub(vec![], true),
+            TokenKind::Trait  => self.parse_trait_def_with_pub(true),
+            TokenKind::Mixin  => self.parse_mixin_def_with_pub(true),
+            TokenKind::Data   => self.parse_data_def_with_pub(true),
+            TokenKind::Ident(ref name) if name == "enum" => {
+                self.advance(); // consume 'enum'
+                self.parse_enum_def_body_with_pub(vec![], true)
             }
             _ => {
                 let tok = self.peek().clone();
                 Err(ParseError::UnexpectedToken {
-                    expected: "use または fn".to_string(),
+                    expected: "use, fn, let, const, struct, enum, data, trait, または mixin".to_string(),
                     found: tok.kind,
                     span: tok.span,
                 })
@@ -367,11 +374,15 @@ impl Parser {
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_let_with_pub(false)
+    }
+
+    fn parse_let_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Let)?;
         let (name, _) = self.expect_ident()?;
         let (type_ann, value, _) = self.parse_binding_rhs()?;
-        Ok(Stmt::Let { name, type_ann, value, span })
+        Ok(Stmt::Let { name, type_ann, value, is_pub, span })
     }
 
     fn parse_state(&mut self) -> Result<Stmt, ParseError> {
@@ -383,14 +394,22 @@ impl Parser {
     }
 
     fn parse_const(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_const_with_pub(false)
+    }
+
+    fn parse_const_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Const)?;
         let (name, _) = self.expect_ident()?;
         let (type_ann, value, _) = self.parse_binding_rhs()?;
-        Ok(Stmt::Const { name, type_ann, value, span })
+        Ok(Stmt::Const { name, type_ann, value, is_pub, span })
     }
 
     fn parse_fn(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_fn_with_pub(false)
+    }
+
+    fn parse_fn_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Fn)?;
         let (name, _) = self.expect_ident()?;
@@ -420,7 +439,7 @@ impl Parser {
         };
 
         let body = self.parse_block()?;
-        Ok(Stmt::Fn { name, params, return_type, body: Box::new(body), span })
+        Ok(Stmt::Fn { name, params, return_type, body: Box::new(body), is_pub, span })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
@@ -1007,6 +1026,10 @@ impl Parser {
     // ── T-3-B: trait / mixin / impl for パース ────────────────────────────
 
     fn parse_trait_def(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_trait_def_with_pub(false)
+    }
+
+    fn parse_trait_def_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Trait)?;
         let (name, _) = self.expect_ident()?;
@@ -1022,7 +1045,7 @@ impl Parser {
         }
 
         self.expect_token(&TokenKind::RBrace)?;
-        Ok(Stmt::TraitDef { name, methods, span })
+        Ok(Stmt::TraitDef { name, methods, is_pub, span })
     }
 
     /// trait 内のメソッドをパース（抽象 or デフォルト実装）
@@ -1095,6 +1118,10 @@ impl Parser {
     }
 
     fn parse_mixin_def(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_mixin_def_with_pub(false)
+    }
+
+    fn parse_mixin_def_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Mixin)?;
         let (name, _) = self.expect_ident()?;
@@ -1110,7 +1137,7 @@ impl Parser {
         }
 
         self.expect_token(&TokenKind::RBrace)?;
-        Ok(Stmt::MixinDef { name, methods, span })
+        Ok(Stmt::MixinDef { name, methods, is_pub, span })
     }
 
     /// `impl ...` を見て、`impl Trait for Type` か `impl Name { }` かを判断する
@@ -1202,6 +1229,10 @@ impl Parser {
     }
 
     fn parse_struct_def(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
+        self.parse_struct_def_with_pub(derives, false)
+    }
+
+    fn parse_struct_def_with_pub(&mut self, derives: Vec<String>, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Struct)?;
         let (name, _) = self.expect_ident()?;
@@ -1224,7 +1255,7 @@ impl Parser {
         }
 
         self.expect_token(&TokenKind::RBrace)?;
-        Ok(Stmt::StructDef { name, fields, derives, span })
+        Ok(Stmt::StructDef { name, fields, derives, is_pub, span })
     }
 
     fn parse_impl_block(&mut self) -> Result<Stmt, ParseError> {
@@ -1342,6 +1373,10 @@ impl Parser {
 
     /// `enum` キーワードを消費した後の本体をパース
     fn parse_enum_def_body(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
+        self.parse_enum_def_body_with_pub(derives, false)
+    }
+
+    fn parse_enum_def_body_with_pub(&mut self, derives: Vec<String>, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         let (name, _) = self.expect_ident()?;
         self.expect_token(&TokenKind::LBrace)?;
@@ -1398,7 +1433,7 @@ impl Parser {
         }
 
         self.expect_token(&TokenKind::RBrace)?;
-        Ok(Stmt::EnumDef { name, variants, derives, span })
+        Ok(Stmt::EnumDef { name, variants, derives, is_pub, span })
     }
 
     fn parse_bracket_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1558,6 +1593,10 @@ impl Parser {
     // ── T-4-B: data キーワードのパース ───────────────────────────────────
 
     fn parse_data_def(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_data_def_with_pub(false)
+    }
+
+    fn parse_data_def_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Data)?;
         let (name, _) = self.expect_ident()?;
@@ -1587,7 +1626,7 @@ impl Parser {
             vec![]
         };
 
-        Ok(Stmt::DataDef { name, fields, validate_rules, span })
+        Ok(Stmt::DataDef { name, fields, validate_rules, is_pub, span })
     }
 
     // ── T-5-B: typestate キーワードのパース ──────────────────────────────
