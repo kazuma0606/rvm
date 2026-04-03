@@ -1,0 +1,9 @@
+use ./math.{add, multiply, fast_pow}
+
+fn main() {
+    println(add(3, 4))
+    println(multiply(3, 4))
+    println(fast_pow(2, 8))
+}
+
+main()

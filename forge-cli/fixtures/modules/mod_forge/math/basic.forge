@@ -1,0 +1,3 @@
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn multiply(a: number, b: number) -> number { a * b }
+fn internal() -> number { 0 }

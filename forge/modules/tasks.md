@@ -86,29 +86,29 @@
 
 ### M-2-A: モジュールローダー拡張
 
-- [ ] `use ./utils` のようにディレクトリ指定時に `utils/mod.forge` の存在を確認
-- [ ] `mod.forge` がある場合はそれ経由でシンボルを解決
-- [ ] `mod.forge` がない場合はディレクトリ内の全 pub シンボルをアクセス可能に
+- [x] `use ./utils` のようにディレクトリ指定時に `utils/mod.forge` の存在を確認
+- [x] `mod.forge` がある場合はそれ経由でシンボルを解決
+- [x] `mod.forge` がない場合はディレクトリ内の全 pub シンボルをアクセス可能に
 
 ### M-2-B: AST 拡張
 
-- [ ] `Stmt::PubUse { path: UsePath, symbols: UseSymbols }` — re-export 宣言を追加
+- [x] `Stmt::PubUse { path: UsePath, symbols: UseSymbols }` — re-export 宣言を追加（既存 `Stmt::UseDecl { is_pub: true, ... }` で実装）
 
 ### M-2-C: パーサー拡張
 
-- [ ] `pub use helper.{add, subtract}` のパース（mod.forge 内）
-- [ ] `pub use helper.*` のパース
+- [x] `pub use helper.{add, subtract}` のパース（mod.forge 内）
+- [x] `pub use helper.*` のパース
 
 ### M-2-D: インタープリタ拡張
 
-- [ ] `PubUse` の評価: re-export シンボルをモジュールの公開 API に追加
+- [x] `PubUse` の評価: re-export シンボルをモジュールの公開 API に追加
 
 ### M-2-E: テスト
 
-- [ ] テスト: `test_mod_forge_routing` — mod.forge 経由のシンボル解決
-- [ ] テスト: `test_reexport_chain` — A → mod.forge → B の re-export チェーン
-- [ ] テスト: `test_reexport_depth_warning` — 3段階超で警告
-- [ ] E2E テスト: `modules/mod_forge/` — mod.forge を使った公開 API 制御
+- [x] テスト: `test_mod_forge_routing` — mod.forge 経由のシンボル解決
+- [x] テスト: `test_reexport_chain` — A → mod.forge → B の re-export チェーン
+- [x] テスト: `test_reexport_depth_warning` — 3段階超で警告
+- [x] E2E テスト: `modules/mod_forge/` — mod.forge を使った公開 API 制御
 
 ---
 

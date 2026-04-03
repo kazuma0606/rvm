@@ -1,0 +1,3 @@
+pub fn fast_pow(base: number, exp: number) -> number {
+    base * exp
+}

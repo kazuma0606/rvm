@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use forge_compiler::ast::*;
-use forge_compiler::loader::ModuleLoader;
+use forge_compiler::loader::{ModuleLoader, ModForgeExport};
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
@@ -402,78 +402,288 @@ impl Interpreter {
         match path {
             UsePath::Local(use_path) => {
                 // モジュールローダーが設定されていない場合はエラー
-                let loader = match self.module_loader.as_mut() {
-                    Some(l) => l,
-                    None => {
-                        return Err(RuntimeError::Custom(format!(
-                            "ローカルモジュール '{}' を読み込めません: モジュールローダーが初期化されていません",
-                            use_path
-                        )));
-                    }
-                };
-
-                // モジュールを読み込む
-                let stmts = loader.load(use_path).map_err(|e| {
-                    RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
-                })?;
-
-                // モジュールを別スコープで評価して、エクスポートを取得する
-                let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
-
-                // シンボルを現在のスコープにバインド
-                match symbols {
-                    UseSymbols::Single(name, alias) => {
-                        // pub チェック: pub でないシンボルはエラー
-                        if !pub_names.contains(name.as_str()) {
-                            return Err(RuntimeError::Custom(format!(
-                                "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
-                                name, use_path
-                            )));
-                        }
-                        let bind_name = alias.as_deref().unwrap_or(name.as_str());
-                        let value = all_symbols.get(name).cloned().ok_or_else(|| {
-                            RuntimeError::Custom(format!(
-                                "モジュール '{}' にシンボル '{}' が見つかりません",
-                                use_path, name
-                            ))
-                        })?;
-                        self.define(bind_name, value, false);
-                    }
-                    UseSymbols::Multiple(names) => {
-                        for (name, alias) in names {
-                            // pub チェック
-                            if !pub_names.contains(name.as_str()) {
-                                return Err(RuntimeError::Custom(format!(
-                                    "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
-                                    name, use_path
-                                )));
-                            }
-                            let bind_name = alias.as_deref().unwrap_or(name.as_str());
-                            let value = all_symbols.get(name).cloned().ok_or_else(|| {
-                                RuntimeError::Custom(format!(
-                                    "モジュール '{}' にシンボル '{}' が見つかりません",
-                                    use_path, name
-                                ))
-                            })?;
-                            self.define(bind_name, value, false);
-                        }
-                    }
-                    UseSymbols::All => {
-                        // ワイルドカード: pub シンボルのみをインポート
-                        for (name, value) in all_symbols {
-                            if pub_names.contains(&name) {
-                                self.define(&name, value, false);
-                            }
-                        }
-                    }
+                if self.module_loader.is_none() {
+                    return Err(RuntimeError::Custom(format!(
+                        "ローカルモジュール '{}' を読み込めません: モジュールローダーが初期化されていません",
+                        use_path
+                    )));
                 }
-                Ok(Value::Unit)
+
+                // ディレクトリかどうかを確認する
+                let is_dir = self.module_loader.as_ref()
+                    .map(|l| l.is_directory(use_path))
+                    .unwrap_or(false);
+
+                if is_dir {
+                    // ディレクトリ指定: mod.forge の存在を確認する
+                    self.eval_directory_use(use_path, symbols, 0)
+                } else {
+                    // 通常のファイル指定
+                    self.eval_file_use(use_path, symbols)
+                }
             }
             UsePath::External(_) | UsePath::Stdlib(_) => {
                 // forge run では外部クレートと標準ライブラリはスキップ（警告なし）
                 Ok(Value::Unit)
             }
         }
+    }
+
+    /// ファイルを直接指定した場合の use 評価
+    fn eval_file_use(&mut self, use_path: &str, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
+        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+
+        // モジュールを読み込む
+        let stmts = loader.load(use_path).map_err(|e| {
+            RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
+        })?;
+
+        // モジュールを別スコープで評価して、エクスポートを取得する
+        let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
+
+        // シンボルを現在のスコープにバインド
+        self.bind_symbols_to_scope(use_path, symbols, &all_symbols, &pub_names)
+    }
+
+    /// ディレクトリを指定した場合の use 評価
+    /// `depth` は re-export チェーンの深さ（3段階超で警告）
+    fn eval_directory_use(&mut self, dir_path: &str, symbols: &UseSymbols, depth: usize) -> Result<Value, RuntimeError> {
+        if depth > 3 {
+            // 3段階超の re-export チェーン: 警告を出す（エラーにはしない）
+            eprintln!(
+                "警告: re-export チェーンが3段階を超えています (depth={}): {}",
+                depth, dir_path
+            );
+        }
+
+        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+
+        // mod.forge の絶対パスを解決
+        let mod_forge_path = loader.resolve_mod_forge(dir_path);
+
+        match mod_forge_path {
+            None => {
+                // ディレクトリが存在しない → エラー
+                return Err(RuntimeError::Custom(format!(
+                    "ディレクトリ '{}' が見つかりません",
+                    dir_path
+                )));
+            }
+            Some(resolved_path) => {
+                if resolved_path.is_dir() {
+                    // mod.forge がない場合: ディレクトリ内の全 pub シンボルを収集
+                    let stmts = {
+                        let loader = self.module_loader.as_mut().expect("module_loader");
+                        loader.load_directory_all_pub(dir_path).map_err(|e| {
+                            RuntimeError::Custom(format!("ディレクトリ読み込みエラー: {}", e))
+                        })?
+                    };
+                    let (all_syms, pub_names) = self.eval_module_stmts(&stmts)?;
+                    self.bind_symbols_to_scope(dir_path, symbols, &all_syms, &pub_names)
+                } else {
+                    // mod.forge が存在する場合: それを経由してシンボルを解決
+                    let mod_forge_path_clone = resolved_path.clone();
+                    let export = {
+                        let loader = self.module_loader.as_mut().expect("module_loader");
+                        loader.parse_mod_forge(&mod_forge_path_clone).map_err(|e| {
+                            RuntimeError::Custom(format!("mod.forge 読み込みエラー: {}", e))
+                        })?
+                    };
+
+                    self.eval_mod_forge_use(dir_path, symbols, &export, depth)
+                }
+            }
+        }
+    }
+
+    /// mod.forge 経由でシンボルを解決してスコープにバインドする
+    fn eval_mod_forge_use(
+        &mut self,
+        dir_path: &str,
+        symbols: &UseSymbols,
+        export: &ModForgeExport,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        // export.symbols から必要なシンボルを解決する
+        // export.symbols: "add" → ("basic", "add")
+        // "add" を要求された場合、"basic" ファイルから "add" を読み込む
+
+        let symbols_to_resolve: Vec<(String, Option<String>)> = match symbols {
+            UseSymbols::Single(name, alias) => vec![(name.clone(), alias.clone())],
+            UseSymbols::Multiple(names) => names.clone(),
+            UseSymbols::All => {
+                // mod.forge でエクスポートされた全シンボルを収集
+                let all_names: Vec<(String, Option<String>)> = export.symbols.keys()
+                    .filter(|k| !k.starts_with("__all__"))
+                    .map(|k| (k.clone(), None))
+                    .collect();
+                // __all__ マーカーの処理（pub use basic.* の場合）
+                let wildcard_modules: Vec<String> = export.symbols.iter()
+                    .filter(|(k, (_, sym))| k.starts_with("__all__") && sym == "*")
+                    .map(|(_, (module, _))| module.clone())
+                    .collect();
+                let _result = all_names;
+                for module in &wildcard_modules {
+                    let sub_path = format!("{}/{}", dir_path, module);
+                    // ファイルか、サブディレクトリかを確認
+                    let is_sub_dir = self.module_loader.as_ref()
+                        .map(|l| l.is_directory(&sub_path))
+                        .unwrap_or(false);
+                    if is_sub_dir {
+                        // サブディレクトリの場合は再帰
+                        self.eval_directory_use(&sub_path, &UseSymbols::All, depth + 1)?;
+                    } else {
+                        self.eval_file_use(&sub_path, &UseSymbols::All)?;
+                    }
+                }
+                // wildcard 分は既に処理済みなので、名前付きシンボルのみを返す
+                return Ok(Value::Unit);
+            }
+        };
+
+        for (sym_name, alias) in &symbols_to_resolve {
+            // mod.forge の export マップからシンボルの元ファイルを探す
+            let (source_module, source_sym) = export.symbols.get(sym_name)
+                .ok_or_else(|| RuntimeError::Custom(format!(
+                    "mod.forge: モジュール '{}' にシンボル '{}' が見つかりません（re-export されていません）",
+                    dir_path, sym_name
+                )))?;
+
+            // __all__ マーカーは通常のシンボル解決ではスキップ
+            if sym_name.starts_with("__all__") {
+                continue;
+            }
+
+            // ソースモジュールのパスを構築
+            let sub_path = format!("{}/{}", dir_path, source_module);
+
+            // ソースモジュールを読み込む
+            let is_sub_dir = self.module_loader.as_ref()
+                .map(|l| l.is_directory(&sub_path))
+                .unwrap_or(false);
+
+            let (all_mod_symbols, pub_names) = if is_sub_dir {
+                // サブディレクトリの場合
+                // まず mod.forge を取得
+                let sub_mod_forge_path = {
+                    let loader = self.module_loader.as_mut().expect("module_loader");
+                    loader.resolve_mod_forge(&sub_path)
+                };
+                match sub_mod_forge_path {
+                    None => {
+                        return Err(RuntimeError::Custom(format!(
+                            "サブディレクトリ '{}' が見つかりません",
+                            sub_path
+                        )));
+                    }
+                    Some(p) if p.is_dir() => {
+                        let stmts = {
+                            let loader = self.module_loader.as_mut().expect("module_loader");
+                            loader.load_directory_all_pub(&sub_path).map_err(|e| {
+                                RuntimeError::Custom(format!("読み込みエラー: {}", e))
+                            })?
+                        };
+                        self.eval_module_stmts(&stmts)?
+                    }
+                    Some(_) => {
+                        // mod.forge 経由
+                        let stmts = {
+                            let loader = self.module_loader.as_mut().expect("module_loader");
+                            loader.load(&sub_path).map_err(|e| {
+                                RuntimeError::Custom(format!("読み込みエラー: {}", e))
+                            })?
+                        };
+                        self.eval_module_stmts(&stmts)?
+                    }
+                }
+            } else {
+                // 通常ファイルを読み込む
+                let stmts = {
+                    let loader = self.module_loader.as_mut().expect("module_loader");
+                    loader.load(&sub_path).map_err(|e| {
+                        RuntimeError::Custom(format!("モジュール読み込みエラー (mod.forge 経由): {}", e))
+                    })?
+                };
+                self.eval_module_stmts(&stmts)?
+            };
+
+            // pub チェック
+            if !pub_names.contains(source_sym.as_str()) {
+                return Err(RuntimeError::Custom(format!(
+                    "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                    source_sym, sub_path
+                )));
+            }
+
+            let value = all_mod_symbols.get(source_sym).cloned()
+                .ok_or_else(|| RuntimeError::Custom(format!(
+                    "モジュール '{}' にシンボル '{}' が見つかりません",
+                    sub_path, source_sym
+                )))?;
+
+            // バインド名はエイリアスがあればそれ、なければシンボル名
+            let bind_name = alias.as_deref().unwrap_or(sym_name.as_str());
+            self.define(bind_name, value, false);
+        }
+
+        Ok(Value::Unit)
+    }
+
+    /// シンボルを現在のスコープにバインドするヘルパー
+    fn bind_symbols_to_scope(
+        &mut self,
+        use_path: &str,
+        symbols: &UseSymbols,
+        all_symbols: &HashMap<String, Value>,
+        pub_names: &std::collections::HashSet<String>,
+    ) -> Result<Value, RuntimeError> {
+        match symbols {
+            UseSymbols::Single(name, alias) => {
+                // pub チェック: pub でないシンボルはエラー
+                if !pub_names.contains(name.as_str()) {
+                    return Err(RuntimeError::Custom(format!(
+                        "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                        name, use_path
+                    )));
+                }
+                let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                let value = all_symbols.get(name).cloned().ok_or_else(|| {
+                    RuntimeError::Custom(format!(
+                        "モジュール '{}' にシンボル '{}' が見つかりません",
+                        use_path, name
+                    ))
+                })?;
+                self.define(bind_name, value, false);
+            }
+            UseSymbols::Multiple(names) => {
+                for (name, alias) in names {
+                    // pub チェック
+                    if !pub_names.contains(name.as_str()) {
+                        return Err(RuntimeError::Custom(format!(
+                            "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                            name, use_path
+                        )));
+                    }
+                    let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                    let value = all_symbols.get(name).cloned().ok_or_else(|| {
+                        RuntimeError::Custom(format!(
+                            "モジュール '{}' にシンボル '{}' が見つかりません",
+                            use_path, name
+                        ))
+                    })?;
+                    self.define(bind_name, value, false);
+                }
+            }
+            UseSymbols::All => {
+                // ワイルドカード: pub シンボルのみをインポート
+                for (name, value) in all_symbols {
+                    if pub_names.contains(name) {
+                        self.define(name, value.clone(), false);
+                    }
+                }
+            }
+        }
+        Ok(Value::Unit)
     }
 
     /// モジュールの文を別スコープで評価して、定義されたシンボルをマップとして返す。
