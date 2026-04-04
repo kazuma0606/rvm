@@ -123,17 +123,18 @@
 - [x] `(a, b) => expr` → `|a: T, b: U| expr`
 - [x] `() => expr` → `|| expr`
 - [x] `let` キャプチャのみ → `Fn`（`|x| ...`）
-- [ ] `state` キャプチャあり → `FnMut`（`move |x| ...`）
+- [x] `state` キャプチャあり → `FnMut`（`move |x| ...`）
   <!-- TODO: state キーワード自体は v0.0.1 で実装済み（lexer/parser/interpreter すべて対応）。
        トランスパイラ側でクロージャのキャプチャ解析時に「state 変数を変更しているか」を
        判定して move |x| ... に変換する必要がある。
        現状は全クロージャを Fn として生成するため、state をクロージャ内で再代入する
        コードは forge build でコンパイルエラーになる。
        forge-transpiler/src/codegen.rs の gen_closure() を修正する。 -->
-- [ ] 消費キャプチャ → `FnOnce`（`move |x| ...`）
-  <!-- TODO: クロージャが変数を「移動（move）」させる場合（spawn等、1回限りの呼び出し）に
-       FnOnce に変換する。現時点では ForgeScript に spawn 構文が未実装のため、
-       モジュールシステム・async 実装後に合わせて対応する。優先度: 低。 -->
+- [x] 消費キャプチャ → `FnOnce`（`move |x| ...`）
+  <!-- 実装制限: FnOnce の判定は末尾位置（tail position）で変数が現れる場合に限定されている。
+       例: `let f = () => name` は FnOnce になるが、`let f = () => { let x = name; x }` は
+       ならない。spawn 構文未実装のため実用上この制限に当たるケースは発生しない。
+       spawn 実装時（B-7以降）に判定ロジックを拡張すること。 -->
 - [x] スナップショットテスト: `closure_fn`
 - [x] スナップショットテスト: `closure_fnmut`
 - [x] ラウンドトリップテスト: クロージャを使う E2E テストの転用
@@ -310,55 +311,55 @@
 
 ### B-7-A: 解析パス
 
-- [ ] 関数本体を走査して `.await` 式を含む関数を収集する解析パスを実装
-- [ ] 呼び出しグラフを構築し、async fn を呼び出して `.await` している関数も async に昇格（固定点反復）
+- [x] 関数本体を走査して `.await` 式を含む関数を収集する解析パスを実装
+- [x] 呼び出しグラフを構築し、async fn を呼び出して `.await` している関数も async に昇格（固定点反復）
 
 ### B-7-B: async fn 変換
 
-- [ ] 昇格対象関数を `async fn` として出力
-- [ ] `fn main()` が昇格対象なら `#[tokio::main] async fn main()` に変換
-- [ ] 通常の async fn には `#[tokio::main]` を付与しない
+- [x] 昇格対象関数を `async fn` として出力
+- [x] `fn main()` が昇格対象なら `#[tokio::main] async fn main()` に変換
+- [x] 通常の async fn には `#[tokio::main]` を付与しない
 
 ### B-7-C: Cargo.toml 自動更新
 
-- [ ] `.await` が存在するプロジェクトに `tokio = { version = "1", features = ["full"] }` を自動追加
-- [ ] 既に tokio が存在する場合は重複追加しない
+- [x] `.await` が存在するプロジェクトに `tokio = { version = "1", features = ["full"] }` を自動追加
+- [x] 既に tokio が存在する場合は重複追加しない
 
 ### B-7-D: .await 式変換
 
-- [ ] `expr.await` → `expr.await`（Rust 構文そのまま出力）
-- [ ] `expr.await?` → `expr.await?`
+- [x] `expr.await` → `expr.await`（Rust 構文そのまま出力）
+- [x] `expr.await?` → `expr.await?`
 
 ### B-7-E: async 再帰対応
 
-- [ ] async fn の直接再帰を検出
-- [ ] 再帰 async fn を `Box::pin(async move { ... })` 形式に変換
-- [ ] スナップショットテスト: `async_recursive`
+- [x] async fn の直接再帰を検出
+- [x] 再帰 async fn を `Box::pin(async move { ... })` 形式に変換
+- [x] スナップショットテスト: `async_recursive`
 
 ### B-7-F: test ブロック内 await
 
-- [ ] `.await` を含む test ブロック → `#[tokio::test] async fn test_xxx() -> Result<(), anyhow::Error>`
-- [ ] スナップショットテスト: `async_test_block`
+- [x] `.await` を含む test ブロック → `#[tokio::test] async fn test_xxx() -> Result<(), anyhow::Error>`
+- [x] スナップショットテスト: `async_test_block`
 
 ### B-7-G: クロージャ内 await の禁止
 
-- [ ] クロージャ本体内で `.await` を検出したらコンパイルエラーを返す
+- [x] クロージャ本体内で `.await` を検出したらコンパイルエラーを返す
   - エラーメッセージ: `"クロージャ内での .await はサポートされていません"`
-- [ ] E2E テスト: `closure_with_await_compile_error`
+- [x] E2E テスト: `closure_with_await_compile_error`
 
 ### B-7-H: forge run フォールバック
 
-- [ ] インタープリタで `Expr::Await { expr }` を `expr` の評価結果をそのまま返す no-op として実装
+- [x] インタープリタで `Expr::Await { expr }` を `expr` の評価結果をそのまま返す no-op として実装
 - [ ] （組み込み非同期関数が追加された時点でブロッキング実装を追加する）
 
 ### B-7-I: テスト
 
-- [ ] スナップショットテスト: `async_basic`（単一 .await を持つ関数）
-- [ ] スナップショットテスト: `async_propagation`（呼び出し元も async に昇格）
-- [ ] スナップショットテスト: `async_tokio_main`（main が async になる）
-- [ ] スナップショットテスト: `async_recursive`（Box::pin 自動挿入）
-- [ ] スナップショットテスト: `async_test_block`（#[tokio::test]）
-- [ ] E2E テスト: `closure_with_await_compile_error`（クロージャ内 await はエラー）
+- [x] スナップショットテスト: `async_basic`（単一 .await を持つ関数）
+- [x] スナップショットテスト: `async_propagation`（呼び出し元も async に昇格）
+- [x] スナップショットテスト: `async_tokio_main`（main が async になる）
+- [x] スナップショットテスト: `async_recursive`（Box::pin 自動挿入）
+- [x] スナップショットテスト: `async_test_block`（#[tokio::test]）
+- [x] E2E テスト: `closure_with_await_compile_error`（クロージャ内 await はエラー）
 
 ---
 
@@ -377,36 +378,36 @@
 
 ### B-8-A: 制約チェック
 
-- [ ] 状態にフィールドを持つ定義を検出 → エラー: `"typestate の状態は Unit 型のみサポートされます"`
-- [ ] ジェネリクス付き typestate を検出 → エラー: `"ジェネリクス付き typestate は未サポートです"`
-- [ ] `@derive` on typestate を検出 → エラー: `"typestate への @derive は未サポートです"`
-- [ ] `any {}` ブロックが複数 → エラー: `"any ブロックは1つのみ定義できます"`
+- [x] 状態にフィールドを持つ定義を検出 → エラー: `"typestate の状態は Unit 型のみサポートされます"`
+- [x] ジェネリクス付き typestate を検出 → エラー: `"ジェネリクス付き typestate は未サポートです"`
+- [x] `@derive` on typestate を検出 → エラー: `"typestate への @derive は未サポートです"`
+- [x] `any {}` ブロックが複数 → エラー: `"any ブロックは1つのみ定義できます"`
 
 ### B-8-B: 状態マーカー型の生成
 
-- [ ] `states: [A, B, C]` → `struct A; struct B; struct C;` を生成
-- [ ] `use std::marker::PhantomData;` を自動挿入
+- [x] `states: [A, B, C]` → `struct A; struct B; struct C;` を生成
+- [x] `use std::marker::PhantomData;` を自動挿入
 
 ### B-8-C: 本体 struct の生成
 
-- [ ] `typestate Name { fields... }` → `struct Name<S> { fields..., _state: PhantomData<S> }` を生成
-- [ ] 初期状態（`states:` 最初）のコンストラクタ `pub fn new(fields...) -> Name<InitialState>` を生成
+- [x] `typestate Name { fields... }` → `struct Name<S> { fields..., _state: PhantomData<S> }` を生成
+- [x] 初期状態（`states:` 最初）のコンストラクタ `pub fn new(fields...) -> Name<InitialState>` を生成
 
 ### B-8-D: 状態別 impl の生成
 
-- [ ] 各状態ブロック `StateA { fn method() }` → `impl Name<StateA> { fn method() }` を生成
-- [ ] 遷移メソッド（戻り値型が別状態）: `self` を消費（`fn method(self) -> Name<NextState>`）
-- [ ] 参照メソッド（戻り値がプリミティブ / 同状態）: `&self` に変換
+- [x] 各状態ブロック `StateA { fn method() }` → `impl Name<StateA> { fn method() }` を生成
+- [x] 遷移メソッド（戻り値型が別状態）: `self` を消費（`fn method(self) -> Name<NextState>`）
+- [x] 参照メソッド（戻り値がプリミティブ / 同状態）: `&self` に変換
 
 ### B-8-E: any ブロックの展開
 
-- [ ] `any { fn method() }` → 全状態ごとに同一の `impl Name<StateX> { fn method() }` を生成
+- [x] `any { fn method() }` → 全状態ごとに同一の `impl Name<StateX> { fn method() }` を生成
 
 ### B-8-F: テスト
 
-- [ ] スナップショットテスト: `typestate_basic`（2状態・1遷移）
-- [ ] スナップショットテスト: `typestate_transitions`（3状態・複数遷移）
-- [ ] スナップショットテスト: `typestate_any_block`（any ブロック展開）
-- [ ] E2E テスト: `typestate_constraint_unit_state_error`（Unit 以外の状態はエラー）
-- [ ] E2E テスト: `typestate_constraint_generic_error`（ジェネリクスはエラー）
-- [ ] ラウンドトリップテスト: `roundtrip_typestate_basic`
+- [x] スナップショットテスト: `typestate_basic`（2状態・1遷移）
+- [x] スナップショットテスト: `typestate_transitions`（3状態・複数遷移）
+- [x] スナップショットテスト: `typestate_any_block`（any ブロック展開）
+- [x] E2E テスト: `typestate_constraint_unit_state_error`（Unit 以外の状態はエラー）
+- [x] E2E テスト: `typestate_constraint_generic_error`（ジェネリクスはエラー）
+- [x] ラウンドトリップテスト: `roundtrip_typestate_basic`

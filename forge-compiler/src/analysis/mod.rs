@@ -120,9 +120,9 @@ mod tests {
         assert!(!cycles.is_empty(), "サイクルが検出されるべき");
 
         // サイクルの中に "a" と "b" が含まれていること
-        let found = cycles.iter().any(|c| {
-            c.contains(&"a".to_string()) && c.contains(&"b".to_string())
-        });
+        let found = cycles
+            .iter()
+            .any(|c| c.contains(&"a".to_string()) && c.contains(&"b".to_string()));
         assert!(found, "a → b → a のサイクルが含まれるべき");
     }
 
@@ -135,7 +135,11 @@ mod tests {
         graph.add_edge("b", "c");
 
         let cycles = graph.detect_cycles();
-        assert!(cycles.is_empty(), "サイクルが検出されないべき: {:?}", cycles);
+        assert!(
+            cycles.is_empty(),
+            "サイクルが検出されないべき: {:?}",
+            cycles
+        );
     }
 
     #[test]
@@ -160,13 +164,23 @@ mod tests {
                 path: UsePath::Local("./utils/helper".to_string()),
                 symbols: UseSymbols::All,
                 is_pub: false,
-                span: Span { start: 0, end: 0, line: 1, col: 1 },
+                span: Span {
+                    start: 0,
+                    end: 0,
+                    line: 1,
+                    col: 1,
+                },
             },
             Stmt::UseDecl {
                 path: UsePath::External("serde".to_string()),
                 symbols: UseSymbols::All,
                 is_pub: false,
-                span: Span { start: 0, end: 0, line: 2, col: 1 },
+                span: Span {
+                    start: 0,
+                    end: 0,
+                    line: 2,
+                    col: 1,
+                },
             },
         ];
 

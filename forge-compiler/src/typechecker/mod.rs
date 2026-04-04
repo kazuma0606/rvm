@@ -1,8 +1,8 @@
 // forge-compiler: 型チェッカー モジュール
 // Phase 4-A 実装
 
-pub mod types;
 pub mod checker;
+pub mod types;
 
+pub use checker::{type_check_source, TypeChecker, TypeError};
 pub use types::Type;
-pub use checker::{TypeChecker, TypeError, type_check_source};

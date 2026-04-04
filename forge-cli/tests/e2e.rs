@@ -415,7 +415,11 @@ fn e2e_check_type_error() {
     let (_out, err, ok) = run_check(src);
     assert!(!ok, "exit code 1 のはず");
     assert!(!err.is_empty(), "stderr にエラーメッセージが出るはず");
-    assert!(err.contains("型エラー") || err.contains("不一致"), "stderr: {}", err);
+    assert!(
+        err.contains("型エラー") || err.contains("不一致"),
+        "stderr: {}",
+        err
+    );
 }
 
 #[test]
@@ -429,7 +433,11 @@ match v {
 "#;
     let (_out, err, ok) = run_check(src);
     assert!(!ok, "exit code 1 のはず");
-    assert!(err.contains("none") || err.contains("網羅"), "stderr: {}", err);
+    assert!(
+        err.contains("none") || err.contains("網羅"),
+        "stderr: {}",
+        err
+    );
 }
 
 // ── ラウンドトリップテスト（forge run == forge build + 実行）────────────────
@@ -480,12 +488,7 @@ fn run_built_file(path: &str) -> Result<String, String> {
     bin_path.push(format!("forge_file_rt_{}_bin", unique_suffix()));
 
     let build_result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
-        .args([
-            "build",
-            path,
-            "-o",
-            bin_path.to_str().unwrap_or(""),
-        ])
+        .args(["build", path, "-o", bin_path.to_str().unwrap_or("")])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -503,6 +506,36 @@ fn run_built_file(path: &str) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&run_result.stdout).to_string())
     } else {
         Err(String::from_utf8_lossy(&run_result.stderr).to_string())
+    }
+}
+
+fn run_transpile_error(source: &str) -> Result<String, String> {
+    use std::fs;
+
+    let mut src_path = std::env::temp_dir();
+    src_path.push(format!("forge_tp_{}.forge", unique_suffix()));
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("forge_tp_{}.rs", unique_suffix()));
+
+    fs::write(&src_path, source).map_err(|e| e.to_string())?;
+
+    let result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args([
+            "transpile",
+            src_path.to_str().unwrap_or(""),
+            "-o",
+            out_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&out_path);
+
+    if result.status.success() {
+        Ok(String::from_utf8_lossy(&result.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&result.stderr).to_string())
     }
 }
 
@@ -612,6 +645,20 @@ for n in doubled {
 }
 
 #[test]
+fn roundtrip_closure_fnmut() {
+    let src = r#"
+state total = 0
+let add = x => {
+    total = total + x
+    total
+}
+print(add(2))
+print(add(3))
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
 fn roundtrip_struct_basic() {
     let src = r#"
 struct Point {
@@ -675,6 +722,59 @@ when platform.macos {
 println(platform_name())
 "#;
     assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn build_async_basic() {
+    let src = r#"
+use raw {
+    async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(41) }
+}
+
+fn load() -> number! {
+    fetch_num().await
+}
+
+println(load().await?)
+"#;
+    assert_eq!(run_built(src).unwrap(), "41\n");
+}
+
+#[test]
+fn build_async_propagation() {
+    let src = r#"
+use raw {
+    async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(41) }
+}
+
+fn load() -> number! {
+    fetch_num().await
+}
+
+fn render() -> number! {
+    load()
+}
+
+println(render().await?)
+"#;
+    assert_eq!(run_built(src).unwrap(), "41\n");
+}
+
+#[test]
+fn closure_with_await_compile_error() {
+    let src = r#"
+use raw {
+    async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(1) }
+}
+
+let f = () => fetch_num().await
+"#;
+    let err = run_transpile_error(src).unwrap_err();
+    assert!(
+        err.contains("クロージャ内での .await はサポートされていません"),
+        "stderr: {}",
+        err
+    );
 }
 
 // ── Phase T-1 E2E テスト ─────────────────────────────────────────────────
@@ -742,18 +842,22 @@ println(u.get_name())
 
 #[test]
 fn e2e_enum_basic() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/enum_basic.forge")
-    ).expect("enum_basic.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/enum_basic.forge"
+    ))
+    .expect("enum_basic.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "up\nother\n");
 }
 
 #[test]
 fn e2e_enum_match() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/enum_match.forge")
-    ).expect("enum_match.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/enum_match.forge"
+    ))
+    .expect("enum_match.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "radius=5\n3x4\nmove 10,20\nhello\n");
 }
@@ -762,18 +866,22 @@ fn e2e_enum_match() {
 
 #[test]
 fn e2e_trait_basic() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/trait_basic.forge")
-    ).expect("trait_basic.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/trait_basic.forge"
+    ))
+    .expect("trait_basic.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "Hello\nHello\nHello\n");
 }
 
 #[test]
 fn e2e_mixin_basic() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mixin_basic.forge")
-    ).expect("mixin_basic.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/mixin_basic.forge"
+    ))
+    .expect("mixin_basic.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "2026-01-01\npost-1\n");
 }
@@ -782,18 +890,22 @@ fn e2e_mixin_basic() {
 
 #[test]
 fn e2e_data_basic() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data_basic.forge")
-    ).expect("data_basic.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/data_basic.forge"
+    ))
+    .expect("data_basic.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "Alice\n1\nBob\n");
 }
 
 #[test]
 fn e2e_data_validate() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data_validate.forge")
-    ).expect("data_validate.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/data_validate.forge"
+    ))
+    .expect("data_validate.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "valid\ninvalid: username: length\n");
 }
@@ -802,18 +914,22 @@ fn e2e_data_validate() {
 
 #[test]
 fn e2e_typestate_connection() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typestate_connection.forge")
-    ).expect("typestate_connection.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/typestate_connection.forge"
+    ))
+    .expect("typestate_connection.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "SELECT 1\n");
 }
 
 #[test]
 fn e2e_typestate_door() {
-    let src = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typestate_door.forge")
-    ).expect("typestate_door.forge が見つかりません");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/typestate_door.forge"
+    ))
+    .expect("typestate_door.forge が見つかりません");
     let out = run_forge(&src).unwrap();
     assert_eq!(out, "done\n");
 }
@@ -854,7 +970,10 @@ fn roundtrip_modules_basic() {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/modules/basic/main.forge"
     );
-    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
+    assert_eq!(
+        run_forge_file(main_path).unwrap(),
+        run_built_file(main_path).unwrap()
+    );
 }
 
 #[test]
@@ -863,7 +982,10 @@ fn roundtrip_modules_pub_visibility() {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/modules/pub_visibility/main.forge"
     );
-    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
+    assert_eq!(
+        run_forge_file(main_path).unwrap(),
+        run_built_file(main_path).unwrap()
+    );
 }
 
 #[test]
@@ -872,7 +994,112 @@ fn roundtrip_modules_mod_forge() {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/modules/mod_forge/main.forge"
     );
-    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
+    assert_eq!(
+        run_forge_file(main_path).unwrap(),
+        run_built_file(main_path).unwrap()
+    );
+}
+
+#[test]
+fn typestate_constraint_unit_state_error() {
+    let src = r#"
+typestate Door {
+    states: [Closed, Open(number)]
+}
+"#;
+    let err = run_transpile_error(src).unwrap_err();
+    assert!(
+        err.contains("typestate の状態は Unit 型のみサポートされます"),
+        "stderr: {}",
+        err
+    );
+}
+
+#[test]
+fn typestate_constraint_generic_error() {
+    let src = r#"
+typestate Query<T> {
+    states: [Init]
+}
+"#;
+    let err = run_transpile_error(src).unwrap_err();
+    assert!(
+        err.contains("ジェネリクス付き typestate は未サポートです"),
+        "stderr: {}",
+        err
+    );
+}
+
+#[test]
+fn typestate_constraint_derive_error() {
+    let src = r#"
+@derive(Debug)
+typestate Door {
+    states: [Closed, Open]
+}
+"#;
+    let err = run_transpile_error(src).unwrap_err();
+    assert!(
+        err.contains("typestate への @derive は未サポートです"),
+        "stderr: {}",
+        err
+    );
+}
+
+#[test]
+fn typestate_constraint_any_block_error() {
+    let src = r#"
+typestate Door {
+    states: [Closed, Open]
+
+    any {
+        fn label() -> string { "door" }
+    }
+
+    any {
+        fn extra() -> string { "extra" }
+    }
+}
+"#;
+    let err = run_transpile_error(src).unwrap_err();
+    assert!(
+        err.contains("any ブロックは1つのみ定義できます"),
+        "stderr: {}",
+        err
+    );
+}
+
+#[test]
+fn roundtrip_typestate_basic() {
+    let src = r#"
+typestate Door {
+    states: [Closed, Open, Locked]
+
+    Closed {
+        fn open() -> Open
+        fn lock() -> Locked
+    }
+
+    Open {
+        fn close() -> Closed
+    }
+
+    Locked {
+        fn unlock(key: string) -> Closed
+    }
+}
+
+fn main() {
+    let door = Door::new<Closed>()
+    let opened = door.open()
+    let closed = opened.close()
+    let locked = closed.lock()
+    println("done")
+}
+
+main()
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
 }
 
 // ── Phase M-4 E2E テスト ────────────────────────────────────────────────────
@@ -891,7 +1118,9 @@ fn e2e_modules_circular_error() {
     );
     let err_msg = result.unwrap_err();
     assert!(
-        err_msg.contains("循環参照") || err_msg.contains("circular") || err_msg.contains("Circular"),
+        err_msg.contains("循環参照")
+            || err_msg.contains("circular")
+            || err_msg.contains("Circular"),
         "エラーメッセージに循環参照の説明が含まれるべきです: {}",
         err_msg
     );
@@ -902,24 +1131,22 @@ fn e2e_modules_circular_error() {
 /// M-5-D E2E: platform 条件 — 実行環境に応じた出力を確認
 #[test]
 fn e2e_when_platform() {
-    let fixture_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/when_basic.forge"
-    );
+    let fixture_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/when_basic.forge");
     let result = run_forge_file(fixture_path);
-    assert!(result.is_ok(), "when_basic.forge の実行に失敗しました: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "when_basic.forge の実行に失敗しました: {:?}",
+        result.err()
+    );
 
     let output = result.unwrap();
     // 実行環境に応じた出力（windows/linux/macos）を動的に決定
     let expected_os = std::env::consts::OS;
     let trimmed = output.trim();
     assert_eq!(
-        trimmed,
-        expected_os,
+        trimmed, expected_os,
         "when platform.{} ブロックが実行され '{}' が出力されるべきですが '{}' でした",
-        expected_os,
-        expected_os,
-        trimmed
+        expected_os, expected_os, trimmed
     );
 }
 

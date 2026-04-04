@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use forge_compiler::ast::*;
-use forge_compiler::loader::{ModuleLoader, ModForgeExport};
-use forge_compiler::deps::DepsManager;
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
+use forge_compiler::ast::*;
+use forge_compiler::deps::DepsManager;
+use forge_compiler::loader::{ModForgeExport, ModuleLoader};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
 #[derive(Clone)]
@@ -24,7 +24,7 @@ impl std::fmt::Debug for MethodImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MethodImpl::Forge(def) => write!(f, "Forge({})", def.name),
-            MethodImpl::Native(_)  => write!(f, "Native"),
+            MethodImpl::Native(_) => write!(f, "Native"),
         }
     }
 }
@@ -99,14 +99,22 @@ struct TypeRegistry {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeError {
     UndefinedVariable(String),
-    TypeMismatch { expected: String, found: String },
+    TypeMismatch {
+        expected: String,
+        found: String,
+    },
     DivisionByZero,
-    IndexOutOfBounds { index: i64, len: usize },
+    IndexOutOfBounds {
+        index: i64,
+        len: usize,
+    },
     /// let 変数への再代入
     Immutable(String),
     Custom(String),
     /// 循環参照検出（M-4-B）
-    CircularDependency { cycle: Vec<String> },
+    CircularDependency {
+        cycle: Vec<String>,
+    },
     // ── 内部制御フロー ──
     /// return 文による早期脱出（関数呼び出しが補足）
     Return(Value),
@@ -119,19 +127,24 @@ pub enum RuntimeError {
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuntimeError::UndefinedVariable(n)  => write!(f, "未定義の変数 '{}'", n),
-            RuntimeError::TypeMismatch { expected, found } =>
-                write!(f, "型エラー: {} を期待しましたが {} でした", expected, found),
-            RuntimeError::DivisionByZero        => write!(f, "ゼロ除算"),
-            RuntimeError::IndexOutOfBounds { index, len } =>
-                write!(f, "インデックス範囲外: {} (長さ: {})", index, len),
-            RuntimeError::Immutable(n)          => write!(f, "変数 '{}' は不変です", n),
-            RuntimeError::Custom(msg)           => write!(f, "{}", msg),
-            RuntimeError::CircularDependency { cycle } =>
-                write!(f, "循環参照エラー: {}", cycle.join(" → ")),
-            RuntimeError::Return(_)             => write!(f, "<return>"),
-            RuntimeError::PropagateErr(e)       => write!(f, "<propagate err: {}>", e),
-            RuntimeError::TestFailure(msg)      => write!(f, "assertion failed: {}", msg),
+            RuntimeError::UndefinedVariable(n) => write!(f, "未定義の変数 '{}'", n),
+            RuntimeError::TypeMismatch { expected, found } => write!(
+                f,
+                "型エラー: {} を期待しましたが {} でした",
+                expected, found
+            ),
+            RuntimeError::DivisionByZero => write!(f, "ゼロ除算"),
+            RuntimeError::IndexOutOfBounds { index, len } => {
+                write!(f, "インデックス範囲外: {} (長さ: {})", index, len)
+            }
+            RuntimeError::Immutable(n) => write!(f, "変数 '{}' は不変です", n),
+            RuntimeError::Custom(msg) => write!(f, "{}", msg),
+            RuntimeError::CircularDependency { cycle } => {
+                write!(f, "循環参照エラー: {}", cycle.join(" → "))
+            }
+            RuntimeError::Return(_) => write!(f, "<return>"),
+            RuntimeError::PropagateErr(e) => write!(f, "<propagate err: {}>", e),
+            RuntimeError::TestFailure(msg) => write!(f, "assertion failed: {}", msg),
         }
     }
 }
@@ -311,8 +324,8 @@ impl Interpreter {
     fn capture_env(&self) -> CapturedEnv {
         let mut map = HashMap::new();
         for scope in &self.scopes {
-            for (k, (v, _)) in scope {
-                map.insert(k.clone(), v.clone());
+            for (k, (v, mutable)) in scope {
+                map.insert(k.clone(), (v.clone(), *mutable));
             }
         }
         Rc::new(RefCell::new(map))
@@ -329,130 +342,253 @@ impl Interpreter {
             };
         }
 
-        self.define("some", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err(format!("some() takes 1 arg")); }
-            Ok(Value::Option(Some(Box::new(args.remove(0)))))
-        }), false);
+        self.define(
+            "some",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err(format!("some() takes 1 arg"));
+                }
+                Ok(Value::Option(Some(Box::new(args.remove(0)))))
+            }),
+            false,
+        );
 
-        self.define("ok", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err(format!("ok() takes 1 arg")); }
-            Ok(Value::Result(Ok(Box::new(args.remove(0)))))
-        }), false);
+        self.define(
+            "ok",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err(format!("ok() takes 1 arg"));
+                }
+                Ok(Value::Result(Ok(Box::new(args.remove(0)))))
+            }),
+            false,
+        );
 
-        self.define("err", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err(format!("err() takes 1 arg")); }
-            Ok(Value::Result(Err(args.remove(0).to_string())))
-        }), false);
+        self.define(
+            "err",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err(format!("err() takes 1 arg"));
+                }
+                Ok(Value::Result(Err(args.remove(0).to_string())))
+            }),
+            false,
+        );
 
-        self.define("print", native!(|args: Vec<Value>| {
-            let s = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
-            println!("{}", s);
-            Ok(Value::Unit)
-        }), false);
+        self.define(
+            "print",
+            native!(|args: Vec<Value>| {
+                let s = args
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("{}", s);
+                Ok(Value::Unit)
+            }),
+            false,
+        );
 
         // println は print と同じ（改行付き）
-        self.define("println", native!(|args: Vec<Value>| {
-            let s = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
-            println!("{}", s);
-            Ok(Value::Unit)
-        }), false);
+        self.define(
+            "println",
+            native!(|args: Vec<Value>| {
+                let s = args
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("{}", s);
+                Ok(Value::Unit)
+            }),
+            false,
+        );
 
-        self.define("string", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("string() takes 1 arg".to_string()); }
-            Ok(Value::String(args.remove(0).to_string()))
-        }), false);
+        self.define(
+            "string",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("string() takes 1 arg".to_string());
+                }
+                Ok(Value::String(args.remove(0).to_string()))
+            }),
+            false,
+        );
 
-        self.define("number", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("number() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::String(s) => match s.trim().parse::<i64>() {
-                    Ok(n)  => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
-                    Err(_) => Ok(Value::Result(Err(format!("\"{}\" を number に変換できません", s)))),
-                },
-                Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Int(f as i64))))),
-                Value::Int(n)   => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
-                v => Ok(Value::Result(Err(format!("{} を number に変換できません", v.type_name())))),
-            }
-        }), false);
+        self.define(
+            "number",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("number() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::String(s) => match s.trim().parse::<i64>() {
+                        Ok(n) => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
+                        Err(_) => Ok(Value::Result(Err(format!(
+                            "\"{}\" を number に変換できません",
+                            s
+                        )))),
+                    },
+                    Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Int(f as i64))))),
+                    Value::Int(n) => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
+                    v => Ok(Value::Result(Err(format!(
+                        "{} を number に変換できません",
+                        v.type_name()
+                    )))),
+                }
+            }),
+            false,
+        );
 
-        self.define("float", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("float() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::String(s) => match s.trim().parse::<f64>() {
-                    Ok(f)  => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
-                    Err(_) => Ok(Value::Result(Err(format!("\"{}\" を float に変換できません", s)))),
-                },
-                Value::Int(n)   => Ok(Value::Result(Ok(Box::new(Value::Float(n as f64))))),
-                Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
-                v => Ok(Value::Result(Err(format!("{} を float に変換できません", v.type_name())))),
-            }
-        }), false);
+        self.define(
+            "float",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("float() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::String(s) => match s.trim().parse::<f64>() {
+                        Ok(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
+                        Err(_) => Ok(Value::Result(Err(format!(
+                            "\"{}\" を float に変換できません",
+                            s
+                        )))),
+                    },
+                    Value::Int(n) => Ok(Value::Result(Ok(Box::new(Value::Float(n as f64))))),
+                    Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
+                    v => Ok(Value::Result(Err(format!(
+                        "{} を float に変換できません",
+                        v.type_name()
+                    )))),
+                }
+            }),
+            false,
+        );
 
-        self.define("len", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("len() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
-                Value::List(list) => Ok(Value::Int(list.borrow().len() as i64)),
-                v => Err(format!("len() は string または list を期待しましたが {} でした", v.type_name())),
-            }
-        }), false);
+        self.define(
+            "len",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("len() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    Value::List(list) => Ok(Value::Int(list.borrow().len() as i64)),
+                    v => Err(format!(
+                        "len() は string または list を期待しましたが {} でした",
+                        v.type_name()
+                    )),
+                }
+            }),
+            false,
+        );
 
-        self.define("type_of", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("type_of() takes 1 arg".to_string()); }
-            Ok(Value::String(args.remove(0).type_name().to_string()))
-        }), false);
+        self.define(
+            "type_of",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("type_of() takes 1 arg".to_string());
+                }
+                Ok(Value::String(args.remove(0).type_name().to_string()))
+            }),
+            false,
+        );
 
         // ── アサーション組み込み関数（FT-1-E）──────────────────────────
         // エラー文字列に "__tf__:" プレフィックスを付けて TestFailure として識別する
 
-        self.define("assert", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("assert() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::Bool(true) => Ok(Value::Unit),
-                Value::Bool(false) => Err("__tf__:assertion failed".to_string()),
-                v => Err(format!("assert() expects bool, got {}", v.type_name())),
-            }
-        }), false);
+        self.define(
+            "assert",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("assert() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::Bool(true) => Ok(Value::Unit),
+                    Value::Bool(false) => Err("__tf__:assertion failed".to_string()),
+                    v => Err(format!("assert() expects bool, got {}", v.type_name())),
+                }
+            }),
+            false,
+        );
 
-        self.define("assert_eq", native!(|mut args: Vec<Value>| {
-            if args.len() != 2 { return Err("assert_eq() takes 2 args".to_string()); }
-            let b = args.remove(1);
-            let a = args.remove(0);
-            if a == b {
-                Ok(Value::Unit)
-            } else {
-                Err(format!("__tf__:assertion failed: expected {}, got {}", b, a))
-            }
-        }), false);
+        self.define(
+            "assert_eq",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 2 {
+                    return Err("assert_eq() takes 2 args".to_string());
+                }
+                let b = args.remove(1);
+                let a = args.remove(0);
+                if a == b {
+                    Ok(Value::Unit)
+                } else {
+                    Err(format!(
+                        "__tf__:assertion failed: expected {}, got {}",
+                        b, a
+                    ))
+                }
+            }),
+            false,
+        );
 
-        self.define("assert_ne", native!(|mut args: Vec<Value>| {
-            if args.len() != 2 { return Err("assert_ne() takes 2 args".to_string()); }
-            let b = args.remove(1);
-            let a = args.remove(0);
-            if a != b {
-                Ok(Value::Unit)
-            } else {
-                Err(format!("__tf__:assertion failed: expected not {}, got {}", b, a))
-            }
-        }), false);
+        self.define(
+            "assert_ne",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 2 {
+                    return Err("assert_ne() takes 2 args".to_string());
+                }
+                let b = args.remove(1);
+                let a = args.remove(0);
+                if a != b {
+                    Ok(Value::Unit)
+                } else {
+                    Err(format!(
+                        "__tf__:assertion failed: expected not {}, got {}",
+                        b, a
+                    ))
+                }
+            }),
+            false,
+        );
 
-        self.define("assert_ok", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("assert_ok() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::Result(Ok(_)) => Ok(Value::Unit),
-                Value::Result(Err(msg)) => Err(format!("__tf__:assertion failed: expected Ok, got Err({})", msg)),
-                v => Err(format!("assert_ok() expects result, got {}", v.type_name())),
-            }
-        }), false);
+        self.define(
+            "assert_ok",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("assert_ok() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::Result(Ok(_)) => Ok(Value::Unit),
+                    Value::Result(Err(msg)) => Err(format!(
+                        "__tf__:assertion failed: expected Ok, got Err({})",
+                        msg
+                    )),
+                    v => Err(format!("assert_ok() expects result, got {}", v.type_name())),
+                }
+            }),
+            false,
+        );
 
-        self.define("assert_err", native!(|mut args: Vec<Value>| {
-            if args.len() != 1 { return Err("assert_err() takes 1 arg".to_string()); }
-            match args.remove(0) {
-                Value::Result(Err(_)) => Ok(Value::Unit),
-                Value::Result(Ok(_)) => Err("__tf__:assertion failed: expected Err, got Ok".to_string()),
-                v => Err(format!("assert_err() expects result, got {}", v.type_name())),
-            }
-        }), false);
+        self.define(
+            "assert_err",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("assert_err() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::Result(Err(_)) => Ok(Value::Unit),
+                    Value::Result(Ok(_)) => {
+                        Err("__tf__:assertion failed: expected Err, got Ok".to_string())
+                    }
+                    v => Err(format!(
+                        "assert_err() expects result, got {}",
+                        v.type_name()
+                    )),
+                }
+            }),
+            false,
+        );
     }
 
     // ── パブリック評価 ────────────────────────────────────────────────────
@@ -484,7 +620,9 @@ impl Interpreter {
                 self.define(name, v, false);
                 Ok(Value::Unit)
             }
-            Stmt::Fn { name, params, body, .. } => {
+            Stmt::Fn {
+                name, params, body, ..
+            } => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 let captured = self.capture_env();
                 let closure = Value::Closure {
@@ -493,7 +631,9 @@ impl Interpreter {
                     env: Rc::clone(&captured),
                 };
                 // 再帰呼び出しのために自己参照を captured env に追加
-                captured.borrow_mut().insert(name.clone(), closure.clone());
+                captured
+                    .borrow_mut()
+                    .insert(name.clone(), (closure.clone(), false));
                 self.define(name, closure, false);
                 Ok(Value::Unit)
             }
@@ -505,42 +645,58 @@ impl Interpreter {
                 Err(RuntimeError::Return(v))
             }
             Stmt::Expr(expr) => self.eval_expr(expr),
-            Stmt::StructDef { name, fields, derives, .. } => {
-                self.eval_struct_def(name.clone(), fields.clone(), derives.clone())
-            }
-            Stmt::ImplBlock { target, trait_name: _, methods, .. } => {
-                self.eval_impl_block(target.clone(), methods.clone())
-            }
-            Stmt::EnumDef { name, variants, derives, .. } => {
-                self.eval_enum_def(name.clone(), variants.clone(), derives.clone())
-            }
+            Stmt::StructDef {
+                name,
+                fields,
+                derives,
+                ..
+            } => self.eval_struct_def(name.clone(), fields.clone(), derives.clone()),
+            Stmt::ImplBlock {
+                target,
+                trait_name: _,
+                methods,
+                ..
+            } => self.eval_impl_block(target.clone(), methods.clone()),
+            Stmt::EnumDef {
+                name,
+                variants,
+                derives,
+                ..
+            } => self.eval_enum_def(name.clone(), variants.clone(), derives.clone()),
             Stmt::TraitDef { name, methods, .. } => {
                 self.eval_trait_def(name.clone(), methods.clone())
             }
             Stmt::MixinDef { name, methods, .. } => {
                 self.eval_mixin_def(name.clone(), methods.clone())
             }
-            Stmt::ImplTrait { trait_name, target, methods, .. } => {
-                self.eval_impl_trait(trait_name.clone(), target.clone(), methods.clone())
-            }
-            Stmt::DataDef { name, fields, validate_rules, .. } => {
-                self.eval_data_def(name.clone(), fields.clone(), validate_rules.clone())
-            }
-            Stmt::TypestateDef { name, states, state_methods, .. } => {
-                self.eval_typestate_def(name.clone(), states.clone(), state_methods.clone())
-            }
-            Stmt::UseDecl { path, symbols, .. } => {
-                self.eval_use_decl(path, symbols)
-            }
+            Stmt::ImplTrait {
+                trait_name,
+                target,
+                methods,
+                ..
+            } => self.eval_impl_trait(trait_name.clone(), target.clone(), methods.clone()),
+            Stmt::DataDef {
+                name,
+                fields,
+                validate_rules,
+                ..
+            } => self.eval_data_def(name.clone(), fields.clone(), validate_rules.clone()),
+            Stmt::TypestateDef {
+                name,
+                states,
+                state_methods,
+                ..
+            } => self.eval_typestate_def(name.clone(), states.clone(), state_methods.clone()),
+            Stmt::UseDecl { path, symbols, .. } => self.eval_use_decl(path, symbols),
             Stmt::UseRaw { .. } => {
                 // `forge run` では use raw ブロックをスキップして警告を出す（M-6-C）
                 // `forge build` 時のみ有効
                 eprintln!("警告: `use raw` ブロックは `forge run` ではスキップされます（`forge build` 時のみ有効）");
                 Ok(Value::Unit)
             }
-            Stmt::When { condition, body, .. } => {
-                self.eval_when(condition, body)
-            }
+            Stmt::When {
+                condition, body, ..
+            } => self.eval_when(condition, body),
             Stmt::TestBlock { .. } => {
                 // `forge run` では TestBlock をスキップ（FT-1-D）
                 // `forge test` では run_tests() が直接処理する
@@ -553,22 +709,24 @@ impl Interpreter {
 
     fn eval_when_condition(&self, condition: &WhenCondition) -> bool {
         match condition {
-            WhenCondition::Platform(name) => {
-                std::env::consts::OS == name.as_str()
-            }
+            WhenCondition::Platform(name) => std::env::consts::OS == name.as_str(),
             WhenCondition::Feature(name) => {
                 let key = format!("FORGE_FEATURE_{}", name.to_uppercase());
                 std::env::var(&key).map(|v| v == "1").unwrap_or(false)
             }
-            WhenCondition::Env(name) => {
-                std::env::var("FORGE_ENV").map(|v| v == *name).unwrap_or(false)
-            }
+            WhenCondition::Env(name) => std::env::var("FORGE_ENV")
+                .map(|v| v == *name)
+                .unwrap_or(false),
             WhenCondition::Test => self.is_test_mode,
             WhenCondition::Not(inner) => !self.eval_when_condition(inner),
         }
     }
 
-    fn eval_when(&mut self, condition: &WhenCondition, body: &[Stmt]) -> Result<Value, RuntimeError> {
+    fn eval_when(
+        &mut self,
+        condition: &WhenCondition,
+        body: &[Stmt],
+    ) -> Result<Value, RuntimeError> {
         if self.eval_when_condition(condition) {
             let mut result = Value::Unit;
             for stmt in body {
@@ -583,7 +741,11 @@ impl Interpreter {
     // ── テスト実行（FT-1-D）──────────────────────────────────────────────
 
     /// `is_test_mode = true` で TestBlock を収集して順次実行する（FT-1-D）
-    pub fn run_tests(&mut self, stmts: &[Stmt], filter: Option<&str>) -> Vec<crate::test_runner::TestResult> {
+    pub fn run_tests(
+        &mut self,
+        stmts: &[Stmt],
+        filter: Option<&str>,
+    ) -> Vec<crate::test_runner::TestResult> {
         // まずトップレベルの fn/const/struct/enum/trait 等を実行して共有スコープを構築
         for stmt in stmts {
             match stmt {
@@ -595,10 +757,8 @@ impl Interpreter {
         }
 
         // テスト実行前のグローバルスコープのスナップショット（state リセット用）
-        let global_snapshot: HashMap<String, Binding> = self.scopes
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let global_snapshot: HashMap<String, Binding> =
+            self.scopes.first().cloned().unwrap_or_default();
 
         // TestBlock を収集してフィルタを適用し、順次実行する
         let mut results = Vec::new();
@@ -652,7 +812,11 @@ impl Interpreter {
 
     // ── UseDecl の評価 ────────────────────────────────────────────────────
 
-    fn eval_use_decl(&mut self, path: &UsePath, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
+    fn eval_use_decl(
+        &mut self,
+        path: &UsePath,
+        symbols: &UseSymbols,
+    ) -> Result<Value, RuntimeError> {
         match path {
             UsePath::Local(use_path) => {
                 // モジュールローダーが設定されていない場合はエラー
@@ -667,7 +831,8 @@ impl Interpreter {
                 // ./ プレフィックスを除去して正規化
                 let clean_path = use_path.trim_start_matches("./").to_string();
                 if self.loading_stack.contains(&clean_path) {
-                    let mut cycle = self.loading_stack
+                    let mut cycle = self
+                        .loading_stack
                         .iter()
                         .skip_while(|p| p.as_str() != clean_path.as_str())
                         .cloned()
@@ -677,7 +842,9 @@ impl Interpreter {
                 }
 
                 // ディレクトリかどうかを確認する
-                let is_dir = self.module_loader.as_ref()
+                let is_dir = self
+                    .module_loader
+                    .as_ref()
                     .map(|l| l.is_directory(&clean_path))
                     .unwrap_or(false);
 
@@ -711,7 +878,14 @@ impl Interpreter {
     }
 
     /// M-4-C/D: シンボルをインポート記録しながらスコープにバインドする
-    fn record_import(&mut self, sym_name: &str, bind_name: &str, source_path: &str, value: Value, is_wildcard: bool) -> Result<(), RuntimeError> {
+    fn record_import(
+        &mut self,
+        sym_name: &str,
+        bind_name: &str,
+        source_path: &str,
+        value: Value,
+        is_wildcard: bool,
+    ) -> Result<(), RuntimeError> {
         // M-4-D: シンボル衝突検出
         if self.imported_symbols.contains_key(bind_name) {
             let existing_source = self.imported_symbols[bind_name].source_path.clone();
@@ -735,24 +909,34 @@ impl Interpreter {
         }
 
         // インポート情報を記録
-        self.imported_symbols.insert(bind_name.to_string(), ImportInfo {
-            name: sym_name.to_string(),
-            source_path: source_path.to_string(),
-            used: false,
-        });
+        self.imported_symbols.insert(
+            bind_name.to_string(),
+            ImportInfo {
+                name: sym_name.to_string(),
+                source_path: source_path.to_string(),
+                used: false,
+            },
+        );
 
         self.define(bind_name, value, false);
         Ok(())
     }
 
     /// M-4-C/D 対応のファイル use 評価
-    fn eval_file_use_with_tracking(&mut self, use_path: &str, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
-        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+    fn eval_file_use_with_tracking(
+        &mut self,
+        use_path: &str,
+        symbols: &UseSymbols,
+    ) -> Result<Value, RuntimeError> {
+        let loader = self
+            .module_loader
+            .as_mut()
+            .expect("module_loader should be set");
 
         // モジュールを読み込む
-        let stmts = loader.load(use_path).map_err(|e| {
-            RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
-        })?;
+        let stmts = loader
+            .load(use_path)
+            .map_err(|e| RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e)))?;
 
         // モジュールを別スコープで評価して、エクスポートを取得する
         let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
@@ -762,7 +946,12 @@ impl Interpreter {
     }
 
     /// M-4-C/D 対応のディレクトリ use 評価
-    fn eval_directory_use_with_tracking(&mut self, dir_path: &str, symbols: &UseSymbols, depth: usize) -> Result<Value, RuntimeError> {
+    fn eval_directory_use_with_tracking(
+        &mut self,
+        dir_path: &str,
+        symbols: &UseSymbols,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
         // 元のメソッドに委譲するが内部のバインドは tracking 付きに置き換える
         // シンプルに既存の eval_directory_use を呼んで OK（tracking は bind_symbols_to_scope_with_tracking で行う）
         // ただし eval_directory_use は bind_symbols_to_scope を使っているため、
@@ -775,17 +964,18 @@ impl Interpreter {
             );
         }
 
-        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+        let loader = self
+            .module_loader
+            .as_mut()
+            .expect("module_loader should be set");
 
         let mod_forge_path = loader.resolve_mod_forge(dir_path);
 
         match mod_forge_path {
-            None => {
-                Err(RuntimeError::Custom(format!(
-                    "ディレクトリ '{}' が見つかりません",
-                    dir_path
-                )))
-            }
+            None => Err(RuntimeError::Custom(format!(
+                "ディレクトリ '{}' が見つかりません",
+                dir_path
+            ))),
             Some(resolved_path) => {
                 if resolved_path.is_dir() {
                     let stmts = {
@@ -795,7 +985,9 @@ impl Interpreter {
                         })?
                     };
                     let (all_syms, pub_names) = self.eval_module_stmts(&stmts)?;
-                    self.bind_symbols_to_scope_with_tracking(dir_path, symbols, &all_syms, &pub_names)
+                    self.bind_symbols_to_scope_with_tracking(
+                        dir_path, symbols, &all_syms, &pub_names,
+                    )
                 } else {
                     let mod_forge_path_clone = resolved_path.clone();
                     let export = {
@@ -866,13 +1058,20 @@ impl Interpreter {
     }
 
     /// ファイルを直接指定した場合の use 評価
-    fn eval_file_use(&mut self, use_path: &str, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
-        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+    fn eval_file_use(
+        &mut self,
+        use_path: &str,
+        symbols: &UseSymbols,
+    ) -> Result<Value, RuntimeError> {
+        let loader = self
+            .module_loader
+            .as_mut()
+            .expect("module_loader should be set");
 
         // モジュールを読み込む
-        let stmts = loader.load(use_path).map_err(|e| {
-            RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
-        })?;
+        let stmts = loader
+            .load(use_path)
+            .map_err(|e| RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e)))?;
 
         // モジュールを別スコープで評価して、エクスポートを取得する
         let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
@@ -883,7 +1082,12 @@ impl Interpreter {
 
     /// ディレクトリを指定した場合の use 評価
     /// `depth` は re-export チェーンの深さ（3段階超で警告）
-    fn eval_directory_use(&mut self, dir_path: &str, symbols: &UseSymbols, depth: usize) -> Result<Value, RuntimeError> {
+    fn eval_directory_use(
+        &mut self,
+        dir_path: &str,
+        symbols: &UseSymbols,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
         if depth > 3 {
             // 3段階超の re-export チェーン: 警告を出す（エラーにはしない）
             eprintln!(
@@ -892,7 +1096,10 @@ impl Interpreter {
             );
         }
 
-        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+        let loader = self
+            .module_loader
+            .as_mut()
+            .expect("module_loader should be set");
 
         // mod.forge の絶対パスを解決
         let mod_forge_path = loader.resolve_mod_forge(dir_path);
@@ -949,12 +1156,16 @@ impl Interpreter {
             UseSymbols::Multiple(names) => names.clone(),
             UseSymbols::All => {
                 // mod.forge でエクスポートされた全シンボルを収集
-                let all_names: Vec<(String, Option<String>)> = export.symbols.keys()
+                let all_names: Vec<(String, Option<String>)> = export
+                    .symbols
+                    .keys()
                     .filter(|k| !k.starts_with("__all__"))
                     .map(|k| (k.clone(), None))
                     .collect();
                 // __all__ マーカーの処理（pub use basic.* の場合）
-                let wildcard_modules: Vec<String> = export.symbols.iter()
+                let wildcard_modules: Vec<String> = export
+                    .symbols
+                    .iter()
                     .filter(|(k, (_, sym))| k.starts_with("__all__") && sym == "*")
                     .map(|(_, (module, _))| module.clone())
                     .collect();
@@ -962,7 +1173,9 @@ impl Interpreter {
                 for module in &wildcard_modules {
                     let sub_path = format!("{}/{}", dir_path, module);
                     // ファイルか、サブディレクトリかを確認
-                    let is_sub_dir = self.module_loader.as_ref()
+                    let is_sub_dir = self
+                        .module_loader
+                        .as_ref()
                         .map(|l| l.is_directory(&sub_path))
                         .unwrap_or(false);
                     if is_sub_dir {
@@ -994,7 +1207,9 @@ impl Interpreter {
             let sub_path = format!("{}/{}", dir_path, source_module);
 
             // ソースモジュールを読み込む
-            let is_sub_dir = self.module_loader.as_ref()
+            let is_sub_dir = self
+                .module_loader
+                .as_ref()
                 .map(|l| l.is_directory(&sub_path))
                 .unwrap_or(false);
 
@@ -1037,7 +1252,10 @@ impl Interpreter {
                 let stmts = {
                     let loader = self.module_loader.as_mut().expect("module_loader");
                     loader.load(&sub_path).map_err(|e| {
-                        RuntimeError::Custom(format!("モジュール読み込みエラー (mod.forge 経由): {}", e))
+                        RuntimeError::Custom(format!(
+                            "モジュール読み込みエラー (mod.forge 経由): {}",
+                            e
+                        ))
                     })?
                 };
                 self.eval_module_stmts(&stmts)?
@@ -1051,11 +1269,12 @@ impl Interpreter {
                 )));
             }
 
-            let value = all_mod_symbols.get(source_sym).cloned()
-                .ok_or_else(|| RuntimeError::Custom(format!(
+            let value = all_mod_symbols.get(source_sym).cloned().ok_or_else(|| {
+                RuntimeError::Custom(format!(
                     "モジュール '{}' にシンボル '{}' が見つかりません",
                     sub_path, source_sym
-                )))?;
+                ))
+            })?;
 
             // バインド名はエイリアスがあればそれ、なければシンボル名
             let bind_name = alias.as_deref().unwrap_or(sym_name.as_str());
@@ -1124,21 +1343,40 @@ impl Interpreter {
 
     /// モジュールの文を別スコープで評価して、定義されたシンボルをマップとして返す。
     /// 戻り値は `(全シンボルマップ, pub シンボル名セット)` のタプル。
-    fn eval_module_stmts(&mut self, stmts: &[Stmt]) -> Result<(HashMap<String, Value>, std::collections::HashSet<String>), RuntimeError> {
+    fn eval_module_stmts(
+        &mut self,
+        stmts: &[Stmt],
+    ) -> Result<(HashMap<String, Value>, std::collections::HashSet<String>), RuntimeError> {
         self.push_scope();
 
         // pub シンボル名を収集（AST から静的に判断）
         let mut pub_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in stmts {
             match stmt {
-                Stmt::Fn     { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::Let    { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::Const  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::StructDef { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::EnumDef   { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::DataDef   { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::TraitDef  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
-                Stmt::MixinDef  { name, is_pub, .. } if *is_pub => { pub_names.insert(name.clone()); }
+                Stmt::Fn { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::Let { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::Const { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::StructDef { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::EnumDef { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::DataDef { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::TraitDef { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
+                Stmt::MixinDef { name, is_pub, .. } if *is_pub => {
+                    pub_names.insert(name.clone());
+                }
                 _ => {}
             }
         }
@@ -1171,24 +1409,43 @@ impl Interpreter {
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         match expr {
-            Expr::Literal(lit, _)  => Ok(eval_literal(lit)),
-            Expr::Ident(name, _)   => self.eval_ident(name),
-            Expr::BinOp { op, left, right, .. } => self.eval_binop(op, left, right),
-            Expr::UnaryOp { op, operand, .. }   => self.eval_unary(op, operand),
-            Expr::If { cond, then_block, else_block, .. } =>
-                self.eval_if(cond, then_block, else_block.as_deref()),
+            Expr::Literal(lit, _) => Ok(eval_literal(lit)),
+            Expr::Ident(name, _) => self.eval_ident(name),
+            Expr::BinOp {
+                op, left, right, ..
+            } => self.eval_binop(op, left, right),
+            Expr::UnaryOp { op, operand, .. } => self.eval_unary(op, operand),
+            Expr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => self.eval_if(cond, then_block, else_block.as_deref()),
             Expr::While { cond, body, .. } => self.eval_while(cond, body),
-            Expr::For { var, iter, body, .. } => self.eval_for(var, iter, body),
-            Expr::Match { scrutinee, arms, .. } => self.eval_match(scrutinee, arms),
+            Expr::For {
+                var, iter, body, ..
+            } => self.eval_for(var, iter, body),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => self.eval_match(scrutinee, arms),
             Expr::Block { stmts, tail, .. } => self.eval_block(stmts, tail.as_deref()),
             Expr::Call { callee, args, .. } => self.eval_call(callee, args),
-            Expr::MethodCall { object, method, args, .. } =>
-                self.eval_method_call(object, method, args),
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => self.eval_method_call(object, method, args),
             Expr::Closure { params, body, .. } => self.eval_closure(params, body),
+            Expr::Await { expr, .. } => self.eval_expr(expr),
             Expr::Question(inner, _) => self.eval_question(inner),
             Expr::Interpolation { parts, .. } => self.eval_interpolation(parts),
-            Expr::Range { start, end, inclusive, .. } =>
-                self.eval_range(start, end, *inclusive),
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => self.eval_range(start, end, *inclusive),
             Expr::List(items, _) => self.eval_list(items),
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
@@ -1197,12 +1454,18 @@ impl Interpreter {
             Expr::Index { object, index, .. } => self.eval_index(object, index),
             Expr::Field { object, field, .. } => self.eval_field_access(object, field),
             Expr::StructInit { name, fields, .. } => self.eval_struct_init(name, fields),
-            Expr::FieldAssign { object, field, value, .. } => {
-                self.eval_field_assign(object, field, value)
-            }
-            Expr::EnumInit { enum_name, variant, data, .. } => {
-                self.eval_enum_init(enum_name, variant, data)
-            }
+            Expr::FieldAssign {
+                object,
+                field,
+                value,
+                ..
+            } => self.eval_field_assign(object, field, value),
+            Expr::EnumInit {
+                enum_name,
+                variant,
+                data,
+                ..
+            } => self.eval_enum_init(enum_name, variant, data),
         }
     }
 
@@ -1226,14 +1489,14 @@ impl Interpreter {
                 let l = self.eval_expr(left)?;
                 return match l {
                     Value::Bool(false) => Ok(Value::Bool(false)),
-                    Value::Bool(true)  => self.eval_expr(right),
+                    Value::Bool(true) => self.eval_expr(right),
                     _ => Err(type_err("bool", l.type_name())),
                 };
             }
             BinOp::Or => {
                 let l = self.eval_expr(left)?;
                 return match l {
-                    Value::Bool(true)  => Ok(Value::Bool(true)),
+                    Value::Bool(true) => Ok(Value::Bool(true)),
                     Value::Bool(false) => self.eval_expr(right),
                     _ => Err(type_err("bool", l.type_name())),
                 };
@@ -1246,8 +1509,8 @@ impl Interpreter {
 
         match op {
             BinOp::Add => match (l, r) {
-                (Value::Int(a),    Value::Int(b))    => Ok(Value::Int(a.wrapping_add(b))),
-                (Value::Float(a),  Value::Float(b))  => Ok(Value::Float(a + b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
                 (l, r) => Err(type_err(
                     "number/string + number/string",
@@ -1263,12 +1526,12 @@ impl Interpreter {
                 int_float_op(l, r, i64::wrapping_div, std::ops::Div::div, "/")
             }
             BinOp::Rem => int_float_op(l, r, i64::wrapping_rem, std::ops::Rem::rem, "%"),
-            BinOp::Eq  => Ok(Value::Bool(l == r)),
-            BinOp::Ne  => Ok(Value::Bool(l != r)),
-            BinOp::Lt  => cmp_op(l, r, |a, b| a < b, |a, b| a < b),
-            BinOp::Gt  => cmp_op(l, r, |a, b| a > b, |a, b| a > b),
-            BinOp::Le  => cmp_op(l, r, |a, b| a <= b, |a, b| a <= b),
-            BinOp::Ge  => cmp_op(l, r, |a, b| a >= b, |a, b| a >= b),
+            BinOp::Eq => Ok(Value::Bool(l == r)),
+            BinOp::Ne => Ok(Value::Bool(l != r)),
+            BinOp::Lt => cmp_op(l, r, |a, b| a < b, |a, b| a < b),
+            BinOp::Gt => cmp_op(l, r, |a, b| a > b, |a, b| a > b),
+            BinOp::Le => cmp_op(l, r, |a, b| a <= b, |a, b| a <= b),
+            BinOp::Ge => cmp_op(l, r, |a, b| a >= b, |a, b| a >= b),
             BinOp::And | BinOp::Or => unreachable!(),
         }
     }
@@ -1277,7 +1540,7 @@ impl Interpreter {
         let v = self.eval_expr(operand)?;
         match op {
             UnaryOp::Neg => match v {
-                Value::Int(n)   => Ok(Value::Int(-n)),
+                Value::Int(n) => Ok(Value::Int(-n)),
                 Value::Float(f) => Ok(Value::Float(-f)),
                 _ => Err(type_err("number", v.type_name())),
             },
@@ -1288,12 +1551,17 @@ impl Interpreter {
         }
     }
 
-    fn eval_if(&mut self, cond: &Expr, then_block: &Expr, else_block: Option<&Expr>) -> Result<Value, RuntimeError> {
+    fn eval_if(
+        &mut self,
+        cond: &Expr,
+        then_block: &Expr,
+        else_block: Option<&Expr>,
+    ) -> Result<Value, RuntimeError> {
         match self.eval_expr(cond)? {
-            Value::Bool(true)  => self.eval_expr(then_block),
+            Value::Bool(true) => self.eval_expr(then_block),
             Value::Bool(false) => match else_block {
                 Some(e) => self.eval_expr(e),
-                None    => Ok(Value::Unit),
+                None => Ok(Value::Unit),
             },
             v => Err(type_err("bool", v.type_name())),
         }
@@ -1303,7 +1571,7 @@ impl Interpreter {
         loop {
             match self.eval_expr(cond)? {
                 Value::Bool(false) => break,
-                Value::Bool(true)  => match self.eval_expr(body) {
+                Value::Bool(true) => match self.eval_expr(body) {
                     Ok(_) => {}
                     Err(RuntimeError::Return(v)) => return Err(RuntimeError::Return(v)),
                     Err(e) => return Err(e),
@@ -1360,7 +1628,7 @@ impl Interpreter {
             }
             match tail {
                 Some(e) => self.eval_expr(e),
-                None    => Ok(Value::Unit),
+                None => Ok(Value::Unit),
             }
         })();
         self.pop_scope();
@@ -1369,7 +1637,8 @@ impl Interpreter {
 
     fn eval_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Value, RuntimeError> {
         let callee_val = self.eval_expr(callee)?;
-        let arg_vals: Vec<Value> = args.iter()
+        let arg_vals: Vec<Value> = args
+            .iter()
             .map(|a| self.eval_expr(a))
             .collect::<Result<_, _>>()?;
 
@@ -1377,15 +1646,13 @@ impl Interpreter {
             Value::Closure { params, body, env } => {
                 self.call_closure(&params, &body, &env, arg_vals)
             }
-            Value::NativeFunction(NativeFn(f)) => {
-                f(arg_vals).map_err(|msg| {
-                    if let Some(rest) = msg.strip_prefix("__tf__:") {
-                        RuntimeError::TestFailure(rest.to_string())
-                    } else {
-                        RuntimeError::Custom(msg)
-                    }
-                })
-            }
+            Value::NativeFunction(NativeFn(f)) => f(arg_vals).map_err(|msg| {
+                if let Some(rest) = msg.strip_prefix("__tf__:") {
+                    RuntimeError::TestFailure(rest.to_string())
+                } else {
+                    RuntimeError::Custom(msg)
+                }
+            }),
             v => Err(type_err("function", v.type_name())),
         }
     }
@@ -1400,9 +1667,10 @@ impl Interpreter {
         // クロージャ専用のスコープスタックを構築
         let saved = std::mem::take(&mut self.scopes);
 
-        let mut initial: HashMap<String, Binding> = captured.borrow()
+        let mut initial: HashMap<String, Binding> = captured
+            .borrow()
             .iter()
-            .map(|(k, v)| (k.clone(), (v.clone(), false)))
+            .map(|(k, (v, mutable))| (k.clone(), (v.clone(), *mutable)))
             .collect();
 
         for (param, arg) in params.iter().zip(args) {
@@ -1411,39 +1679,67 @@ impl Interpreter {
         self.scopes = vec![initial];
 
         let result = self.eval_expr(body);
+        if let Some(scope) = self.scopes.first() {
+            let mut captured_mut = captured.borrow_mut();
+            for (name, (value, mutable)) in scope {
+                if let Some((captured_value, captured_mutable)) = captured_mut.get_mut(name) {
+                    if *mutable || *captured_mutable {
+                        *captured_value = value.clone();
+                        *captured_mutable = *mutable || *captured_mutable;
+                    }
+                }
+            }
+        }
         self.scopes = saved;
 
         match result {
-            Ok(v)                              => Ok(v),
-            Err(RuntimeError::Return(v))       => Ok(v),
+            Ok(v) => Ok(v),
+            Err(RuntimeError::Return(v)) => Ok(v),
             Err(RuntimeError::PropagateErr(e)) => Ok(Value::Result(Err(e))),
-            Err(e)                             => Err(e),
+            Err(e) => Err(e),
         }
     }
 
-    fn eval_method_call(&mut self, object: &Expr, method: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+    fn eval_method_call(
+        &mut self,
+        object: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Value, RuntimeError> {
         // TypeName::method() のような静的メソッド呼び出しを先に処理
         if let Expr::Ident(type_name, _) = object {
-            if is_type_name_str(type_name) && self.type_registry.structs.contains_key(type_name.as_str()) {
+            if is_type_name_str(type_name)
+                && self.type_registry.structs.contains_key(type_name.as_str())
+            {
                 let type_name_cloned = type_name.clone();
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
                 // static メソッド呼び出し: self として Unit を渡す
                 return self.eval_struct_static_method(&type_name_cloned, method, arg_vals);
             }
             // enum の静的メソッド呼び出し（Unit バリアントアクセス等）
-            if is_type_name_str(type_name) && self.type_registry.enums.contains_key(type_name.as_str()) {
+            if is_type_name_str(type_name)
+                && self.type_registry.enums.contains_key(type_name.as_str())
+            {
                 let type_name_cloned = type_name.clone();
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
                 return self.eval_enum_static_method(&type_name_cloned, method, arg_vals);
             }
             // typestate の静的メソッド呼び出し（new<State>() = new("StateName") として渡される）
-            if is_type_name_str(type_name) && self.type_registry.typestates.contains_key(type_name.as_str()) {
+            if is_type_name_str(type_name)
+                && self
+                    .type_registry
+                    .typestates
+                    .contains_key(type_name.as_str())
+            {
                 let type_name_cloned = type_name.clone();
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
                 return self.eval_typestate_static_method(&type_name_cloned, method, arg_vals);
@@ -1451,7 +1747,8 @@ impl Interpreter {
         }
 
         let obj = self.eval_expr(object)?;
-        let arg_vals: Vec<Value> = args.iter()
+        let arg_vals: Vec<Value> = args
+            .iter()
             .map(|a| self.eval_expr(a))
             .collect::<Result<_, _>>()?;
 
@@ -1465,17 +1762,26 @@ impl Interpreter {
                 let type_name_cloned = type_name.clone();
                 self.eval_enum_method(obj.clone(), &type_name_cloned, method, arg_vals)
             }
-            Value::Typestate { ref type_name, ref current_state, .. } => {
+            Value::Typestate {
+                ref type_name,
+                ref current_state,
+                ..
+            } => {
                 let type_name_cloned = type_name.clone();
                 let current_state_cloned = current_state.clone();
-                self.eval_typestate_method(obj.clone(), &type_name_cloned, &current_state_cloned, method, arg_vals)
+                self.eval_typestate_method(
+                    obj.clone(),
+                    &type_name_cloned,
+                    &current_state_cloned,
+                    method,
+                    arg_vals,
+                )
             }
-            Value::Closure { .. } | Value::NativeFunction(_) => {
-                self.call_value(obj, arg_vals)
-            }
+            Value::Closure { .. } | Value::NativeFunction(_) => self.call_value(obj, arg_vals),
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は {} に対して未実装です",
-                method, other.type_name()
+                method,
+                other.type_name()
             ))),
         }
     }
@@ -1489,7 +1795,9 @@ impl Interpreter {
     ) -> Result<Value, RuntimeError> {
         // instance() は特別処理
         if method == "instance" {
-            let is_singleton = self.type_registry.structs
+            let is_singleton = self
+                .type_registry
+                .structs
                 .get(type_name)
                 .map(|info| info.derives.iter().any(|d| d == "Singleton"))
                 .unwrap_or(false);
@@ -1498,7 +1806,9 @@ impl Interpreter {
                 if let Some(cached) = self.type_registry.singletons.get(type_name).cloned() {
                     return Ok(cached);
                 }
-                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                let fields: Vec<(String, TypeAnn)> = self
+                    .type_registry
+                    .structs
                     .get(type_name)
                     .map(|i| i.fields.clone())
                     .unwrap_or_default();
@@ -1510,20 +1820,26 @@ impl Interpreter {
                     type_name: type_name.to_string(),
                     fields: Rc::new(RefCell::new(field_map)),
                 };
-                self.type_registry.singletons.insert(type_name.to_string(), instance.clone());
+                self.type_registry
+                    .singletons
+                    .insert(type_name.to_string(), instance.clone());
                 return Ok(instance);
             }
         }
 
         // default() / new() は @derive(Default) で有効化
         if method == "default" || method == "new" {
-            let has_default = self.type_registry.structs
+            let has_default = self
+                .type_registry
+                .structs
                 .get(type_name)
                 .map(|info| info.derives.iter().any(|d| d == "Default"))
                 .unwrap_or(false);
 
             if has_default {
-                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                let fields: Vec<(String, TypeAnn)> = self
+                    .type_registry
+                    .structs
                     .get(type_name)
                     .map(|i| i.fields.clone())
                     .unwrap_or_default();
@@ -1568,7 +1884,7 @@ impl Interpreter {
                 let mut out = Vec::new();
                 for item in list {
                     match self.call_value(f.clone(), vec![item.clone()])? {
-                        Value::Bool(true)  => out.push(item),
+                        Value::Bool(true) => out.push(item),
                         Value::Bool(false) => {}
                         v => return Err(type_err("bool", v.type_name())),
                     }
@@ -1594,7 +1910,7 @@ impl Interpreter {
                 for item in list {
                     match self.call_value(f.clone(), vec![item])? {
                         Value::Option(Some(v)) => out.push(*v),
-                        Value::Option(None)    => {}
+                        Value::Option(None) => {}
                         v => return Err(type_err("option", v.type_name())),
                     }
                 }
@@ -1619,7 +1935,7 @@ impl Interpreter {
                 let mut out = Vec::new();
                 for item in list {
                     match self.call_value(f.clone(), vec![item.clone()])? {
-                        Value::Bool(true)  => out.push(item),
+                        Value::Bool(true) => out.push(item),
                         Value::Bool(false) => break,
                         v => return Err(type_err("bool", v.type_name())),
                     }
@@ -1634,8 +1950,11 @@ impl Interpreter {
                 for item in list {
                     if skipping {
                         match self.call_value(f.clone(), vec![item.clone()])? {
-                            Value::Bool(true)  => {}
-                            Value::Bool(false) => { skipping = false; out.push(item); }
+                            Value::Bool(true) => {}
+                            Value::Bool(false) => {
+                                skipping = false;
+                                out.push(item);
+                            }
                             v => return Err(type_err("bool", v.type_name())),
                         }
                     } else {
@@ -1647,7 +1966,9 @@ impl Interpreter {
             // ── 結合 ──────────────────────────────────────────────────────
             "enumerate" => {
                 let list = items.borrow();
-                let out = list.iter().enumerate()
+                let out = list
+                    .iter()
+                    .enumerate()
                     .map(|(i, v)| mk_list(vec![Value::Int(i as i64), v.clone()]))
                     .collect();
                 Ok(mk_list(out))
@@ -1656,7 +1977,9 @@ impl Interpreter {
                 let other = one_list_arg(method, args)?;
                 let a = items.borrow();
                 let b = other.borrow();
-                let out = a.iter().zip(b.iter())
+                let out = a
+                    .iter()
+                    .zip(b.iter())
                     .map(|(x, y)| mk_list(vec![x.clone(), y.clone()]))
                     .collect();
                 Ok(mk_list(out))
@@ -1672,23 +1995,35 @@ impl Interpreter {
                 let mut has_float = false;
                 for item in list.iter() {
                     match item {
-                        Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
-                        Value::Float(n) => { float_sum += n; has_float = true; }
+                        Value::Int(n) => {
+                            int_sum += n;
+                            float_sum += *n as f64;
+                        }
+                        Value::Float(n) => {
+                            float_sum += n;
+                            has_float = true;
+                        }
                         v => return Err(type_err("number", v.type_name())),
                     }
                 }
-                Ok(if has_float { Value::Float(float_sum) } else { Value::Int(int_sum) })
+                Ok(if has_float {
+                    Value::Float(float_sum)
+                } else {
+                    Value::Int(int_sum)
+                })
             }
-            "count" => {
-                Ok(Value::Int(items.borrow().len() as i64))
-            }
+            "count" => Ok(Value::Int(items.borrow().len() as i64)),
             "fold" => {
                 if args.len() < 2 {
                     return Err(RuntimeError::Custom("fold() は引数が2つ必要です".into()));
                 }
                 let mut it = args.into_iter();
-                let seed = it.next().ok_or_else(|| RuntimeError::Custom("fold: seed missing".into()))?;
-                let f    = it.next().ok_or_else(|| RuntimeError::Custom("fold: fn missing".into()))?;
+                let seed = it
+                    .next()
+                    .ok_or_else(|| RuntimeError::Custom("fold: seed missing".into()))?;
+                let f = it
+                    .next()
+                    .ok_or_else(|| RuntimeError::Custom("fold: fn missing".into()))?;
                 let list = items.borrow().clone();
                 let mut acc = seed;
                 for item in list {
@@ -1701,7 +2036,7 @@ impl Interpreter {
                 let list = items.borrow().clone();
                 for item in list {
                     match self.call_value(f.clone(), vec![item])? {
-                        Value::Bool(true)  => return Ok(Value::Bool(true)),
+                        Value::Bool(true) => return Ok(Value::Bool(true)),
                         Value::Bool(false) => {}
                         v => return Err(type_err("bool", v.type_name())),
                     }
@@ -1713,7 +2048,7 @@ impl Interpreter {
                 let list = items.borrow().clone();
                 for item in list {
                     match self.call_value(f.clone(), vec![item])? {
-                        Value::Bool(true)  => {}
+                        Value::Bool(true) => {}
                         Value::Bool(false) => return Ok(Value::Bool(false)),
                         v => return Err(type_err("bool", v.type_name())),
                     }
@@ -1725,7 +2060,7 @@ impl Interpreter {
                 let list = items.borrow().clone();
                 for item in list {
                     match self.call_value(f.clone(), vec![item])? {
-                        Value::Bool(true)  => return Ok(Value::Bool(false)),
+                        Value::Bool(true) => return Ok(Value::Bool(false)),
                         Value::Bool(false) => {}
                         v => return Err(type_err("bool", v.type_name())),
                     }
@@ -1747,7 +2082,9 @@ impl Interpreter {
                 if n < 0 {
                     return Ok(Value::Option(None));
                 }
-                Ok(Value::Option(list.get(n as usize).map(|v| Box::new(v.clone()))))
+                Ok(Value::Option(
+                    list.get(n as usize).map(|v| Box::new(v.clone())),
+                ))
             }
             // ── 最小・最大 ─────────────────────────────────────────────────
             "min" => {
@@ -1783,11 +2120,11 @@ impl Interpreter {
                     return Ok(Value::Option(None));
                 }
                 let mut min_item = list[0].clone();
-                let mut min_key  = self.call_value(f.clone(), vec![min_item.clone()])?;
+                let mut min_key = self.call_value(f.clone(), vec![min_item.clone()])?;
                 for item in list.into_iter().skip(1) {
                     let key = self.call_value(f.clone(), vec![item.clone()])?;
                     if compare_values(&key, &min_key)? == std::cmp::Ordering::Less {
-                        min_key  = key;
+                        min_key = key;
                         min_item = item;
                     }
                 }
@@ -1800,11 +2137,11 @@ impl Interpreter {
                     return Ok(Value::Option(None));
                 }
                 let mut max_item = list[0].clone();
-                let mut max_key  = self.call_value(f.clone(), vec![max_item.clone()])?;
+                let mut max_key = self.call_value(f.clone(), vec![max_item.clone()])?;
                 for item in list.into_iter().skip(1) {
                     let key = self.call_value(f.clone(), vec![item.clone()])?;
                     if compare_values(&key, &max_key)? == std::cmp::Ordering::Greater {
-                        max_key  = key;
+                        max_key = key;
                         max_item = item;
                     }
                 }
@@ -1846,9 +2183,7 @@ impl Interpreter {
                 }
                 Ok(mk_list(out))
             }
-            "collect" => {
-                Ok(mk_list(items.borrow().clone()))
-            }
+            "collect" => Ok(mk_list(items.borrow().clone())),
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は list に対して未実装です",
                 other
@@ -1859,12 +2194,8 @@ impl Interpreter {
     /// Value（Closure または NativeFunction）を引数付きで呼び出す
     fn call_value(&mut self, f: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match f {
-            Value::Closure { params, body, env } => {
-                self.call_closure(&params, &body, &env, args)
-            }
-            Value::NativeFunction(NativeFn(func)) => {
-                func(args).map_err(RuntimeError::Custom)
-            }
+            Value::Closure { params, body, env } => self.call_closure(&params, &body, &env, args),
+            Value::NativeFunction(NativeFn(func)) => func(args).map_err(RuntimeError::Custom),
             v => Err(type_err("function", v.type_name())),
         }
     }
@@ -1880,7 +2211,7 @@ impl Interpreter {
 
     fn eval_question(&mut self, inner: &Expr) -> Result<Value, RuntimeError> {
         match self.eval_expr(inner)? {
-            Value::Result(Ok(v))  => Ok(*v),
+            Value::Result(Ok(v)) => Ok(*v),
             Value::Result(Err(e)) => Err(RuntimeError::PropagateErr(e)),
             v => Err(type_err("result", v.type_name())),
         }
@@ -1891,13 +2222,18 @@ impl Interpreter {
         for part in parts {
             match part {
                 InterpPart::Literal(s) => buf.push_str(s),
-                InterpPart::Expr(e)    => buf.push_str(&self.eval_expr(e)?.to_string()),
+                InterpPart::Expr(e) => buf.push_str(&self.eval_expr(e)?.to_string()),
             }
         }
         Ok(Value::String(buf))
     }
 
-    fn eval_range(&mut self, start: &Expr, end: &Expr, inclusive: bool) -> Result<Value, RuntimeError> {
+    fn eval_range(
+        &mut self,
+        start: &Expr,
+        end: &Expr,
+        inclusive: bool,
+    ) -> Result<Value, RuntimeError> {
         let s = self.eval_expr(start)?;
         let e = self.eval_expr(end)?;
         match (s, e) {
@@ -1909,12 +2245,18 @@ impl Interpreter {
                 };
                 Ok(Value::List(Rc::new(RefCell::new(items))))
             }
-            (s, e) => Err(type_err("number..number", &format!("{}..{}", s.type_name(), e.type_name()))),
+            (s, e) => Err(type_err(
+                "number..number",
+                &format!("{}..{}", s.type_name(), e.type_name()),
+            )),
         }
     }
 
     fn eval_list(&mut self, items: &[Expr]) -> Result<Value, RuntimeError> {
-        let vals: Vec<Value> = items.iter().map(|e| self.eval_expr(e)).collect::<Result<_, _>>()?;
+        let vals: Vec<Value> = items
+            .iter()
+            .map(|e| self.eval_expr(e))
+            .collect::<Result<_, _>>()?;
         Ok(Value::List(Rc::new(RefCell::new(vals))))
     }
 
@@ -1931,7 +2273,10 @@ impl Interpreter {
                     Ok(list[i as usize].clone())
                 }
             }
-            (o, i) => Err(type_err("list[number]", &format!("{}[{}]", o.type_name(), i.type_name()))),
+            (o, i) => Err(type_err(
+                "list[number]",
+                &format!("{}[{}]", o.type_name(), i.type_name()),
+            )),
         }
     }
 
@@ -1989,25 +2334,38 @@ impl Interpreter {
     fn eval_typestate_def(
         &mut self,
         name: String,
-        states: Vec<String>,
+        states: Vec<forge_compiler::ast::TypestateMarker>,
         state_methods: Vec<forge_compiler::ast::TypestateState>,
     ) -> Result<Value, RuntimeError> {
         let mut state_infos: HashMap<String, TypestateStateInfo> = HashMap::new();
+        let state_names = states
+            .iter()
+            .map(|state| state.name().to_string())
+            .collect::<Vec<_>>();
 
         for state in &state_methods {
             let mut methods: HashMap<String, TypestateMethodInfo> = HashMap::new();
             for method in &state.methods {
                 let (next_state, is_result) = extract_transition_info(&method.return_type);
-                methods.insert(method.name.clone(), TypestateMethodInfo {
-                    params: method.params.clone(),
-                    next_state,
-                    is_result,
-                });
+                methods.insert(
+                    method.name.clone(),
+                    TypestateMethodInfo {
+                        params: method.params.clone(),
+                        next_state,
+                        is_result,
+                    },
+                );
             }
             state_infos.insert(state.name.clone(), TypestateStateInfo { methods });
         }
 
-        self.type_registry.typestates.insert(name, TypestateInfo { states, state_infos });
+        self.type_registry.typestates.insert(
+            name,
+            TypestateInfo {
+                states: state_names,
+                state_infos,
+            },
+        );
         Ok(Value::Unit)
     }
 
@@ -2022,17 +2380,25 @@ impl Interpreter {
             // 最初の引数が初期状態名の文字列
             let initial_state = match args.first() {
                 Some(Value::String(s)) => s.clone(),
-                Some(v) => return Err(RuntimeError::Custom(format!(
-                    "{}::new<State>() の State は文字列を期待しましたが {} でした",
-                    type_name, v.type_name()
-                ))),
-                None => return Err(RuntimeError::Custom(format!(
-                    "{}::new<State>() には状態名が必要です", type_name
-                ))),
+                Some(v) => {
+                    return Err(RuntimeError::Custom(format!(
+                        "{}::new<State>() の State は文字列を期待しましたが {} でした",
+                        type_name,
+                        v.type_name()
+                    )))
+                }
+                None => {
+                    return Err(RuntimeError::Custom(format!(
+                        "{}::new<State>() には状態名が必要です",
+                        type_name
+                    )))
+                }
             };
 
             // 状態が typestate に定義されているか確認
-            let valid = self.type_registry.typestates
+            let valid = self
+                .type_registry
+                .typestates
                 .get(type_name)
                 .map(|info| info.states.contains(&initial_state))
                 .unwrap_or(false);
@@ -2052,7 +2418,8 @@ impl Interpreter {
         }
 
         Err(RuntimeError::Custom(format!(
-            "typestate '{}' に静的メソッド '{}' は存在しません", type_name, method
+            "typestate '{}' に静的メソッド '{}' は存在しません",
+            type_name, method
         )))
     }
 
@@ -2066,7 +2433,9 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         // 現在の状態でこのメソッドが使えるか確認
-        let method_info = self.type_registry.typestates
+        let method_info = self
+            .type_registry
+            .typestates
             .get(type_name)
             .and_then(|info| info.state_infos.get(current_state))
             .and_then(|state_info| state_info.methods.get(method))
@@ -2075,10 +2444,13 @@ impl Interpreter {
         match method_info {
             None => {
                 // 他の状態に存在するか確認してエラーメッセージを充実させる
-                let available_in_states: Vec<String> = self.type_registry.typestates
+                let available_in_states: Vec<String> = self
+                    .type_registry
+                    .typestates
                     .get(type_name)
                     .map(|info| {
-                        info.state_infos.iter()
+                        info.state_infos
+                            .iter()
                             .filter(|(_, si)| si.methods.contains_key(method))
                             .map(|(s, _)| s.clone())
                             .collect()
@@ -2093,7 +2465,9 @@ impl Interpreter {
                 } else {
                     return Err(RuntimeError::Custom(format!(
                         "'{}' 状態では '{}' は使用できません（使用可能な状態: {}）",
-                        current_state, method, available_in_states.join(", ")
+                        current_state,
+                        method,
+                        available_in_states.join(", ")
                     )));
                 }
             }
@@ -2102,7 +2476,9 @@ impl Interpreter {
                 if args.len() != info.params.len() {
                     return Err(RuntimeError::Custom(format!(
                         "メソッド '{}' は {} 個の引数を期待しましたが {} 個渡されました",
-                        method, info.params.len(), args.len()
+                        method,
+                        info.params.len(),
+                        args.len()
                     )));
                 }
 
@@ -2161,7 +2537,12 @@ impl Interpreter {
         let native = NativeFn(Rc::new(move |args: Vec<Value>| {
             let self_val = match args.first() {
                 Some(v @ Value::Struct { .. }) => v.clone(),
-                Some(v) => return Err(format!("validate() は struct でのみ使用可能です (got {})", v.type_name())),
+                Some(v) => {
+                    return Err(format!(
+                        "validate() は struct でのみ使用可能です (got {})",
+                        v.type_name()
+                    ))
+                }
                 None => return Err("validate() の第1引数が必要です".to_string()),
             };
 
@@ -2185,7 +2566,8 @@ impl Interpreter {
         }));
 
         if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-            info.methods.insert("validate".to_string(), MethodImpl::Native(native));
+            info.methods
+                .insert("validate".to_string(), MethodImpl::Native(native));
         }
         Ok(())
     }
@@ -2199,11 +2581,16 @@ impl Interpreter {
         match derive {
             "Debug" => {
                 let native = NativeFn(Rc::new(|args: Vec<Value>| {
-                    if let Some(Value::Struct { type_name: ref actual_tn, ref fields }) = args.first() {
+                    if let Some(Value::Struct {
+                        type_name: ref actual_tn,
+                        ref fields,
+                    }) = args.first()
+                    {
                         let fields = fields.borrow();
                         let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
-                        let field_str = sorted.iter()
+                        let field_str = sorted
+                            .iter()
                             .map(|(k, v)| format!("{}: {}", k, v))
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -2213,7 +2600,8 @@ impl Interpreter {
                     }
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("display".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("display".to_string(), MethodImpl::Native(native));
                 }
             }
             "Clone" => {
@@ -2225,7 +2613,8 @@ impl Interpreter {
                     }
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("clone".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("clone".to_string(), MethodImpl::Native(native));
                 }
             }
             "Accessor" => {
@@ -2233,18 +2622,20 @@ impl Interpreter {
                 for field_name in field_names {
                     // getter
                     let fn_clone = field_name.clone();
-                    let getter_native = NativeFn(Rc::new(move |args: Vec<Value>| {
-                        if let Some(Value::Struct { ref fields, .. }) = args.first() {
-                            fields.borrow().get(&fn_clone)
-                                .cloned()
-                                .ok_or_else(|| format!("フィールド '{}' が存在しません", fn_clone))
-                        } else {
-                            Err("getter は struct でのみ使用可能です".to_string())
-                        }
-                    }));
+                    let getter_native =
+                        NativeFn(Rc::new(move |args: Vec<Value>| {
+                            if let Some(Value::Struct { ref fields, .. }) = args.first() {
+                                fields.borrow().get(&fn_clone).cloned().ok_or_else(|| {
+                                    format!("フィールド '{}' が存在しません", fn_clone)
+                                })
+                            } else {
+                                Err("getter は struct でのみ使用可能です".to_string())
+                            }
+                        }));
                     let getter_name = format!("get_{}", field_name);
                     if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                        info.methods.insert(getter_name, MethodImpl::Native(getter_native));
+                        info.methods
+                            .insert(getter_name, MethodImpl::Native(getter_native));
                     }
 
                     // setter
@@ -2254,7 +2645,9 @@ impl Interpreter {
                             return Err(format!("set_{}() は2引数必要です", fn_clone2));
                         }
                         if let Value::Struct { ref fields, .. } = args[0] {
-                            fields.borrow_mut().insert(fn_clone2.clone(), args[1].clone());
+                            fields
+                                .borrow_mut()
+                                .insert(fn_clone2.clone(), args[1].clone());
                             Ok(Value::Unit)
                         } else {
                             Err("setter は struct でのみ使用可能です".to_string())
@@ -2262,7 +2655,8 @@ impl Interpreter {
                     }));
                     let setter_name = format!("set_{}", field_name);
                     if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                        info.methods.insert(setter_name, MethodImpl::Native(setter_native));
+                        info.methods
+                            .insert(setter_name, MethodImpl::Native(setter_native));
                     }
                 }
             }
@@ -2280,13 +2674,14 @@ impl Interpreter {
                     Ok(Value::Bool(args[0] == args[1]))
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("eq".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("eq".to_string(), MethodImpl::Native(native));
                 }
             }
             "Hash" => {
                 // hash() メソッドを生成: struct のハッシュ値を number として返す
-                use std::hash::{Hash, Hasher};
                 use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
                 let native = NativeFn(Rc::new(|args: Vec<Value>| {
                     if let Some(v @ Value::Struct { .. }) = args.first() {
                         let mut hasher = DefaultHasher::new();
@@ -2297,7 +2692,8 @@ impl Interpreter {
                     }
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("hash".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("hash".to_string(), MethodImpl::Native(native));
                 }
             }
             "Ord" => {
@@ -2311,14 +2707,15 @@ impl Interpreter {
                     let ord = compare_struct_fields(&args[0], &args[1], &field_names)
                         .map_err(|e| format!("{:?}", e))?;
                     let result = match ord {
-                        std::cmp::Ordering::Less    => -1_i64,
-                        std::cmp::Ordering::Equal   =>  0_i64,
-                        std::cmp::Ordering::Greater =>  1_i64,
+                        std::cmp::Ordering::Less => -1_i64,
+                        std::cmp::Ordering::Equal => 0_i64,
+                        std::cmp::Ordering::Greater => 1_i64,
                     };
                     Ok(Value::Int(result))
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("compare".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("compare".to_string(), MethodImpl::Native(native));
                     // Ord フラグを derives に記録（compare_values で参照）
                     if !info.derives.contains(&"Ord".to_string()) {
                         info.derives.push("Ord".to_string());
@@ -2360,11 +2757,14 @@ impl Interpreter {
                 // enum のデフォルト Display が既に to_string() を提供しているので
                 // display() メソッドも同様に実装
                 if !self.type_registry.structs.contains_key(type_name) {
-                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
-                        fields: vec![],
-                        derives: vec![],
-                        methods: HashMap::new(),
-                    });
+                    self.type_registry.structs.insert(
+                        type_name.to_string(),
+                        StructInfo {
+                            fields: vec![],
+                            derives: vec![],
+                            methods: HashMap::new(),
+                        },
+                    );
                 }
                 let native = NativeFn(Rc::new(|args: Vec<Value>| {
                     if let Some(v @ Value::Enum { .. }) = args.first() {
@@ -2374,16 +2774,20 @@ impl Interpreter {
                     }
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("display".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("display".to_string(), MethodImpl::Native(native));
                 }
             }
             "Clone" => {
                 if !self.type_registry.structs.contains_key(type_name) {
-                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
-                        fields: vec![],
-                        derives: vec![],
-                        methods: HashMap::new(),
-                    });
+                    self.type_registry.structs.insert(
+                        type_name.to_string(),
+                        StructInfo {
+                            fields: vec![],
+                            derives: vec![],
+                            methods: HashMap::new(),
+                        },
+                    );
                 }
                 let native = NativeFn(Rc::new(|args: Vec<Value>| {
                     if let Some(v @ Value::Enum { .. }) = args.first() {
@@ -2393,16 +2797,20 @@ impl Interpreter {
                     }
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("clone".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("clone".to_string(), MethodImpl::Native(native));
                 }
             }
             "Eq" => {
                 if !self.type_registry.structs.contains_key(type_name) {
-                    self.type_registry.structs.insert(type_name.to_string(), StructInfo {
-                        fields: vec![],
-                        derives: vec![],
-                        methods: HashMap::new(),
-                    });
+                    self.type_registry.structs.insert(
+                        type_name.to_string(),
+                        StructInfo {
+                            fields: vec![],
+                            derives: vec![],
+                            methods: HashMap::new(),
+                        },
+                    );
                 }
                 let native = NativeFn(Rc::new(|args: Vec<Value>| {
                     if args.len() < 2 {
@@ -2411,7 +2819,8 @@ impl Interpreter {
                     Ok(Value::Bool(args[0] == args[1]))
                 }));
                 if let Some(info) = self.type_registry.structs.get_mut(type_name) {
-                    info.methods.insert("eq".to_string(), MethodImpl::Native(native));
+                    info.methods
+                        .insert("eq".to_string(), MethodImpl::Native(native));
                 }
             }
             _ => {} // 未知の derive は無視
@@ -2428,7 +2837,8 @@ impl Interpreter {
         let enum_data = match data {
             EnumInitData::None => EnumData::Unit,
             EnumInitData::Tuple(exprs) => {
-                let vals: Vec<Value> = exprs.iter()
+                let vals: Vec<Value> = exprs
+                    .iter()
                     .map(|e| self.eval_expr(e))
                     .collect::<Result<_, _>>()?;
                 EnumData::Tuple(vals)
@@ -2458,7 +2868,9 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         // struct レジストリ経由でメソッドを探す（derive で登録）
-        let method_impl = self.type_registry.structs
+        let method_impl = self
+            .type_registry
+            .structs
             .get(type_name)
             .and_then(|info| info.methods.get(method))
             .cloned();
@@ -2504,13 +2916,17 @@ impl Interpreter {
         _args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         // enum のバリアントを Unit として返す（TypeName::VariantName() の形式）
-        let variant_exists = self.type_registry.enums
+        let variant_exists = self
+            .type_registry
+            .enums
             .get(type_name)
-            .map(|info| info.variants.iter().any(|v| match v {
-                EnumVariant::Unit(n) => n == method,
-                EnumVariant::Tuple(n, _) => n == method,
-                EnumVariant::Struct(n, _) => n == method,
-            }))
+            .map(|info| {
+                info.variants.iter().any(|v| match v {
+                    EnumVariant::Unit(n) => n == method,
+                    EnumVariant::Tuple(n, _) => n == method,
+                    EnumVariant::Struct(n, _) => n == method,
+                })
+            })
             .unwrap_or(false);
 
         if variant_exists {
@@ -2533,15 +2949,19 @@ impl Interpreter {
         methods: Vec<FnDef>,
     ) -> Result<Value, RuntimeError> {
         if !self.type_registry.structs.contains_key(&target) {
-            self.type_registry.structs.insert(target.clone(), StructInfo {
-                fields: vec![],
-                derives: vec![],
-                methods: HashMap::new(),
-            });
+            self.type_registry.structs.insert(
+                target.clone(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    methods: HashMap::new(),
+                },
+            );
         }
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in methods {
-                info.methods.insert(method.name.clone(), MethodImpl::Forge(method));
+                info.methods
+                    .insert(method.name.clone(), MethodImpl::Forge(method));
             }
         }
         Ok(Value::Unit)
@@ -2549,7 +2969,11 @@ impl Interpreter {
 
     // ── T-3-C: trait / mixin / impl trait サポート ────────────────────────
 
-    fn eval_trait_def(&mut self, name: String, methods: Vec<TraitMethod>) -> Result<Value, RuntimeError> {
+    fn eval_trait_def(
+        &mut self,
+        name: String,
+        methods: Vec<TraitMethod>,
+    ) -> Result<Value, RuntimeError> {
         let mut default_methods = HashMap::new();
 
         for method in methods {
@@ -2586,7 +3010,9 @@ impl Interpreter {
         for method in methods {
             method_map.insert(method.name.clone(), method);
         }
-        let info = MixinInfo { methods: method_map };
+        let info = MixinInfo {
+            methods: method_map,
+        };
         self.type_registry.mixins.insert(name, info);
         Ok(Value::Unit)
     }
@@ -2599,23 +3025,29 @@ impl Interpreter {
     ) -> Result<Value, RuntimeError> {
         // 型レジストリに struct が存在しない場合は作成
         if !self.type_registry.structs.contains_key(&target) {
-            self.type_registry.structs.insert(target.clone(), StructInfo {
-                fields: vec![],
-                derives: vec![],
-                methods: HashMap::new(),
-            });
+            self.type_registry.structs.insert(
+                target.clone(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    methods: HashMap::new(),
+                },
+            );
         }
 
         // 明示的に実装されたメソッドを型に登録（優先度: 直接 impl）
         let explicit_method_names: Vec<String> = methods.iter().map(|m| m.name.clone()).collect();
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in &methods {
-                info.methods.insert(method.name.clone(), MethodImpl::Forge(method.clone()));
+                info.methods
+                    .insert(method.name.clone(), MethodImpl::Forge(method.clone()));
             }
         }
 
         // trait のデフォルト実装を（明示的 impl がない場合のみ）型に登録
-        let trait_defaults: Option<HashMap<String, FnDef>> = self.type_registry.traits
+        let trait_defaults: Option<HashMap<String, FnDef>> = self
+            .type_registry
+            .traits
             .get(&trait_name)
             .map(|ti| ti.default_methods.clone());
 
@@ -2624,7 +3056,8 @@ impl Interpreter {
                 for (method_name, fn_def) in defaults {
                     if !explicit_method_names.contains(&method_name) {
                         // デフォルト実装を登録（明示的 impl がない場合のみ）
-                        struct_info.methods
+                        struct_info
+                            .methods
                             .entry(method_name)
                             .or_insert(MethodImpl::Forge(fn_def));
                     }
@@ -2633,7 +3066,9 @@ impl Interpreter {
         }
 
         // mixin の場合: デフォルトメソッドを登録（名前衝突チェックあり）
-        let mixin_methods: Option<HashMap<String, FnDef>> = self.type_registry.mixins
+        let mixin_methods: Option<HashMap<String, FnDef>> = self
+            .type_registry
+            .mixins
             .get(&trait_name)
             .map(|mi| mi.methods.clone());
 
@@ -2656,7 +3091,9 @@ impl Interpreter {
             }
             if let Some(struct_info) = self.type_registry.structs.get_mut(&target) {
                 for (method_name, fn_def) in mixin_map {
-                    struct_info.methods.insert(method_name, MethodImpl::Forge(fn_def));
+                    struct_info
+                        .methods
+                        .insert(method_name, MethodImpl::Forge(fn_def));
                 }
             }
         }
@@ -2684,32 +3121,29 @@ impl Interpreter {
         let obj = self.eval_expr(object)?;
         match obj {
             Value::Struct { ref fields, .. } => {
-                fields.borrow().get(field)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::Custom(
-                        format!("フィールド '{}' が存在しません", field)
-                    ))
+                fields.borrow().get(field).cloned().ok_or_else(|| {
+                    RuntimeError::Custom(format!("フィールド '{}' が存在しません", field))
+                })
             }
             // Option(Some(struct)) → 中身の struct に対してフィールドアクセスを透過させる
-            Value::Option(Some(ref inner)) => {
-                match inner.as_ref() {
-                    Value::Struct { ref fields, .. } => {
-                        fields.borrow().get(field)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::Custom(
-                                format!("フィールド '{}' が存在しません", field)
-                            ))
-                    }
-                    _ => Err(RuntimeError::Custom(format!(
-                        "フィールドアクセスは struct でのみ使用可能です (got option<{}>)", inner.type_name()
-                    ))),
+            Value::Option(Some(ref inner)) => match inner.as_ref() {
+                Value::Struct { ref fields, .. } => {
+                    fields.borrow().get(field).cloned().ok_or_else(|| {
+                        RuntimeError::Custom(format!("フィールド '{}' が存在しません", field))
+                    })
                 }
-            }
-            Value::Option(None) => Err(RuntimeError::Custom(
-                format!("none に対してフィールド '{}' にアクセスできません", field)
-            )),
+                _ => Err(RuntimeError::Custom(format!(
+                    "フィールドアクセスは struct でのみ使用可能です (got option<{}>)",
+                    inner.type_name()
+                ))),
+            },
+            Value::Option(None) => Err(RuntimeError::Custom(format!(
+                "none に対してフィールド '{}' にアクセスできません",
+                field
+            ))),
             _ => Err(RuntimeError::Custom(format!(
-                "フィールドアクセスは struct でのみ使用可能です (got {})", obj.type_name()
+                "フィールドアクセスは struct でのみ使用可能です (got {})",
+                obj.type_name()
             ))),
         }
     }
@@ -2728,7 +3162,8 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
             _ => Err(RuntimeError::Custom(format!(
-                "フィールド代入は struct でのみ使用可能です (got {})", obj.type_name()
+                "フィールド代入は struct でのみ使用可能です (got {})",
+                obj.type_name()
             ))),
         }
     }
@@ -2742,7 +3177,9 @@ impl Interpreter {
     ) -> Result<Value, RuntimeError> {
         // Singleton::instance() の特別処理
         if method == "instance" {
-            let is_singleton = self.type_registry.structs
+            let is_singleton = self
+                .type_registry
+                .structs
                 .get(type_name)
                 .map(|info| info.derives.iter().any(|d| d == "Singleton"))
                 .unwrap_or(false);
@@ -2752,7 +3189,9 @@ impl Interpreter {
                     return Ok(cached);
                 }
                 // 初回: ゼロ値で struct を作る
-                let fields: Vec<(String, TypeAnn)> = self.type_registry.structs
+                let fields: Vec<(String, TypeAnn)> = self
+                    .type_registry
+                    .structs
                     .get(type_name)
                     .map(|i| i.fields.clone())
                     .unwrap_or_default();
@@ -2764,13 +3203,17 @@ impl Interpreter {
                     type_name: type_name.to_string(),
                     fields: Rc::new(RefCell::new(field_map)),
                 };
-                self.type_registry.singletons.insert(type_name.to_string(), instance.clone());
+                self.type_registry
+                    .singletons
+                    .insert(type_name.to_string(), instance.clone());
                 return Ok(instance);
             }
         }
 
         // 型レジストリからメソッドを検索
-        let method_impl = self.type_registry.structs
+        let method_impl = self
+            .type_registry
+            .structs
             .get(type_name)
             .and_then(|info| info.methods.get(method))
             .cloned();
@@ -2794,7 +3237,10 @@ impl Interpreter {
                 }
 
                 // self を束縛（has_state_self なら mutable）
-                initial.insert("self".to_string(), (self_val.clone(), fn_def.has_state_self));
+                initial.insert(
+                    "self".to_string(),
+                    (self_val.clone(), fn_def.has_state_self),
+                );
 
                 // パラメータを束縛
                 for (param, arg) in fn_def.params.iter().zip(args) {
@@ -2836,10 +3282,10 @@ fn mk_list(items: Vec<Value>) -> Value {
 fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeError> {
     use std::cmp::Ordering::Equal;
     match (a, b) {
-        (Value::Int(x),    Value::Int(y))    => Ok(x.cmp(y)),
-        (Value::Float(x),  Value::Float(y))  => Ok(x.partial_cmp(y).unwrap_or(Equal)),
-        (Value::Int(x),    Value::Float(y))  => Ok((*x as f64).partial_cmp(y).unwrap_or(Equal)),
-        (Value::Float(x),  Value::Int(y))    => Ok(x.partial_cmp(&(*y as f64)).unwrap_or(Equal)),
+        (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => Ok(x.partial_cmp(y).unwrap_or(Equal)),
+        (Value::Int(x), Value::Float(y)) => Ok((*x as f64).partial_cmp(y).unwrap_or(Equal)),
+        (Value::Float(x), Value::Int(y)) => Ok(x.partial_cmp(&(*y as f64)).unwrap_or(Equal)),
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
         (Value::Struct { fields: fa, .. }, Value::Struct { fields: fb, .. }) => {
             // フィールドをキー順でソートして辞書順比較
@@ -2848,12 +3294,12 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeErr
             let mut keys_a: Vec<&String> = borrow_a.keys().collect();
             keys_a.sort();
             for key in keys_a {
-                let va = borrow_a.get(key).ok_or_else(|| RuntimeError::Custom(
-                    format!("フィールド '{}' が存在しません", key)
-                ))?;
-                let vb = borrow_b.get(key).ok_or_else(|| RuntimeError::Custom(
-                    format!("比較対象にフィールド '{}' がありません", key)
-                ))?;
+                let va = borrow_a.get(key).ok_or_else(|| {
+                    RuntimeError::Custom(format!("フィールド '{}' が存在しません", key))
+                })?;
+                let vb = borrow_b.get(key).ok_or_else(|| {
+                    RuntimeError::Custom(format!("比較対象にフィールド '{}' がありません", key))
+                })?;
                 let ord = compare_values(va, vb)?;
                 if ord != std::cmp::Ordering::Equal {
                     return Ok(ord);
@@ -2862,7 +3308,9 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RuntimeErr
             Ok(std::cmp::Ordering::Equal)
         }
         _ => Err(RuntimeError::Custom(format!(
-            "比較できない型: {} と {}", a.type_name(), b.type_name()
+            "比較できない型: {} と {}",
+            a.type_name(),
+            b.type_name()
         ))),
     }
 }
@@ -2876,12 +3324,10 @@ fn extract_transition_info(return_type: &Option<TypeAnn>) -> (Option<String>, bo
     match return_type {
         None => (None, false),
         Some(TypeAnn::Named(state_name)) => (Some(state_name.clone()), false),
-        Some(TypeAnn::Result(inner)) => {
-            match inner.as_ref() {
-                TypeAnn::Named(state_name) => (Some(state_name.clone()), true),
-                _ => (None, true),
-            }
-        }
+        Some(TypeAnn::Result(inner)) => match inner.as_ref() {
+            TypeAnn::Named(state_name) => (Some(state_name.clone()), true),
+            _ => (None, true),
+        },
         _ => (None, false),
     }
 }
@@ -2897,12 +3343,12 @@ fn compare_struct_fields(
             let borrow_a = fa.borrow();
             let borrow_b = fb.borrow();
             for key in field_order {
-                let va = borrow_a.get(key).ok_or_else(|| RuntimeError::Custom(
-                    format!("フィールド '{}' が存在しません", key)
-                ))?;
-                let vb = borrow_b.get(key).ok_or_else(|| RuntimeError::Custom(
-                    format!("比較対象にフィールド '{}' がありません", key)
-                ))?;
+                let va = borrow_a.get(key).ok_or_else(|| {
+                    RuntimeError::Custom(format!("フィールド '{}' が存在しません", key))
+                })?;
+                let vb = borrow_b.get(key).ok_or_else(|| {
+                    RuntimeError::Custom(format!("比較対象にフィールド '{}' がありません", key))
+                })?;
                 let ord = compare_values(va, vb)?;
                 if ord != std::cmp::Ordering::Equal {
                     return Ok(ord);
@@ -2916,7 +3362,8 @@ fn compare_struct_fields(
 
 /// メソッドの第1引数として呼び出し可能な Value を取り出す
 fn one_fn_arg(method: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
-    args.into_iter().next()
+    args.into_iter()
+        .next()
         .ok_or_else(|| RuntimeError::Custom(format!("{}() は引数が1つ必要です", method)))
 }
 
@@ -2924,8 +3371,11 @@ fn one_fn_arg(method: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
 fn one_int_arg(method: &str, args: Vec<Value>) -> Result<i64, RuntimeError> {
     match args.into_iter().next() {
         Some(Value::Int(n)) => Ok(n),
-        Some(v)             => Err(type_err("number", v.type_name())),
-        None => Err(RuntimeError::Custom(format!("{}() は引数が1つ必要です", method))),
+        Some(v) => Err(type_err("number", v.type_name())),
+        None => Err(RuntimeError::Custom(format!(
+            "{}() は引数が1つ必要です",
+            method
+        ))),
     }
 }
 
@@ -2933,8 +3383,11 @@ fn one_int_arg(method: &str, args: Vec<Value>) -> Result<i64, RuntimeError> {
 fn one_list_arg(method: &str, args: Vec<Value>) -> Result<Rc<RefCell<Vec<Value>>>, RuntimeError> {
     match args.into_iter().next() {
         Some(Value::List(lst)) => Ok(lst),
-        Some(v)                => Err(type_err("list", v.type_name())),
-        None => Err(RuntimeError::Custom(format!("{}() は引数が1つ必要です", method))),
+        Some(v) => Err(type_err("list", v.type_name())),
+        None => Err(RuntimeError::Custom(format!(
+            "{}() は引数が1つ必要です",
+            method
+        ))),
     }
 }
 
@@ -2959,8 +3412,17 @@ fn sort_by_key(
             return std::cmp::Ordering::Equal;
         }
         match compare_values(ka, kb) {
-            Ok(ord) => if descending { ord.reverse() } else { ord },
-            Err(e)  => { sort_err = Some(e); std::cmp::Ordering::Equal }
+            Ok(ord) => {
+                if descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+            Err(e) => {
+                sort_err = Some(e);
+                std::cmp::Ordering::Equal
+            }
         }
     });
     if let Some(e) = sort_err {
@@ -2980,7 +3442,7 @@ fn check_constraint(
     // Option 型のフィールドは None なら制約をスキップ（nullable）
     let val = match field_val {
         None => return Some("field_missing"),
-        Some(Value::Option(None)) => return None,  // None なら制約スキップ
+        Some(Value::Option(None)) => return None, // None なら制約スキップ
         Some(Value::Option(Some(inner))) => inner.as_ref(),
         Some(v) => v,
     };
@@ -2993,88 +3455,82 @@ fn check_constraint(
             };
             let len = s.chars().count();
             if let Some(m) = min {
-                if len < *m { return Some("length"); }
+                if len < *m {
+                    return Some("length");
+                }
             }
             if let Some(m) = max {
-                if len > *m { return Some("length"); }
+                if len > *m {
+                    return Some("length");
+                }
             }
             None
         }
-        Constraint::Alphanumeric => {
-            match val {
-                Value::String(s) if s.chars().all(|c| c.is_alphanumeric()) => None,
-                Value::String(_) => Some("alphanumeric"),
-                _ => Some("alphanumeric"),
-            }
-        }
-        Constraint::EmailFormat => {
-            match val {
-                Value::String(s) => {
-                    if s.contains('@') && s.contains('.') {
-                        None
-                    } else {
-                        Some("email_format")
-                    }
+        Constraint::Alphanumeric => match val {
+            Value::String(s) if s.chars().all(|c| c.is_alphanumeric()) => None,
+            Value::String(_) => Some("alphanumeric"),
+            _ => Some("alphanumeric"),
+        },
+        Constraint::EmailFormat => match val {
+            Value::String(s) => {
+                if s.contains('@') && s.contains('.') {
+                    None
+                } else {
+                    Some("email_format")
                 }
-                _ => Some("email_format"),
             }
-        }
-        Constraint::UrlFormat => {
-            match val {
-                Value::String(s) => {
-                    if s.starts_with("http://") || s.starts_with("https://") {
-                        None
-                    } else {
-                        Some("url_format")
-                    }
+            _ => Some("email_format"),
+        },
+        Constraint::UrlFormat => match val {
+            Value::String(s) => {
+                if s.starts_with("http://") || s.starts_with("https://") {
+                    None
+                } else {
+                    Some("url_format")
                 }
-                _ => Some("url_format"),
             }
-        }
+            _ => Some("url_format"),
+        },
         Constraint::Range { min, max } => {
             let n = match val {
-                Value::Int(n)   => *n as f64,
+                Value::Int(n) => *n as f64,
                 Value::Float(f) => *f,
                 _ => return Some("range"),
             };
             if let Some(m) = min {
-                if n < *m { return Some("range"); }
+                if n < *m {
+                    return Some("range");
+                }
             }
             if let Some(m) = max {
-                if n > *m { return Some("range"); }
+                if n > *m {
+                    return Some("range");
+                }
             }
             None
         }
-        Constraint::ContainsDigit => {
-            match val {
-                Value::String(s) if s.chars().any(|c| c.is_ascii_digit()) => None,
-                Value::String(_) => Some("contains_digit"),
-                _ => Some("contains_digit"),
-            }
-        }
-        Constraint::ContainsUppercase => {
-            match val {
-                Value::String(s) if s.chars().any(|c| c.is_uppercase()) => None,
-                Value::String(_) => Some("contains_uppercase"),
-                _ => Some("contains_uppercase"),
-            }
-        }
-        Constraint::ContainsLowercase => {
-            match val {
-                Value::String(s) if s.chars().any(|c| c.is_lowercase()) => None,
-                Value::String(_) => Some("contains_lowercase"),
-                _ => Some("contains_lowercase"),
-            }
-        }
-        Constraint::NotEmpty => {
-            match val {
-                Value::String(s) if !s.is_empty() => None,
-                Value::String(_) => Some("not_empty"),
-                Value::List(list) if !list.borrow().is_empty() => None,
-                Value::List(_) => Some("not_empty"),
-                _ => Some("not_empty"),
-            }
-        }
+        Constraint::ContainsDigit => match val {
+            Value::String(s) if s.chars().any(|c| c.is_ascii_digit()) => None,
+            Value::String(_) => Some("contains_digit"),
+            _ => Some("contains_digit"),
+        },
+        Constraint::ContainsUppercase => match val {
+            Value::String(s) if s.chars().any(|c| c.is_uppercase()) => None,
+            Value::String(_) => Some("contains_uppercase"),
+            _ => Some("contains_uppercase"),
+        },
+        Constraint::ContainsLowercase => match val {
+            Value::String(s) if s.chars().any(|c| c.is_lowercase()) => None,
+            Value::String(_) => Some("contains_lowercase"),
+            _ => Some("contains_lowercase"),
+        },
+        Constraint::NotEmpty => match val {
+            Value::String(s) if !s.is_empty() => None,
+            Value::String(_) => Some("not_empty"),
+            Value::List(list) if !list.borrow().is_empty() => None,
+            Value::List(_) => Some("not_empty"),
+            _ => Some("not_empty"),
+        },
         Constraint::Matches(pattern) => {
             // 簡易的な正規表現マッチ（シンプル実装: 完全一致のみ）
             // 本格的な正規表現ライブラリは依存追加が必要なので
@@ -3090,10 +3546,10 @@ fn check_constraint(
 
 fn eval_literal(lit: &Literal) -> Value {
     match lit {
-        Literal::Int(n)    => Value::Int(*n),
-        Literal::Float(f)  => Value::Float(*f),
+        Literal::Int(n) => Value::Int(*n),
+        Literal::Float(f) => Value::Float(*f),
         Literal::String(s) => Value::String(s.clone()),
-        Literal::Bool(b)   => Value::Bool(*b),
+        Literal::Bool(b) => Value::Bool(*b),
     }
 }
 
@@ -3105,13 +3561,14 @@ fn type_err(expected: &str, found: &str) -> RuntimeError {
 }
 
 fn int_float_op(
-    l: Value, r: Value,
+    l: Value,
+    r: Value,
     int_op: impl Fn(i64, i64) -> i64,
     float_op: impl Fn(f64, f64) -> f64,
     sym: &str,
 ) -> Result<Value, RuntimeError> {
     match (l, r) {
-        (Value::Int(a),   Value::Int(b))   => Ok(Value::Int(int_op(a, b))),
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(a, b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(a, b))),
         (l, r) => Err(type_err(
             &format!("number {} number", sym),
@@ -3121,24 +3578,28 @@ fn int_float_op(
 }
 
 fn cmp_op(
-    l: Value, r: Value,
+    l: Value,
+    r: Value,
     int_pred: impl Fn(i64, i64) -> bool,
     float_pred: impl Fn(f64, f64) -> bool,
 ) -> Result<Value, RuntimeError> {
     match (&l, &r) {
-        (Value::Int(a),    Value::Int(b))    => Ok(Value::Bool(int_pred(*a, *b))),
-        (Value::Float(a),  Value::Float(b))  => Ok(Value::Bool(float_pred(*a, *b))),
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(int_pred(*a, *b))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(float_pred(*a, *b))),
         (Value::Struct { .. }, Value::Struct { .. }) => {
             let ord = compare_values(&l, &r)?;
             // int_pred を ordering に対応させる: (a, b) として -1/0/1 に変換
             let (ai, bi): (i64, i64) = match ord {
-                std::cmp::Ordering::Less    => (-1, 0),
-                std::cmp::Ordering::Equal   => ( 0, 0),
-                std::cmp::Ordering::Greater => ( 1, 0),
+                std::cmp::Ordering::Less => (-1, 0),
+                std::cmp::Ordering::Equal => (0, 0),
+                std::cmp::Ordering::Greater => (1, 0),
             };
             Ok(Value::Bool(int_pred(ai, bi)))
         }
-        _ => Err(type_err("number", &format!("{} vs {}", l.type_name(), r.type_name()))),
+        _ => Err(type_err(
+            "number",
+            &format!("{} vs {}", l.type_name(), r.type_name()),
+        )),
     }
 }
 
@@ -3149,34 +3610,89 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
         (Pattern::Ident(name), v) => Some(vec![(name.clone(), v.clone())]),
         (Pattern::Literal(lit), v) => {
             let lit_val = eval_literal(lit);
-            if lit_val == *v { Some(vec![]) } else { None }
+            if lit_val == *v {
+                Some(vec![])
+            } else {
+                None
+            }
         }
         (Pattern::None, Value::Option(None)) => Some(vec![]),
         (Pattern::Some(inner), Value::Option(Some(v))) => match_pattern(inner, v),
-        (Pattern::Ok(inner), Value::Result(Ok(v)))     => match_pattern(inner, v),
+        (Pattern::Ok(inner), Value::Result(Ok(v))) => match_pattern(inner, v),
         (Pattern::Err(inner), Value::Result(Err(e))) => {
             match_pattern(inner, &Value::String(e.clone()))
         }
-        (Pattern::Range { start, end, inclusive }, Value::Int(n)) => {
-            let s = match start { Literal::Int(i) => *i, _ => return None };
-            let e = match end   { Literal::Int(i) => *i, _ => return None };
-            let hit = if *inclusive { s <= *n && *n <= e } else { s <= *n && *n < e };
-            if hit { Some(vec![]) } else { None }
+        (
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            },
+            Value::Int(n),
+        ) => {
+            let s = match start {
+                Literal::Int(i) => *i,
+                _ => return None,
+            };
+            let e = match end {
+                Literal::Int(i) => *i,
+                _ => return None,
+            };
+            let hit = if *inclusive {
+                s <= *n && *n <= e
+            } else {
+                s <= *n && *n < e
+            };
+            if hit {
+                Some(vec![])
+            } else {
+                None
+            }
         }
         // ── enum パターン ─────────────────────────────────────────────────
-        (Pattern::EnumUnit { enum_name, variant }, Value::Enum { type_name, variant: val_variant, data: EnumData::Unit }) => {
+        (
+            Pattern::EnumUnit { enum_name, variant },
+            Value::Enum {
+                type_name,
+                variant: val_variant,
+                data: EnumData::Unit,
+            },
+        ) => {
             // enum_name が Some の場合は型名も確認する
             if let Some(en) = enum_name {
-                if en != type_name { return None; }
+                if en != type_name {
+                    return None;
+                }
             }
-            if variant == val_variant { Some(vec![]) } else { None }
+            if variant == val_variant {
+                Some(vec![])
+            } else {
+                None
+            }
         }
-        (Pattern::EnumTuple { enum_name, variant, bindings }, Value::Enum { type_name, variant: val_variant, data: EnumData::Tuple(items) }) => {
+        (
+            Pattern::EnumTuple {
+                enum_name,
+                variant,
+                bindings,
+            },
+            Value::Enum {
+                type_name,
+                variant: val_variant,
+                data: EnumData::Tuple(items),
+            },
+        ) => {
             if let Some(en) = enum_name {
-                if en != type_name { return None; }
+                if en != type_name {
+                    return None;
+                }
             }
-            if variant != val_variant { return None; }
-            if bindings.len() != items.len() { return None; }
+            if variant != val_variant {
+                return None;
+            }
+            if bindings.len() != items.len() {
+                return None;
+            }
             let mut result = Vec::new();
             for (name, val) in bindings.iter().zip(items.iter()) {
                 if name == "_" {
@@ -3187,11 +3703,26 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             Some(result)
         }
-        (Pattern::EnumStruct { enum_name, variant, fields }, Value::Enum { type_name, variant: val_variant, data: EnumData::Struct(field_map) }) => {
+        (
+            Pattern::EnumStruct {
+                enum_name,
+                variant,
+                fields,
+            },
+            Value::Enum {
+                type_name,
+                variant: val_variant,
+                data: EnumData::Struct(field_map),
+            },
+        ) => {
             if let Some(en) = enum_name {
-                if en != type_name { return None; }
+                if en != type_name {
+                    return None;
+                }
             }
-            if variant != val_variant { return None; }
+            if variant != val_variant {
+                return None;
+            }
             let mut result = Vec::new();
             for field_name in fields {
                 if field_name == "_" {
@@ -3212,23 +3743,25 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
 
 pub fn eval_source(source: &str) -> Result<Value, RuntimeError> {
     use forge_compiler::parser::parse_source;
-    let module = parse_source(source)
-        .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+    let module = parse_source(source).map_err(|e| RuntimeError::Custom(e.to_string()))?;
     Interpreter::new().eval(&module)
 }
 
 /// 型名かどうかを判定（大文字から始まる識別子）
 fn is_type_name_str(name: &str) -> bool {
-    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    name.chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
 }
 
 /// TypeAnn から型のゼロ値を生成する（@derive(Singleton) の初期化用）
 fn zero_value_for_type(ann: &TypeAnn) -> Value {
     match ann {
         TypeAnn::Number => Value::Int(0),
-        TypeAnn::Float  => Value::Float(0.0),
+        TypeAnn::Float => Value::Float(0.0),
         TypeAnn::String => Value::String(String::new()),
-        TypeAnn::Bool   => Value::Bool(false),
+        TypeAnn::Bool => Value::Bool(false),
         TypeAnn::Option(_) => Value::Option(None),
         _ => Value::Unit,
     }
@@ -3258,7 +3791,10 @@ mod tests {
 
     #[test]
     fn test_eval_string_concat() {
-        assert_eq!(run(r#""foo" + "bar""#), Ok(Value::String("foobar".to_string())));
+        assert_eq!(
+            run(r#""foo" + "bar""#),
+            Ok(Value::String("foobar".to_string()))
+        );
     }
 
     #[test]
@@ -3302,7 +3838,10 @@ mod tests {
 
     #[test]
     fn test_eval_while() {
-        assert_eq!(run("state i = 0; while i < 3 { i = i + 1 }; i"), Ok(Value::Int(3)));
+        assert_eq!(
+            run("state i = 0; while i < 3 { i = i + 1 }; i"),
+            Ok(Value::Int(3))
+        );
     }
 
     #[test]
@@ -3336,7 +3875,10 @@ mod tests {
 
     #[test]
     fn test_eval_closure_capture() {
-        assert_eq!(run("let base = 10; let f = x => x + base; f(5)"), Ok(Value::Int(15)));
+        assert_eq!(
+            run("let base = 10; let f = x => x + base; f(5)"),
+            Ok(Value::Int(15))
+        );
     }
 
     #[test]
@@ -3421,13 +3963,16 @@ mod tests {
 
     #[test]
     fn test_native_string() {
-        assert_eq!(run("string(42)"),   Ok(Value::String("42".to_string())));
+        assert_eq!(run("string(42)"), Ok(Value::String("42".to_string())));
         assert_eq!(run("string(true)"), Ok(Value::String("true".to_string())));
     }
 
     #[test]
     fn test_native_number() {
-        assert_eq!(run(r#"number("42")"#),  Ok(Value::Result(Ok(Box::new(Value::Int(42))))));
+        assert_eq!(
+            run(r#"number("42")"#),
+            Ok(Value::Result(Ok(Box::new(Value::Int(42)))))
+        );
         // number("abc") → err(...)
         let result = run(r#"number("abc")"#).expect("eval failed");
         assert!(matches!(result, Value::Result(Err(_))));
@@ -3435,7 +3980,10 @@ mod tests {
 
     #[test]
     fn test_native_float() {
-        assert_eq!(run(r#"float("3.14")"#), Ok(Value::Result(Ok(Box::new(Value::Float(3.14))))));
+        assert_eq!(
+            run(r#"float("3.14")"#),
+            Ok(Value::Result(Ok(Box::new(Value::Float(3.14)))))
+        );
     }
 
     #[test]
@@ -3854,7 +4402,10 @@ let s = Status::Pending("review")
 let c = s.clone()
 c.display()
 "#;
-        assert_eq!(run(src2), Ok(Value::String("Status::Pending(review)".to_string())));
+        assert_eq!(
+            run(src2),
+            Ok(Value::String("Status::Pending(review)".to_string()))
+        );
 
         // @derive(Eq) - == 比較
         let src3 = r#"
@@ -4182,15 +4733,23 @@ conn2.query("SELECT 1")
         // Connected 状態では query は使えない → RuntimeError
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("query"), "エラーメッセージに 'query' が含まれていません: {}", err_msg);
+        assert!(
+            err_msg.contains("query"),
+            "エラーメッセージに 'query' が含まれていません: {}",
+            err_msg
+        );
     }
 
     // ── Phase M-0 tests ───────────────────────────────────────────────────
 
     /// 一時ファイルを作成してモジュールテストを実行するヘルパー
-    fn run_with_module(main_src: &str, module_path: &str, module_src: &str) -> Result<Value, RuntimeError> {
-        use std::fs;
+    fn run_with_module(
+        main_src: &str,
+        module_path: &str,
+        module_src: &str,
+    ) -> Result<Value, RuntimeError> {
         use forge_compiler::parser::parse_source;
+        use std::fs;
 
         // 一時ディレクトリを作成
         let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
@@ -4207,8 +4766,7 @@ conn2.query("SELECT 1")
         fs::write(&main_file, main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
         // インタープリタを初期化（ファイルパスから ModuleLoader を生成）
-        let module = parse_source(main_src)
-            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let module = parse_source(main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
         let mut interp = Interpreter::with_file_path(&main_file);
         interp.eval(&module)
@@ -4325,8 +4883,8 @@ private_fn()
         mod2_path: &str,
         mod2_src: &str,
     ) -> Result<Value, RuntimeError> {
-        use std::fs;
         use forge_compiler::parser::parse_source;
+        use std::fs;
 
         let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
@@ -4345,8 +4903,7 @@ private_fn()
         let main_file = tmp.path().join("main.forge");
         fs::write(&main_file, main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
-        let module = parse_source(main_src)
-            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let module = parse_source(main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
         let mut interp = Interpreter::with_file_path(&main_file);
         interp.eval(&module)
@@ -4369,10 +4926,12 @@ use ./math.add
         assert_eq!(result, Ok(Value::Int(42)));
 
         // インタープリタの imported_symbols を確認するために別の方法で実行
-        use std::fs;
         use forge_compiler::parser::parse_source;
+        use std::fs;
 
-        let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string())).unwrap();
+        let tmp = tempfile::tempdir()
+            .map_err(|e| RuntimeError::Custom(e.to_string()))
+            .unwrap();
         let mod_file = tmp.path().join("math.forge");
         fs::write(&mod_file, module_src).unwrap();
         let main_file = tmp.path().join("main.forge");
@@ -4383,7 +4942,10 @@ use ./math.add
         interp.eval(&module).unwrap();
 
         // add がインポートされていること
-        assert!(interp.imported_symbols.contains_key("add"), "add がインポートされているべき");
+        assert!(
+            interp.imported_symbols.contains_key("add"),
+            "add がインポートされているべき"
+        );
         // add は使われていない（本文が `42` のみ）
         let add_info = &interp.imported_symbols["add"];
         assert!(!add_info.used, "add は使用されていないはず");
@@ -4404,7 +4966,8 @@ use ./math1.add
 use ./math2.add
 add(1, 2)
 "#;
-        let result = run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
+        let result =
+            run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
         assert!(result.is_err(), "シンボル衝突はエラーになるべき");
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -4431,9 +4994,14 @@ use ./math1.*
 use ./math2.*
 multiply(2, 3)
 "#;
-        let result = run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
+        let result =
+            run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
         // use * 衝突は警告のみなのでエラーにならない
-        assert!(result.is_ok(), "use * の衝突は警告のみでエラーにならないべき: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "use * の衝突は警告のみでエラーにならないべき: {:?}",
+            result
+        );
     }
 
     // ── Phase M-5: when キーワードテスト ─────────────────────────────────
@@ -4444,16 +5012,23 @@ multiply(2, 3)
         let current_os = std::env::consts::OS;
 
         // 現在のプラットフォームに合致する when ブロックで定義した関数が呼べる
-        let src = format!(r#"
+        let src = format!(
+            r#"
 when platform.{os} {{
     fn platform_fn() -> number {{ 42 }}
 }}
 platform_fn()
-"#, os = current_os);
+"#,
+            os = current_os
+        );
 
         let result = run(&src);
-        assert_eq!(result, Ok(Value::Int(42)),
-            "現在の OS ({}) に対応する when ブロックが実行されるべき", current_os);
+        assert_eq!(
+            result,
+            Ok(Value::Int(42)),
+            "現在の OS ({}) に対応する when ブロックが実行されるべき",
+            current_os
+        );
     }
 
     /// M-5-D: `forge run` モード（is_test_mode = false）では `when test` がスキップされる
@@ -4468,8 +5043,11 @@ when test {
 "#;
         // when test がスキップされるのでエラーにならず、42 が返る
         let result = run(src);
-        assert_eq!(result, Ok(Value::Int(42)),
-            "forge run モードでは when test ブロックがスキップされるべき");
+        assert_eq!(
+            result,
+            Ok(Value::Int(42)),
+            "forge run モードでは when test ブロックがスキップされるべき"
+        );
 
         // test_helper が定義されていないことを確認
         let src2 = r#"
@@ -4479,8 +5057,11 @@ when test {
 test_helper()
 "#;
         let result2 = run(src2);
-        assert!(matches!(result2, Err(RuntimeError::UndefinedVariable(_))),
-            "when test がスキップされた場合、test_helper は未定義のはず: {:?}", result2);
+        assert!(
+            matches!(result2, Err(RuntimeError::UndefinedVariable(_))),
+            "when test がスキップされた場合、test_helper は未定義のはず: {:?}",
+            result2
+        );
     }
 
     /// M-5-D: `when not` の反転 — when not feature.x は when feature.x の逆になる
@@ -4500,8 +5081,11 @@ when feature.testfeat {
 not_feature_fn()
 "#;
         let result = run(src);
-        assert_eq!(result, Ok(Value::Int(1)),
-            "feature.testfeat が未設定のとき when not feature.testfeat が実行されるべき");
+        assert_eq!(
+            result,
+            Ok(Value::Int(1)),
+            "feature.testfeat が未設定のとき when not feature.testfeat が実行されるべき"
+        );
     }
 
     // ── Phase M-6: use raw テスト ─────────────────────────────────────────
@@ -4520,8 +5104,11 @@ x
 "#;
         // forge run モードでは use raw をスキップして正常終了すること
         let result = run(src);
-        assert_eq!(result, Ok(Value::Int(42)),
-            "use raw はスキップされ、後続の let x = 42 が評価されること");
+        assert_eq!(
+            result,
+            Ok(Value::Int(42)),
+            "use raw はスキップされ、後続の let x = 42 が評価されること"
+        );
     }
 
     // ── Phase M-7: REPL でのモジュールインポート テスト ───────────────────
@@ -4533,8 +5120,8 @@ x
         use_stmt: &str,
         code: &str,
     ) -> Result<(Value, Vec<String>), RuntimeError> {
-        use std::fs;
         use forge_compiler::parser::parse_source;
+        use std::fs;
 
         let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
 
@@ -4552,8 +5139,7 @@ x
         let before_keys: std::collections::HashSet<String> =
             interp.imported_symbols.keys().cloned().collect();
 
-        let use_module = parse_source(use_stmt)
-            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let use_module = parse_source(use_stmt).map_err(|e| RuntimeError::Custom(e.to_string()))?;
         interp.eval(&use_module)?;
 
         let after_keys: std::collections::HashSet<String> =
@@ -4563,19 +5149,27 @@ x
         // loaded_modules に記録する（REPL と同じロジック）
         if !new_syms.is_empty() {
             // use パスを取得する
-            let use_path = use_module.stmts.iter().filter_map(|s| {
-                if let Stmt::UseDecl { path, .. } = s {
-                    Some(match path {
-                        UsePath::Local(p) => p.clone(),
-                        UsePath::External(p) => p.clone(),
-                        UsePath::Stdlib(p) => p.clone(),
-                    })
-                } else {
-                    None
-                }
-            }).next().unwrap_or_default();
+            let use_path = use_module
+                .stmts
+                .iter()
+                .filter_map(|s| {
+                    if let Stmt::UseDecl { path, .. } = s {
+                        Some(match path {
+                            UsePath::Local(p) => p.clone(),
+                            UsePath::External(p) => p.clone(),
+                            UsePath::Stdlib(p) => p.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .next()
+                .unwrap_or_default();
 
-            let entry = interp.loaded_modules.entry(use_path).or_insert_with(Vec::new);
+            let entry = interp
+                .loaded_modules
+                .entry(use_path)
+                .or_insert_with(Vec::new);
             for sym in &new_syms {
                 if !entry.contains(sym) {
                     entry.push(sym.clone());
@@ -4584,12 +5178,13 @@ x
         }
 
         // コードを評価する
-        let code_module = parse_source(code)
-            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let code_module = parse_source(code).map_err(|e| RuntimeError::Custom(e.to_string()))?;
         let val = interp.eval(&code_module)?;
 
         // ロード済みシンボルのリストを返す
-        let loaded_syms: Vec<String> = interp.loaded_modules.values()
+        let loaded_syms: Vec<String> = interp
+            .loaded_modules
+            .values()
             .flat_map(|v| v.iter().cloned())
             .collect();
 
@@ -4602,18 +5197,14 @@ x
         let module_src = r#"
 pub fn add(a: number, b: number) -> number { a + b }
 "#;
-        let result = run_repl_with_module(
-            "math.forge",
-            module_src,
-            "use ./math.add",
-            "add(10, 5)",
-        );
+        let result = run_repl_with_module("math.forge", module_src, "use ./math.add", "add(10, 5)");
         match result {
             Ok((val, loaded_syms)) => {
                 assert_eq!(val, Value::Int(15), "add(10, 5) が 15 を返すこと");
                 assert!(
                     loaded_syms.contains(&"add".to_string()),
-                    "loaded_modules に 'add' が記録されていること: {:?}", loaded_syms
+                    "loaded_modules に 'add' が記録されていること: {:?}",
+                    loaded_syms
                 );
             }
             Err(e) => panic!("テスト失敗: {}", e),
@@ -4623,8 +5214,8 @@ pub fn add(a: number, b: number) -> number { a + b }
     /// M-7-B: :reload による再読み込み — reload でシンボルが更新される
     #[test]
     fn test_repl_module_reload() {
-        use std::fs;
         use forge_compiler::parser::parse_source;
+        use std::fs;
 
         let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -4644,8 +5235,13 @@ pub fn add(a: number, b: number) -> number { a + b }
         let after_keys: std::collections::HashSet<String> =
             interp.imported_symbols.keys().cloned().collect();
         let new_syms: Vec<String> = after_keys.difference(&before_keys).cloned().collect();
-        let entry = interp.loaded_modules.entry("math".to_string()).or_insert_with(Vec::new);
-        for sym in &new_syms { entry.push(sym.clone()); }
+        let entry = interp
+            .loaded_modules
+            .entry("math".to_string())
+            .or_insert_with(Vec::new);
+        for sym in &new_syms {
+            entry.push(sym.clone());
+        }
 
         // 初期値の確認
         let v1 = parse_source("value()").expect("parse v1");
@@ -4666,8 +5262,13 @@ pub fn add(a: number, b: number) -> number { a + b }
         let after_keys2: std::collections::HashSet<String> =
             interp.imported_symbols.keys().cloned().collect();
         let new_syms2: Vec<String> = after_keys2.difference(&before_keys2).cloned().collect();
-        let entry2 = interp.loaded_modules.entry("math".to_string()).or_insert_with(Vec::new);
-        for sym in &new_syms2 { entry2.push(sym.clone()); }
+        let entry2 = interp
+            .loaded_modules
+            .entry("math".to_string())
+            .or_insert_with(Vec::new);
+        for sym in &new_syms2 {
+            entry2.push(sym.clone());
+        }
 
         // 更新後の値の確認
         let v2 = parse_source("value()").expect("parse v2");
@@ -4755,6 +5356,9 @@ test "should be skipped" {
         let mut interp = Interpreter::new();
         // is_test_mode = false (default)
         let result = interp.eval(&module);
-        assert!(result.is_ok(), "eval should succeed when skipping test blocks");
+        assert!(
+            result.is_ok(),
+            "eval should succeed when skipping test blocks"
+        );
     }
 }
