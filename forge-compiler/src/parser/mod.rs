@@ -1418,6 +1418,7 @@ impl Parser {
         Ok(Stmt::StructDef { name, fields, derives, is_pub, span })
     }
 
+    #[allow(dead_code)]
     fn parse_impl_block(&mut self) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Impl)?;

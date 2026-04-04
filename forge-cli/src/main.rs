@@ -4,12 +4,18 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use forge_compiler::ast::{Stmt, UsePath};
+use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
 use forge_compiler::typechecker::type_check_source;
 use forge_vm::interpreter::Interpreter;
 use forge_vm::value::Value;
 use forge_transpiler::transpile;
+
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -386,33 +392,18 @@ fn transpile_file(path: &str, output: Option<&str>) {
 }
 
 fn build_file(path: &str, output: Option<&str>) {
-    use std::path::Path;
     use std::process::Command;
 
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
-            std::process::exit(1);
-        }
-    };
+    let entry_path = Path::new(path);
 
-    let rust_code = match transpile(&source) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("トランスパイルエラー: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let stem = Path::new(path)
+    let stem = entry_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("forge_out");
 
     // 一時 Cargo プロジェクトを作成する
     let mut proj_dir = std::env::temp_dir();
-    proj_dir.push(format!("forge_build_{}", stem));
+    proj_dir.push(format!("forge_build_{}_{}", stem, unique_suffix()));
 
     if let Err(e) = fs::create_dir_all(proj_dir.join("src")) {
         eprintln!("エラー: 一時プロジェクトディレクトリを作成できませんでした: {}", e);
@@ -428,11 +419,12 @@ fn build_file(path: &str, output: Option<&str>) {
         std::process::exit(1);
     }
 
-    // main.rs を生成
-    if let Err(e) = fs::write(proj_dir.join("src/main.rs"), &rust_code) {
-        eprintln!("エラー: main.rs の書き込みに失敗しました: {}", e);
+    if let Err(e) = write_transpiled_project(entry_path, &proj_dir.join("src")) {
+        eprintln!("エラー: トランスパイル済みプロジェクトの生成に失敗しました: {}", e);
         std::process::exit(1);
     }
+
+    format_generated_project(&proj_dir);
 
     // 出力先バイナリパスを決定
     let binary_name = output.unwrap_or(stem);
@@ -452,6 +444,7 @@ fn build_file(path: &str, output: Option<&str>) {
     let status = Command::new("cargo")
         .args([
             "build",
+            "--offline",
             "--release",
             "--manifest-path",
             proj_dir.join("Cargo.toml").to_str().unwrap_or(""),
@@ -487,6 +480,340 @@ fn build_file(path: &str, output: Option<&str>) {
             std::process::exit(1);
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ForgeSourceFile {
+    rel_path: PathBuf,
+    source: String,
+}
+
+fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(), String> {
+    let source_root = detect_source_root(entry_path)?;
+    let files = collect_forge_files(&source_root, entry_path)?;
+    let entry_rel = entry_path
+        .strip_prefix(&source_root)
+        .map_err(|_| format!("entry path '{}' is outside source root", entry_path.display()))?
+        .to_path_buf();
+
+    let mut deps = DepsManager::new();
+    let module_index = build_module_index(&files, &entry_rel);
+
+    for file in &files {
+        collect_external_deps(&source_root, file, &mut deps)?;
+
+        let mut rust_code = transpile(&file.source)
+            .map_err(|e| format!("{}: {}", file.rel_path.display(), e))?;
+
+        let rel_dir = file
+            .rel_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let prelude = module_prelude(&rel_dir, &file.rel_path, &entry_rel, &module_index);
+        if !prelude.is_empty() {
+            rust_code = format!("{}{}", prelude, rust_code);
+        }
+
+        collect_codegen_deps(&rust_code, &mut deps);
+
+        let out_rel = forge_rel_to_rust_rel(&file.rel_path, &entry_rel);
+        let out_path = out_src_dir.join(out_rel);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&out_path, rust_code).map_err(|e| e.to_string())?;
+    }
+
+    write_synthesized_mod_files(out_src_dir, &module_index, &files)?;
+
+    update_generated_cargo_toml(
+        &out_src_dir.parent().unwrap_or(out_src_dir).join("Cargo.toml"),
+        &deps,
+    )?;
+
+    Ok(())
+}
+
+fn detect_source_root(entry_path: &Path) -> Result<PathBuf, String> {
+    let parent = entry_path
+        .parent()
+        .ok_or_else(|| format!("cannot determine parent directory for '{}'", entry_path.display()))?;
+
+    if parent.file_name().and_then(|s| s.to_str()) == Some("src") {
+        Ok(parent.to_path_buf())
+    } else {
+        Ok(parent.to_path_buf())
+    }
+}
+
+fn collect_forge_files(source_root: &Path, entry_path: &Path) -> Result<Vec<ForgeSourceFile>, String> {
+    if entry_path.file_name().and_then(|s| s.to_str()) != Some("main.forge") {
+        let rel_path = entry_path
+            .strip_prefix(source_root)
+            .map_err(|_| format!("{} is outside {}", entry_path.display(), source_root.display()))?
+            .to_path_buf();
+        let source = fs::read_to_string(entry_path)
+            .map_err(|e| format!("{}: {}", entry_path.display(), e))?;
+        return Ok(vec![ForgeSourceFile { rel_path, source }]);
+    }
+
+    fn walk(dir: &Path, source_root: &Path, files: &mut Vec<ForgeSourceFile>) -> Result<(), String> {
+        let mut entries = fs::read_dir(dir)
+            .map_err(|e| format!("{}: {}", dir.display(), e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, source_root, files)?;
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("forge") {
+                continue;
+            }
+
+            let rel_path = path
+                .strip_prefix(source_root)
+                .map_err(|_| format!("{} is outside {}", path.display(), source_root.display()))?
+                .to_path_buf();
+            let source = fs::read_to_string(&path)
+                .map_err(|e| format!("{}: {}", path.display(), e))?;
+            files.push(ForgeSourceFile {
+                rel_path,
+                source,
+            });
+        }
+
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(source_root, source_root, &mut files)?;
+    Ok(files)
+}
+
+fn build_module_index(
+    files: &[ForgeSourceFile],
+    entry_rel: &Path,
+) -> std::collections::BTreeMap<PathBuf, Vec<String>> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut index: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+
+    for file in files {
+        let rel_dir = file
+            .rel_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+
+        if file.rel_path != entry_rel
+            && file.rel_path.file_name().and_then(|s| s.to_str()) != Some("main.forge")
+        {
+            if let Some(stem) = file.rel_path.file_stem().and_then(|s| s.to_str()) {
+                if stem != "mod" {
+                    index.entry(rel_dir.clone()).or_default().insert(stem.to_string());
+                }
+            }
+        }
+
+        if !rel_dir.as_os_str().is_empty() {
+            let parent = rel_dir.parent().map(Path::to_path_buf).unwrap_or_default();
+            if let Some(dir_name) = rel_dir.file_name().and_then(|s| s.to_str()) {
+                index.entry(parent).or_default().insert(dir_name.to_string());
+            }
+        }
+    }
+
+    index
+        .into_iter()
+        .map(|(dir, names)| (dir, names.into_iter().collect()))
+        .collect()
+}
+
+fn module_prelude(
+    rel_dir: &Path,
+    rel_path: &Path,
+    entry_rel: &Path,
+    module_index: &std::collections::BTreeMap<PathBuf, Vec<String>>,
+) -> String {
+    let mut prelude = String::new();
+    let decl_dir = if rel_path == entry_rel {
+        Some(PathBuf::new())
+    } else if rel_path.file_name().and_then(|s| s.to_str()) == Some("mod.forge") {
+        Some(rel_dir.to_path_buf())
+    } else {
+        None
+    };
+
+    if let Some(decl_dir) = decl_dir {
+        if let Some(children) = module_index.get(&decl_dir) {
+            for name in children {
+                prelude.push_str(&format!("pub mod {};\n", name));
+            }
+            if !children.is_empty() {
+                prelude.push('\n');
+            }
+        }
+    }
+
+    prelude
+}
+
+fn forge_rel_to_rust_rel(rel_path: &Path, entry_rel: &Path) -> PathBuf {
+    if rel_path == entry_rel {
+        return PathBuf::from("main.rs");
+    }
+
+    if rel_path.file_name().and_then(|s| s.to_str()) == Some("mod.forge") {
+        return rel_path.with_file_name("mod.rs");
+    }
+
+    rel_path.with_extension("rs")
+}
+
+fn write_synthesized_mod_files(
+    out_src_dir: &Path,
+    module_index: &std::collections::BTreeMap<PathBuf, Vec<String>>,
+    files: &[ForgeSourceFile],
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let existing_mods: HashSet<PathBuf> = files
+        .iter()
+        .filter(|file| file.rel_path.file_name().and_then(|s| s.to_str()) == Some("mod.forge"))
+        .filter_map(|file| file.rel_path.parent().map(Path::to_path_buf))
+        .collect();
+
+    for (dir, children) in module_index {
+        if dir.as_os_str().is_empty() || existing_mods.contains(dir) {
+            continue;
+        }
+
+        let mut content = String::new();
+        for child in children {
+            content.push_str(&format!("pub mod {};\n", child));
+        }
+
+        let out_path = out_src_dir.join(dir).join("mod.rs");
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(out_path, content).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn collect_external_deps(
+    source_root: &Path,
+    file: &ForgeSourceFile,
+    deps: &mut DepsManager,
+) -> Result<(), String> {
+    let module = parse_source(&file.source).map_err(|e| e.to_string())?;
+    for stmt in module.stmts {
+        if let Stmt::UseDecl { path: UsePath::External(crate_name), .. } = stmt {
+            let current_dir = source_root.join(
+                file.rel_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+            );
+            let first_segment = crate_name.split('/').next().unwrap_or(&crate_name);
+            let local_file = current_dir.join(format!("{}.forge", first_segment));
+            let local_dir = current_dir.join(first_segment);
+            if local_file.exists() || local_dir.exists() {
+                continue;
+            }
+            deps.add(&crate_name);
+        }
+    }
+    Ok(())
+}
+
+fn collect_codegen_deps(rust_code: &str, deps: &mut DepsManager) {
+    if rust_code.contains("once_cell::") {
+        deps.add("once_cell");
+    }
+    if rust_code.contains("serde::Serialize") || rust_code.contains("serde::Deserialize") {
+        deps.add("serde");
+    }
+}
+
+fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Result<(), String> {
+    let mut content = fs::read_to_string(cargo_toml_path).map_err(|e| e.to_string())?;
+
+    let mut extra_lines = Vec::new();
+    let crates = deps.crates();
+
+    if crates.contains("once_cell") && !content.contains("\nonce_cell = ") {
+        extra_lines.push("once_cell = \"1.21.4\"".to_string());
+    }
+    if crates.contains("serde") && !content.contains("\nserde = ") {
+        extra_lines.push("serde = { version = \"1.0.228\", features = [\"derive\"] }".to_string());
+    }
+
+    let mut others = crates
+        .iter()
+        .filter(|name| name.as_str() != "once_cell" && name.as_str() != "serde")
+        .cloned()
+        .collect::<Vec<_>>();
+    others.sort();
+    for name in others {
+        if !content.contains(&format!("\n{} = ", name)) {
+            extra_lines.push(format!("{name} = \"*\""));
+        }
+    }
+
+    if !extra_lines.is_empty() {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        for line in extra_lines {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        fs::write(cargo_toml_path, content).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn format_generated_project(proj_dir: &Path) {
+    use std::process::Command;
+
+    let status = Command::new("cargo")
+        .args([
+            "fmt",
+            "--all",
+            "--manifest-path",
+            proj_dir.join("Cargo.toml").to_str().unwrap_or(""),
+        ])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(_) => {
+            eprintln!("警告: 生成 Rust の整形に失敗しましたが、ビルドは続行します");
+        }
+        Err(_) => {
+            eprintln!("警告: cargo fmt を実行できませんでしたが、ビルドは続行します");
+        }
+    }
+}
+
+fn unique_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{}_{}", std::process::id(), ts, seq)
 }
 
 fn print_help() {
