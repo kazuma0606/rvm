@@ -13,13 +13,13 @@ data UserRegistration {
 // バリデーション成功ケース
 let reg = UserRegistration { username: "alice", email: "alice@example.com", password: "Pass1234" }
 match reg.validate() {
-    ok(r)    => println("valid: {r.get_username()}")
+    ok(_)    => println("valid")
     err(msg) => println("invalid: {msg}")
 }
 
 // バリデーション失敗ケース (username が短すぎる)
 let bad = UserRegistration { username: "a", email: "not-email", password: "weak" }
 match bad.validate() {
-    ok(r)    => println("valid")
+    ok(_)    => println("valid")
     err(msg) => println("invalid: {msg}")
 }

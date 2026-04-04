@@ -170,7 +170,7 @@
 ## ラウンドトリップテスト（B-1〜B-4 完了後）
 
 - [x] `run_forge(src)` と `run_built(src)` を比較するヘルパー関数を実装
-- [x] 既存 E2E テスト 29 本をラウンドトリップテストとして転用（9本実装・全通過）
+- [x] 既存 E2E テスト 29 本をラウンドトリップテストとして転用（13本実装・全通過）
   <!-- TODO: 残り20本の内訳と方針：
        - forge check 系（3本）→ forge build はコンパイル成功/失敗で別途検証が必要。
          run_built() が Err を返すかどうかで代替できる可能性あり。要検討。
@@ -190,61 +190,61 @@
 
 ### B-5-A: struct 変換
 
-- [ ] `struct Name { field: Type, ... }` → Rust `struct Name { field: Type, ... }`
-- [ ] `impl Name { fn method(...) }` → Rust `impl Name { fn method(...) }`
-- [ ] `self` 参照 → Rust `&self` / `&mut self`（`state self` は `&mut self`）
-- [ ] `Name { field: expr, ... }` インスタンス化 → Rust の struct 初期化構文
-- [ ] `expr.field` フィールドアクセス → Rust の `.field` アクセス
-- [ ] スナップショットテスト: `struct_basic`
-- [ ] スナップショットテスト: `struct_impl`
+- [x] `struct Name { field: Type, ... }` → Rust `struct Name { field: Type, ... }`
+- [x] `impl Name { fn method(...) }` → Rust `impl Name { fn method(...) }`
+- [x] `self` 参照 → Rust `&self` / `&mut self`（`state self` は `&mut self`）
+- [x] `Name { field: expr, ... }` インスタンス化 → Rust の struct 初期化構文
+- [x] `expr.field` フィールドアクセス → Rust の `.field` アクセス
+- [x] スナップショットテスト: `struct_basic`
+- [x] スナップショットテスト: `struct_impl`
 
 ### B-5-B: @derive 変換
 
-- [ ] `@derive(Debug)` → `#[derive(Debug)]`
-- [ ] `@derive(Clone)` → `#[derive(Clone)]`
-- [ ] `@derive(Eq)` → `#[derive(PartialEq, Eq)]`
-- [ ] `@derive(Hash)` → `#[derive(Hash)]`
-- [ ] `@derive(Ord)` → `#[derive(PartialOrd, Ord)]`
-- [ ] `@derive(Default)` → `#[derive(Default)]`
-- [ ] `@derive(Accessor)` → getter/setter メソッドの `impl` ブロックを生成
-- [ ] `@derive(Singleton)` → `once_cell::sync::Lazy` を使った静的インスタンスを生成
-- [ ] スナップショットテスト: `struct_derive`
+- [x] `@derive(Debug)` → `#[derive(Debug)]`
+- [x] `@derive(Clone)` → `#[derive(Clone)]`
+- [x] `@derive(Eq)` → `#[derive(PartialEq, Eq)]`
+- [x] `@derive(Hash)` → `#[derive(Hash)]`
+- [x] `@derive(Ord)` → `#[derive(PartialOrd, Ord)]`
+- [x] `@derive(Default)` → `#[derive(Default)]`
+- [x] `@derive(Accessor)` → getter/setter メソッドの `impl` ブロックを生成
+- [x] `@derive(Singleton)` → `once_cell::sync::Lazy` を使った静的インスタンスを生成
+- [x] スナップショットテスト: `struct_derive`
 
 ### B-5-C: data 変換
 
-- [ ] `data Name { field: Type, ... }` → `#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)] struct Name { ... }`
-- [ ] `validate` ブロック → `.validate() -> Result<(), String>` メソッドを生成
+- [x] `data Name { field: Type, ... }` → `#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)] struct Name { ... }`
+- [x] `validate` ブロック → `.validate() -> Result<(), String>` メソッドを生成
   - `length(min..max)` → `if self.field.len() < min || self.field.len() > max { return Err(...) }`
   - `email_format` → 簡易正規表現チェック
   - `not_empty` / `alphanumeric` / `contains_digit` / `contains_uppercase` など
-- [ ] スナップショットテスト: `data_basic`
-- [ ] スナップショットテスト: `data_validate`
+- [x] スナップショットテスト: `data_basic`
+- [x] スナップショットテスト: `data_validate`
 
 ### B-5-D: enum 変換
 
-- [ ] `enum Name { Variant }` → Rust `enum Name { Variant }`（Unit バリアント）
-- [ ] `enum Name { Variant(Type) }` → Rust `enum Name { Variant(Type) }`（Tuple バリアント）
-- [ ] `enum Name { Variant { field: Type } }` → Rust の名前付きフィールドバリアント
-- [ ] `Name::Variant` / `Name::Variant(expr)` / `Name::Variant { field: expr }` → Rust 構文
-- [ ] match パターン内の enum バリアント → Rust のパターンマッチ
-- [ ] スナップショットテスト: `enum_basic`
-- [ ] スナップショットテスト: `enum_match`
+- [x] `enum Name { Variant }` → Rust `enum Name { Variant }`（Unit バリアント）
+- [x] `enum Name { Variant(Type) }` → Rust `enum Name { Variant(Type) }`（Tuple バリアント）
+- [x] `enum Name { Variant { field: Type } }` → Rust の名前付きフィールドバリアント
+- [x] `Name::Variant` / `Name::Variant(expr)` / `Name::Variant { field: expr }` → Rust 構文
+- [x] match パターン内の enum バリアント → Rust のパターンマッチ
+- [x] スナップショットテスト: `enum_basic`
+- [x] スナップショットテスト: `enum_match`
 
 ### B-5-E: trait / mixin 変換
 
-- [ ] `trait Name { fn method() -> Type }` → Rust `trait Name { fn method(&self) -> Type; }`
-- [ ] `trait Name { fn default_method() { body } }` → Rust デフォルト実装
-- [ ] `mixin Name { fn method() { body } }` → Rust `trait Name { fn method(&self) { body } }`（デフォルト実装のみの trait）
-- [ ] `impl Trait for Type { ... }` → Rust `impl Trait for Type { ... }`
-- [ ] `impl Mixin for Type`（本体なし）→ Rust `impl Mixin for Type {}`
-- [ ] スナップショットテスト: `trait_impl`
-- [ ] スナップショットテスト: `mixin_impl`
+- [x] `trait Name { fn method() -> Type }` → Rust `trait Name { fn method(&self) -> Type; }`
+- [x] `trait Name { fn default_method() { body } }` → Rust デフォルト実装
+- [x] `mixin Name { fn method() { body } }` → Rust `trait Name { fn method(&self) { body } }`（デフォルト実装のみの trait）
+- [x] `impl Trait for Type { ... }` → Rust `impl Trait for Type { ... }`
+- [x] `impl Mixin for Type`（本体なし）→ Rust `impl Mixin for Type {}`
+- [x] スナップショットテスト: `trait_impl`
+- [x] スナップショットテスト: `mixin_impl`
 
 ### B-5-F: ラウンドトリップテスト
 
-- [ ] ラウンドトリップ: struct の定義・インスタンス化・フィールドアクセス
-- [ ] ラウンドトリップ: enum の定義・match
-- [ ] ラウンドトリップ: data の定義・validate
+- [x] ラウンドトリップ: struct の定義・インスタンス化・フィールドアクセス
+- [x] ラウンドトリップ: enum の定義・match
+- [x] ラウンドトリップ: data の定義・validate
 
 ---
 
@@ -255,51 +255,51 @@
 
 ### B-6-A: use 文変換
 
-- [ ] `use ./utils/helper.add` → `use crate::utils::helper::add;`
-- [ ] `use ./utils/helper.{add, subtract}` → `use crate::utils::helper::{add, subtract};`
-- [ ] `use ./utils/helper.*` → `use crate::utils::helper::*;`
-- [ ] `use ./utils/helper.add as add_fn` → `use crate::utils::helper::add as add_fn;`
-- [ ] `use serde.{Serialize}` → `use serde::Serialize;`（外部クレート）
-- [ ] `pub use helper.{add}` → `pub use helper::{add};`（re-export）
-- [ ] スナップショットテスト: `use_local`
-- [ ] スナップショットテスト: `use_external`
+- [x] `use ./utils/helper.add` → `use crate::utils::helper::add;`
+- [x] `use ./utils/helper.{add, subtract}` → `use crate::utils::helper::{add, subtract};`
+- [x] `use ./utils/helper.*` → `use crate::utils::helper::*;`
+- [x] `use ./utils/helper.add as add_fn` → `use crate::utils::helper::add as add_fn;`
+- [x] `use serde.{Serialize}` → `use serde::Serialize;`（外部クレート）
+- [x] `pub use helper.{add}` → `pub use helper::{add};`（re-export）
+- [x] スナップショットテスト: `use_local`
+- [x] スナップショットテスト: `use_external`
 
 ### B-6-B: ファイル → Rust mod 変換
 
-- [ ] `src/utils/helper.forge` → `src/utils/helper.rs` として出力
-- [ ] `src/utils/mod.forge` → `src/utils/mod.rs` として出力
-- [ ] ディレクトリ構造を `mod` ツリーに変換（`mod utils;` を main.rs に自動挿入）
-- [ ] `pub` キーワードをそのまま Rust に引き継ぎ
+- [x] `src/utils/helper.forge` → `src/utils/helper.rs` として出力
+- [x] `src/utils/mod.forge` → `src/utils/mod.rs` として出力
+- [x] ディレクトリ構造を `mod` ツリーに変換（`mod utils;` を main.rs に自動挿入）
+- [x] `pub` キーワードをそのまま Rust に引き継ぎ
 
 ### B-6-C: when キーワード変換
 
-- [ ] `when platform.linux { ... }` → `#[cfg(target_os = "linux")] ...`
-- [ ] `when platform.windows { ... }` → `#[cfg(target_os = "windows")] ...`
-- [ ] `when platform.macos { ... }` → `#[cfg(target_os = "macos")] ...`
-- [ ] `when feature.xxx { ... }` → `#[cfg(feature = "xxx")] ...`
-- [ ] `when env.dev { ... }` → `#[cfg(debug_assertions)] ...`
-- [ ] `when env.prod { ... }` → `#[cfg(not(debug_assertions))] ...`
-- [ ] `when test { ... }` → `#[cfg(test)] ...`
-- [ ] `when not feature.xxx { ... }` → `#[cfg(not(feature = "xxx"))] ...`
-- [ ] スナップショットテスト: `when_platform`
-- [ ] スナップショットテスト: `when_test`
+- [x] `when platform.linux { ... }` → `#[cfg(target_os = "linux")] ...`
+- [x] `when platform.windows { ... }` → `#[cfg(target_os = "windows")] ...`
+- [x] `when platform.macos { ... }` → `#[cfg(target_os = "macos")] ...`
+- [x] `when feature.xxx { ... }` → `#[cfg(feature = "xxx")] ...`
+- [x] `when env.dev { ... }` → `#[cfg(debug_assertions)] ...`
+- [x] `when env.prod { ... }` → `#[cfg(not(debug_assertions))] ...`
+- [x] `when test { ... }` → `#[cfg(test)] ...`
+- [x] `when not feature.xxx { ... }` → `#[cfg(not(feature = "xxx"))] ...`
+- [x] スナップショットテスト: `when_platform`
+- [x] スナップショットテスト: `when_test`
 
 ### B-6-D: use raw {} 変換
 
-- [ ] `use raw { ... }` → ブロック内の生 Rust コードをそのまま出力
-- [ ] スナップショットテスト: `use_raw`
+- [x] `use raw { ... }` → ブロック内の生 Rust コードをそのまま出力
+- [x] スナップショットテスト: `use_raw`
 
 ### B-6-E: test ブロック変換
 
-- [ ] `test "name" { body }` → `#[cfg(test)] mod tests { #[test] fn test_name() { body } }`
-- [ ] `assert_eq(a, b)` → `assert_eq!(a, b)`
-- [ ] `assert(expr)` → `assert!(expr)`
-- [ ] スナップショットテスト: `test_block`
+- [x] `test "name" { body }` → `#[cfg(test)] mod tests { #[test] fn test_name() { body } }`
+- [x] `assert_eq(a, b)` → `assert_eq!(a, b)`
+- [x] `assert(expr)` → `assert!(expr)`
+- [x] スナップショットテスト: `test_block`
 
 ### B-6-F: ラウンドトリップテスト
 
-- [ ] ラウンドトリップ: 複数ファイル構成（main + utils モジュール）
-- [ ] ラウンドトリップ: pub/非公開の境界
+- [x] ラウンドトリップ: 複数ファイル構成（main + utils モジュール）
+- [x] ラウンドトリップ: pub/非公開の境界
 
 ---
 

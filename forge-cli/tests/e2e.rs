@@ -1,6 +1,9 @@
 // forge-cli: Phase 2-D / 3 E2E テスト
 
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// ForgeScript ファイルパスを `forge-new run` で実行し、stdout を返す
 fn run_forge_file(path: &str) -> Result<String, String> {
@@ -18,13 +21,8 @@ fn run_forge_file(path: &str) -> Result<String, String> {
 
 /// ForgeScript ソースを `forge-new run` で実行し、stdout を返す
 fn run_forge(source: &str) -> Result<String, String> {
-    // スレッドIDをファイル名に使って並列テストでも衝突しない
-    let tid = format!("{:?}", std::thread::current().id())
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>();
     let mut path = std::env::temp_dir();
-    path.push(format!("forge_e2e_{}.forge", tid));
+    path.push(format!("forge_e2e_{}.forge", unique_suffix()));
 
     std::fs::write(&path, source).map_err(|e| e.to_string())?;
 
@@ -439,14 +437,10 @@ match v {
 /// ForgeScript ソースを `forge build` でバイナリ化して実行し、stdout を返す
 fn run_built(source: &str) -> Result<String, String> {
     use std::fs;
-    let tid = format!("{:?}", std::thread::current().id())
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>();
     let mut src_path = std::env::temp_dir();
-    src_path.push(format!("forge_rt_{}.forge", tid));
+    src_path.push(format!("forge_rt_{}.forge", unique_suffix()));
     let mut bin_path = std::env::temp_dir();
-    bin_path.push(format!("forge_rt_{}_bin", tid));
+    bin_path.push(format!("forge_rt_{}_bin", unique_suffix()));
 
     fs::write(&src_path, source).map_err(|e| e.to_string())?;
 
@@ -477,6 +471,50 @@ fn run_built(source: &str) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&run_result.stderr).to_string())
     }
+}
+
+fn run_built_file(path: &str) -> Result<String, String> {
+    use std::fs;
+
+    let mut bin_path = std::env::temp_dir();
+    bin_path.push(format!("forge_file_rt_{}_bin", unique_suffix()));
+
+    let build_result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args([
+            "build",
+            path,
+            "-o",
+            bin_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !build_result.status.success() {
+        return Err(String::from_utf8_lossy(&build_result.stderr).to_string());
+    }
+
+    let run_result = Command::new(&bin_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let _ = fs::remove_file(&bin_path);
+
+    if run_result.status.success() {
+        Ok(String::from_utf8_lossy(&run_result.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run_result.stderr).to_string())
+    }
+}
+
+fn unique_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{}_{}", std::process::id(), ts, seq)
 }
 
 #[test]
@@ -569,6 +607,72 @@ let doubled = nums.map(x => x * 2)
 for n in doubled {
     print(n)
 }
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_struct_basic() {
+    let src = r#"
+struct Point {
+    x: number
+    y: number
+}
+let p = Point { x: 10, y: 20 }
+println(p.x)
+println(p.y)
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_enum_basic() {
+    let src = r#"
+enum Direction {
+    North
+    South
+}
+
+let d = Direction::North
+match d {
+    Direction::North => println("up")
+    _ => println("other")
+}
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_data_validate() {
+    let src = r#"
+data UserRegistration {
+    username: string
+} validate {
+    username: length(3..20), alphanumeric
+}
+
+let reg = UserRegistration { username: "alice" }
+match reg.validate() {
+    ok(_) => println("valid"),
+    err(msg) => println(msg),
+}
+"#;
+    assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
+}
+
+#[test]
+fn roundtrip_when_platform() {
+    let src = r#"
+when platform.windows {
+    fn platform_name() -> string { "windows" }
+}
+when platform.linux {
+    fn platform_name() -> string { "linux" }
+}
+when platform.macos {
+    fn platform_name() -> string { "macos" }
+}
+println(platform_name())
 "#;
     assert_eq!(run_forge(src).unwrap(), run_built(src).unwrap());
 }
@@ -691,7 +795,7 @@ fn e2e_data_validate() {
         concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data_validate.forge")
     ).expect("data_validate.forge が見つかりません");
     let out = run_forge(&src).unwrap();
-    assert_eq!(out, "valid: alice\ninvalid: username: length\n");
+    assert_eq!(out, "valid\ninvalid: username: length\n");
 }
 
 // ── Phase T-5: typestate E2E テスト ─────────────────────────────────────
@@ -742,6 +846,33 @@ fn e2e_modules_mod_forge() {
     );
     let out = run_forge_file(main_path).unwrap();
     assert_eq!(out, "7\n12\n16\n");
+}
+
+#[test]
+fn roundtrip_modules_basic() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/basic/main.forge"
+    );
+    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
+}
+
+#[test]
+fn roundtrip_modules_pub_visibility() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/pub_visibility/main.forge"
+    );
+    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
+}
+
+#[test]
+fn roundtrip_modules_mod_forge() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/mod_forge/main.forge"
+    );
+    assert_eq!(run_forge_file(main_path).unwrap(), run_built_file(main_path).unwrap());
 }
 
 // ── Phase M-4 E2E テスト ────────────────────────────────────────────────────

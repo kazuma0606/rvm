@@ -41,14 +41,11 @@ struct StructInfo {
 #[derive(Debug, Clone)]
 struct EnumInfo {
     variants: Vec<EnumVariant>,
-    derives: Vec<String>,
 }
 
 /// trait の定義情報
 #[derive(Debug, Clone)]
 struct TraitInfo {
-    /// 抽象メソッド名（実装必須）
-    abstract_methods: Vec<String>,
     /// デフォルト実装（メソッド名 → FnDef）
     default_methods: HashMap<String, FnDef>,
 }
@@ -1488,7 +1485,7 @@ impl Interpreter {
         &mut self,
         type_name: &str,
         method: &str,
-        args: Vec<Value>,
+        _args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         // instance() は特別処理
         if method == "instance" {
@@ -2184,7 +2181,7 @@ impl Interpreter {
                 }
             }
 
-            Ok(Value::Result(Ok(Box::new(self_val))))
+            Ok(Value::Result(Ok(Box::new(Value::Unit))))
         }));
 
         if let Some(info) = self.type_registry.structs.get_mut(type_name) {
@@ -2346,10 +2343,7 @@ impl Interpreter {
         variants: Vec<EnumVariant>,
         derives: Vec<String>,
     ) -> Result<Value, RuntimeError> {
-        let info = EnumInfo {
-            variants,
-            derives: derives.clone(),
-        };
+        let info = EnumInfo { variants };
         self.type_registry.enums.insert(name.clone(), info);
 
         // @derive 自動処理
@@ -2556,14 +2550,11 @@ impl Interpreter {
     // ── T-3-C: trait / mixin / impl trait サポート ────────────────────────
 
     fn eval_trait_def(&mut self, name: String, methods: Vec<TraitMethod>) -> Result<Value, RuntimeError> {
-        let mut abstract_methods = Vec::new();
         let mut default_methods = HashMap::new();
 
         for method in methods {
             match method {
-                TraitMethod::Abstract { name: method_name, .. } => {
-                    abstract_methods.push(method_name);
-                }
+                TraitMethod::Abstract { .. } => {}
                 TraitMethod::Default {
                     name: method_name,
                     params,
@@ -2585,7 +2576,7 @@ impl Interpreter {
             }
         }
 
-        let info = TraitInfo { abstract_methods, default_methods };
+        let info = TraitInfo { default_methods };
         self.type_registry.traits.insert(name, info);
         Ok(Value::Unit)
     }
@@ -2651,7 +2642,7 @@ impl Interpreter {
             // mixin に由来するメソッドを識別するためにマーキングが必要だが
             // ここではシンプルに: 既存メソッドがある場合にエラーを発生させる
             // ただし、同一の trait/impl で登録したものは除外する
-            for (method_name, fn_def) in &mixin_map {
+            for method_name in mixin_map.keys() {
                 if let Some(struct_info) = self.type_registry.structs.get(&target) {
                     if struct_info.methods.contains_key(method_name) {
                         // 既存メソッドが存在する場合: 明示的 impl か他の mixin か？
@@ -4082,7 +4073,7 @@ u.get_name()
 
     #[test]
     fn test_data_validate_ok() {
-        // バリデーション成功で ok(instance) を返す
+        // バリデーション成功で ok(()) を返す
         let src = r#"
 data UserRegistration {
     username: string
@@ -4096,12 +4087,12 @@ data UserRegistration {
 
 let reg = UserRegistration { username: "alice", email: "alice@example.com", password: "Pass1234" }
 match reg.validate() {
-    ok(r)    => r.get_username()
+    ok(_)    => "valid"
     err(msg) => msg
 }
 "#;
         let result = run(src);
-        assert_eq!(result, Ok(Value::String("alice".to_string())));
+        assert_eq!(result, Ok(Value::String("valid".to_string())));
     }
 
     #[test]
@@ -4120,7 +4111,7 @@ data UserRegistration {
 
 let bad = UserRegistration { username: "a", email: "not-email", password: "weak" }
 match bad.validate() {
-    ok(r)    => "valid"
+    ok(_)    => "valid"
     err(msg) => msg
 }
 "#;

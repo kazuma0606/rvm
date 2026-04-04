@@ -7,6 +7,7 @@ use crate::value::Value;
 /// 変数環境（スコープチェーン）
 pub struct Env {
     // Phase 2-B で Rc<RefCell<Env>> による親スコープ参照を追加
+    #[allow(dead_code)]
     vars: HashMap<String, Value>,
 }
 

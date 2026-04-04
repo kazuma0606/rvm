@@ -1,13 +1,12 @@
-// forge-transpiler: 組み込み関数変換テーブル
-// print(x) -> println!("{}", x) など
+// forge-transpiler: builtin call translation table
+// Note: ForgeScript's print(x) adds a newline (same as println), so it maps to println!("{}", x)
 
-/// 組み込み関数を Rust の呼び出しに変換するかどうか判定する
-/// 組み込みなら Some(変換された Rust コード文字列) を返す
+/// Returns Some(rendered_rust) when the call is a known builtin.
 pub fn try_builtin_call(name: &str, args: &[String]) -> Option<String> {
     match name {
         "print" => {
             let arg = args.first().map(|s| s.as_str()).unwrap_or("\"\"");
-            Some(format!("print!(\"{{}}\\n\", {})", arg))
+            Some(format!("println!(\"{{}}\", {})", arg))
         }
         "println" => {
             let arg = args.first().map(|s| s.as_str()).unwrap_or("\"\"");
@@ -33,11 +32,33 @@ pub fn try_builtin_call(name: &str, args: &[String]) -> Option<String> {
             let arg = args.first().map(|s| s.as_str()).unwrap_or("\"\"");
             Some(format!("std::any::type_name_of_val(&{})", arg))
         }
+        "assert" => {
+            let arg = args.first().map(|s| s.as_str()).unwrap_or("false");
+            Some(format!("assert!({})", arg))
+        }
+        "assert_eq" => {
+            let left = args.first().map(|s| s.as_str()).unwrap_or("()");
+            let right = args.get(1).map(|s| s.as_str()).unwrap_or("()");
+            Some(format!("assert_eq!({}, {})", left, right))
+        }
+        "assert_ne" => {
+            let left = args.first().map(|s| s.as_str()).unwrap_or("()");
+            let right = args.get(1).map(|s| s.as_str()).unwrap_or("()");
+            Some(format!("assert_ne!({}, {})", left, right))
+        }
+        "assert_ok" => {
+            let arg = args.first().map(|s| s.as_str()).unwrap_or("()");
+            Some(format!("assert!({}.is_ok())", arg))
+        }
+        "assert_err" => {
+            let arg = args.first().map(|s| s.as_str()).unwrap_or("()");
+            Some(format!("assert!({}.is_err())", arg))
+        }
         _ => None,
     }
 }
 
-/// Option/Result コンストラクタかどうか判定する
+/// Returns Some(rendered_rust) for Option/Result constructors.
 pub fn try_constructor_call(name: &str, args: &[String]) -> Option<String> {
     match name {
         "some" => {
