@@ -475,10 +475,9 @@ impl Lexer {
                             span: self.make_span(start, start_line, start_col),
                         });
                     } else {
-                        return Err(LexError::UnexpectedChar {
-                            ch: '|',
-                            line: start_line,
-                            col: start_col,
+                        tokens.push(Token {
+                            kind: TokenKind::Pipe,
+                            span: self.make_span(start, start_line, start_col),
                         });
                     }
                 }
