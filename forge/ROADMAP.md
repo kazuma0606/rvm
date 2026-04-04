@@ -54,17 +54,6 @@
 | data | 全 derive 自動付与・validate ブロック | T-4: 5本 |
 | typestate | 状態遷移・ランタイム状態チェック | T-5: 4本 |
 
-### ツール・周辺 ✅
-
-| 機能 | 詳細 |
-|---|---|
-| VS Code シンタックスハイライト | TextMate grammar / ~/.vscode/extensions/ にローカルインストール済み |
-| UAT ディレクトリ | UAT/hello.forge で動作確認済み |
-
----
-
-## 設計済み・未実装 📐
-
 ### モジュールシステム（forge run）✅
 
 | 機能 | 詳細 |
@@ -78,30 +67,26 @@
 | M-6: use raw | 生 Rust コード埋め込み（`forge run` ではスキップ） |
 | M-7: REPL | `:modules` / `:reload` / `:unload` |
 
-### トランスパイラ残タスク 📐
+### ツール・周辺 ✅
 
-- **参照**: `forge/transpiler/tasks.md`
-- **内容**:
-  - M-0: `use ./path/module.symbol` ローカルファイル解決・エイリアス
-  - M-1: `pub` 可視性（公開・非公開アクセス制御）
-  - M-2: `mod.forge` ファサード・`pub use` re-export
-  - M-3: 外部クレート（`use serde` → `Cargo.toml` 自動追記）
-  - M-4: 静的解析（未使用インポート・循環参照・シンボル衝突）
-  - M-5: `when` キーワード（条件付きコンパイル）
-  - M-6: `use raw {}` ブロック（生 Rust 埋め込み）
-  - M-7: REPL でのモジュールインポート（`:modules` / `:reload`）
-- **次のアクション**: `forge/modules/tasks.md` の M-0 から実装着手
-- **ブロッカー**: なし（型定義実装済み）
+| 機能 | 詳細 |
+|---|---|
+| VS Code シンタックスハイライト | TextMate grammar / ~/.vscode/extensions/ にローカルインストール済み |
+| UAT ディレクトリ | UAT/hello.forge で動作確認済み |
+
+---
+
+## 設計済み・未実装 📐
 
 ### トランスパイラ残タスク 📐
 
 - **参照**: `forge/transpiler/tasks.md`
 - **内容**:
   - B-3: FnMut（state キャプチャ）/ FnOnce（消費キャプチャ）→ TODO コメント済み
-  - B-5: struct / data / enum の Rust 変換
-  - B-6: モジュールシステムの Rust 変換
+  - B-5: struct / data / enum の Rust 変換（型定義実装済みにつき着手可能）
+  - B-6: モジュールシステムの Rust 変換（モジュール実装済みにつき着手可能）
   - ラウンドトリップテスト残20本の選別・追加
-- **ブロッカー**: B-5 は型定義実装後、B-6 はモジュール実装後
+- **ブロッカー**: なし（B-5・B-6 ともに前提実装が完了済み）
 
 ---
 
@@ -111,7 +96,6 @@
 
 | 機能 | 設計状況 | 参照 |
 |---|---|---|
-| `when` キーワード | 方針確定（modules/spec.md に仕様あり・M-5 で実装予定） | forge/modules/spec.md |
 | `async` / `await` | 方針確定（.await検出で自動昇格・tokio自動挿入） | design-v3.md |
 | 名前付き引数・デフォルト引数 | 方針確定（Builderパターン自動生成） | design-v3.md |
 | REPL コード補完 | 方針確定（3段階: 静的→動的→型対応） | future_task |
@@ -128,7 +112,6 @@
 | LSP（言語サーバー） | future_task に概要のみ。型チェッカーを活用 |
 | Playground（WASM） | future_task に概要のみ。forge-wasm クレートが必要 |
 | `forge.toml` パッケージ管理 | design-v3.md に最小仕様あり。詳細未設計 |
-| `use raw {}` ブロック | modules/spec.md に仕様あり。M-6 で実装予定 |
 | ジェネリクス `<T>` | spec に「将来」として記載のみ |
 | `forge fmt` | design-v3.md に言及のみ |
 | `forge generate` | design-v3.md に言及のみ |
@@ -174,13 +157,15 @@ forge/
   typedefs/
     spec.md               ← 型定義仕様（struct/enum/trait/mixin/data/typestate）
     plan.md               ← Phase T-1〜T-5 実装計画
-    tasks.md              ← Phase T-1〜T-5 タスク（未着手）
+    tasks.md              ← Phase T-1〜T-5 タスク（全完了）
+  modules/
+    spec.md               ← モジュールシステム仕様
+    plan.md               ← Phase M-0〜M-7 実装計画
+    tasks.md              ← Phase M-0〜M-7 タスク（全完了）
   transpiler/
     spec.md               ← forge build 変換仕様
     plan.md               ← Phase B-0〜B-8 実装計画
-    tasks.md              ← Phase B-0〜B-4 タスク（完了・残TODO注記済み）
-  modules/
-    spec.md               ← モジュールシステム仕様（設計済み・未実装）
+    tasks.md              ← Phase B-0〜B-4 タスク（完了・B-5〜B-6 未着手）
   syntax/
     spec.md               ← シンタックスハイライト仕様
     plan.md               ← Phase S-1〜S-3 計画
