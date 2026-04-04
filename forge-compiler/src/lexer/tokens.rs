@@ -18,7 +18,7 @@ pub enum TokenKind {
     Int(i64),
     Float(f64),
     Str(String),
-    StrInterp(Vec<StrPart>),  // "Hello, {name}!"
+    StrInterp(Vec<StrPart>), // "Hello, {name}!"
     True,
     False,
 
@@ -41,21 +41,21 @@ pub enum TokenKind {
     // ── 型定義キーワード (Phase T-1 以降) ────
     Struct,
     Impl,
-    SelfVal,    // self (小文字)
-    SelfType,   // Self (大文字)
+    SelfVal,  // self (小文字)
+    SelfType, // Self (大文字)
     Trait,
     Mixin,
     Data,
     Typestate,
     // ── モジュールキーワード (Phase M-0) ─────
-    Use,        // use
-    Pub,        // pub
-    As,         // as
-    When,       // when
+    Use,  // use
+    Pub,  // pub
+    As,   // as
+    When, // when
     // ── テストキーワード (Phase FT-1) ─────
-    Test,       // test
+    Test, // test
     // ── アノテーション ────────────────────────
-    At,         // @
+    At, // @
 
     // ── 識別子 ────────────────────────────────
     Ident(String),
@@ -76,22 +76,22 @@ pub enum TokenKind {
     GtEq,
 
     // ── 論理演算子 ────────────────────────────
-    And,   // &&
-    Or,    // ||
-    Bang,  // !
+    And,  // &&
+    Or,   // ||
+    Bang, // !
 
     // ── 代入・型注釈 ─────────────────────────
-    Eq,          // =
-    Colon,       // :
-    ThinArrow,   // ->
-    Arrow,       // =>
-    Question,    // ?
-    ColonColon,  // ::
+    Eq,         // =
+    Colon,      // :
+    ThinArrow,  // ->
+    Arrow,      // =>
+    Question,   // ?
+    ColonColon, // ::
 
     // ── 範囲 ─────────────────────────────────
-    DotDot,      // ..
-    DotDotEq,    // ..=
-    Dot,         // .
+    DotDot,   // ..
+    DotDotEq, // ..=
+    Dot,      // .
 
     // ── 区切り文字 ────────────────────────────
     LParen,
@@ -111,7 +111,7 @@ pub enum TokenKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     Literal(String),
-    Expr(String),  // 補間式（Phase 1-A ではソース文字列のまま保持）
+    Expr(String), // 補間式（Phase 1-A ではソース文字列のまま保持）
 }
 
 /// トークン（種類 + 位置情報）

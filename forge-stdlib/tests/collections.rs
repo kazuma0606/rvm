@@ -32,10 +32,7 @@ fn test_filter() {
 
 #[test]
 fn test_fold() {
-    assert_eq!(
-        run("[1, 2, 3].fold(0, (acc, x) => acc + x)"),
-        Value::Int(6)
-    );
+    assert_eq!(run("[1, 2, 3].fold(0, (acc, x) => acc + x)"), Value::Int(6));
 }
 
 #[test]
@@ -51,11 +48,11 @@ fn test_count() {
 #[test]
 fn test_any_all() {
     // any
-    assert_eq!(run("[1, 2, 3].any(x => x > 2)"),  Value::Bool(true));
-    assert_eq!(run("[1, 2, 3].any(x => x > 5)"),  Value::Bool(false));
+    assert_eq!(run("[1, 2, 3].any(x => x > 2)"), Value::Bool(true));
+    assert_eq!(run("[1, 2, 3].any(x => x > 5)"), Value::Bool(false));
     // all
-    assert_eq!(run("[1, 2, 3].all(x => x > 0)"),  Value::Bool(true));
-    assert_eq!(run("[1, 2, 3].all(x => x > 1)"),  Value::Bool(false));
+    assert_eq!(run("[1, 2, 3].all(x => x > 0)"), Value::Bool(true));
+    assert_eq!(run("[1, 2, 3].all(x => x > 1)"), Value::Bool(false));
     // none
     assert_eq!(run("[1, 2, 3].none(x => x > 5)"), Value::Bool(true));
     assert_eq!(run("[1, 2, 3].none(x => x > 2)"), Value::Bool(false));
@@ -64,11 +61,17 @@ fn test_any_all() {
 #[test]
 fn test_first_last() {
     // 非空リスト
-    assert_eq!(run("[10, 20, 30].first()"), Value::Option(Some(Box::new(Value::Int(10)))));
-    assert_eq!(run("[10, 20, 30].last()"),  Value::Option(Some(Box::new(Value::Int(30)))));
+    assert_eq!(
+        run("[10, 20, 30].first()"),
+        Value::Option(Some(Box::new(Value::Int(10))))
+    );
+    assert_eq!(
+        run("[10, 20, 30].last()"),
+        Value::Option(Some(Box::new(Value::Int(30))))
+    );
     // 空リストは none を返す
     assert_eq!(run("[].first()"), Value::Option(None));
-    assert_eq!(run("[].last()"),  Value::Option(None));
+    assert_eq!(run("[].last()"), Value::Option(None));
 }
 
 #[test]
@@ -135,6 +138,6 @@ fn test_method_chain() {
     // .filter().map().fold() のチェーン
     assert_eq!(
         run("[1, 2, 3, 4, 5].filter(x => x % 2 == 0).map(x => x * 3).fold(0, (acc, x) => acc + x)"),
-        Value::Int(18)  // (2*3) + (4*3) = 6 + 12 = 18
+        Value::Int(18) // (2*3) + (4*3) = 6 + 12 = 18
     );
 }

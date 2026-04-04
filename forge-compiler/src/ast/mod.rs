@@ -138,11 +138,16 @@ pub enum Stmt {
         is_pub: bool,
         span: Span,
     },
-    /// typestate Name { states: [...], StateName { fn ... } ... }
+    /// typestate Name { fields..., states: [...], StateName { fn ... } ..., any { fn ... } }
     TypestateDef {
         name: String,
-        states: Vec<String>,
+        fields: Vec<(String, TypeAnn)>,
+        states: Vec<TypestateMarker>,
         state_methods: Vec<TypestateState>,
+        any_methods: Vec<FnDef>,
+        any_block_count: usize,
+        derives: Vec<String>,
+        generic_params: Vec<String>,
         span: Span,
     },
     /// use ./path/module.symbol [as alias]
@@ -154,10 +159,7 @@ pub enum Stmt {
     },
     /// use raw { ... } — 生 Rust コードの埋め込み（M-6）
     /// `forge run` ではスキップ、`forge build` 時のみ有効
-    UseRaw {
-        rust_code: String,
-        span: Span,
-    },
+    UseRaw { rust_code: String, span: Span },
     /// when platform.linux { ... } / when feature.debug { ... } / when test { ... } （M-5）
     When {
         condition: WhenCondition,
@@ -179,6 +181,24 @@ pub struct TypestateState {
     pub methods: Vec<FnDef>,
 }
 
+/// typestate の状態マーカー宣言
+#[derive(Debug, Clone)]
+pub enum TypestateMarker {
+    Unit(String),
+    Tuple(String, Vec<TypeAnn>),
+    Struct(String, Vec<(String, TypeAnn)>),
+}
+
+impl TypestateMarker {
+    pub fn name(&self) -> &str {
+        match self {
+            TypestateMarker::Unit(name)
+            | TypestateMarker::Tuple(name, _)
+            | TypestateMarker::Struct(name, _) => name,
+        }
+    }
+}
+
 /// バリデーションルール: フィールドに対する制約の集合
 #[derive(Debug, Clone)]
 pub struct ValidateRule {
@@ -190,7 +210,10 @@ pub struct ValidateRule {
 #[derive(Debug, Clone)]
 pub enum Constraint {
     /// 文字列長チェック: length(3..20) / length(min: 8) / length(max: 20)
-    Length { min: Option<usize>, max: Option<usize> },
+    Length {
+        min: Option<usize>,
+        max: Option<usize>,
+    },
     /// 英数字のみ
     Alphanumeric,
     /// メールフォーマット（@と.を含む簡易チェック）
@@ -295,10 +318,7 @@ pub enum Expr {
         span: Span,
     },
     /// 文字列補間 "Hello, {name}!"
-    Interpolation {
-        parts: Vec<InterpPart>,
-        span: Span,
-    },
+    Interpolation { parts: Vec<InterpPart>, span: Span },
     /// 範囲 1..=10 / 0..10
     Range {
         start: Box<Expr>,
@@ -310,6 +330,8 @@ pub enum Expr {
     List(Vec<Expr>, Span),
     /// ? 演算子
     Question(Box<Expr>, Span),
+    /// .await
+    Await { expr: Box<Expr>, span: Span },
     /// 再代入（state のみ） x = expr
     Assign {
         name: String,
@@ -371,13 +393,28 @@ pub enum Pattern {
     /// err(x)
     Err(Box<Pattern>),
     /// 範囲パターン: 1..=10
-    Range { start: Literal, end: Literal, inclusive: bool },
+    Range {
+        start: Literal,
+        end: Literal,
+        inclusive: bool,
+    },
     /// enum Unit バリアント: Direction::North または単に North
-    EnumUnit { enum_name: Option<String>, variant: String },
+    EnumUnit {
+        enum_name: Option<String>,
+        variant: String,
+    },
     /// enum Tuple バリアント: Shape::Circle(r) または Circle(r)
-    EnumTuple { enum_name: Option<String>, variant: String, bindings: Vec<String> },
+    EnumTuple {
+        enum_name: Option<String>,
+        variant: String,
+        bindings: Vec<String>,
+    },
     /// enum Struct バリアント: Message::Move { x, y } または Move { x, y }
-    EnumStruct { enum_name: Option<String>, variant: String, fields: Vec<String> },
+    EnumStruct {
+        enum_name: Option<String>,
+        variant: String,
+        fields: Vec<String>,
+    },
 }
 
 /// enum バリアント定義
@@ -418,11 +455,11 @@ pub enum TypeAnn {
     Float,
     String,
     Bool,
-    Option(Box<TypeAnn>),         // T?
-    Result(Box<TypeAnn>),         // T!
+    Option(Box<TypeAnn>),                   // T?
+    Result(Box<TypeAnn>),                   // T!
     ResultWith(Box<TypeAnn>, Box<TypeAnn>), // T![E]
-    List(Box<TypeAnn>),           // list<T>
-    Named(String),                // ユーザー定義型（Phase 5 以降）
+    List(Box<TypeAnn>),                     // list<T>
+    Named(String),                          // ユーザー定義型（Phase 5 以降）
 }
 
 /// 関数パラメータ
@@ -461,23 +498,33 @@ pub struct FnDef {
     pub params: Vec<Param>,
     pub return_type: Option<TypeAnn>,
     pub body: Box<Expr>,
-    pub has_state_self: bool,   // `state self` で宣言されたか
+    pub has_state_self: bool, // `state self` で宣言されたか
     pub span: Span,
 }
 
 /// 二項演算子
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
 }
 
 /// 単項演算子
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
-    Neg,  // -x
-    Not,  // !x
+    Neg, // -x
+    Not, // !x
 }
 
 #[cfg(test)]

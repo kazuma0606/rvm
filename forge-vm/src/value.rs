@@ -9,8 +9,8 @@ use std::rc::Rc;
 
 use forge_compiler::ast::Expr;
 
-/// クロージャがキャプチャする環境（変数名 → Value のマップ）
-pub type CapturedEnv = Rc<RefCell<HashMap<String, Value>>>;
+/// クロージャがキャプチャする環境（変数名 → (Value, mutable) のマップ）
+pub type CapturedEnv = Rc<RefCell<HashMap<String, (Value, bool)>>>;
 
 /// ネイティブ関数ラッパー（Fn トレイトオブジェクトを Rc で保持）
 pub struct NativeFn(pub Rc<dyn Fn(Vec<Value>) -> Result<Value, String>>);
@@ -88,26 +88,49 @@ pub enum Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Int(a),    Value::Int(b))    => a == b,
-            (Value::Float(a),  Value::Float(b))  => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
-            (Value::Bool(a),   Value::Bool(b))   => a == b,
-            (Value::Unit,      Value::Unit)      => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
             (Value::Option(a), Value::Option(b)) => a == b,
-            (Value::Result(Ok(a)),  Value::Result(Ok(b)))  => a == b,
+            (Value::Result(Ok(a)), Value::Result(Ok(b))) => a == b,
             (Value::Result(Err(a)), Value::Result(Err(b))) => a == b,
             (Value::List(a), Value::List(b)) => *a.borrow() == *b.borrow(),
-            (Value::Struct { type_name: ta, fields: fa }, Value::Struct { type_name: tb, fields: fb }) => {
-                ta == tb && *fa.borrow() == *fb.borrow()
-            }
-            (Value::Enum { type_name: ta, variant: va, data: da },
-             Value::Enum { type_name: tb, variant: vb, data: db }) => {
-                ta == tb && va == vb && da == db
-            }
-            (Value::Typestate { type_name: ta, current_state: sa, fields: fa },
-             Value::Typestate { type_name: tb, current_state: sb, fields: fb }) => {
-                ta == tb && sa == sb && *fa.borrow() == *fb.borrow()
-            }
+            (
+                Value::Struct {
+                    type_name: ta,
+                    fields: fa,
+                },
+                Value::Struct {
+                    type_name: tb,
+                    fields: fb,
+                },
+            ) => ta == tb && *fa.borrow() == *fb.borrow(),
+            (
+                Value::Enum {
+                    type_name: ta,
+                    variant: va,
+                    data: da,
+                },
+                Value::Enum {
+                    type_name: tb,
+                    variant: vb,
+                    data: db,
+                },
+            ) => ta == tb && va == vb && da == db,
+            (
+                Value::Typestate {
+                    type_name: ta,
+                    current_state: sa,
+                    fields: fa,
+                },
+                Value::Typestate {
+                    type_name: tb,
+                    current_state: sb,
+                    fields: fb,
+                },
+            ) => ta == tb && sa == sb && *fa.borrow() == *fb.borrow(),
             // クロージャ・ネイティブ関数は参照等価性なし
             _ => false,
         }
@@ -119,15 +142,15 @@ impl Hash for Value {
         // discriminant でバリアントを区別
         std::mem::discriminant(self).hash(state);
         match self {
-            Value::Int(n)    => n.hash(state),
-            Value::Float(f)  => f.to_bits().hash(state),
+            Value::Int(n) => n.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
             Value::String(s) => s.hash(state),
-            Value::Bool(b)   => b.hash(state),
-            Value::Unit      => {},
+            Value::Bool(b) => b.hash(state),
+            Value::Unit => {}
             Value::Option(Some(v)) => v.hash(state),
-            Value::Option(None)    => {},
-            Value::Result(Ok(v))   => v.hash(state),
-            Value::Result(Err(e))  => e.hash(state),
+            Value::Option(None) => {}
+            Value::Result(Ok(v)) => v.hash(state),
+            Value::Result(Err(e)) => e.hash(state),
             Value::List(items) => {
                 for item in items.borrow().iter() {
                     item.hash(state);
@@ -144,7 +167,11 @@ impl Hash for Value {
                     v.hash(state);
                 }
             }
-            Value::Enum { type_name, variant, data } => {
+            Value::Enum {
+                type_name,
+                variant,
+                data,
+            } => {
                 type_name.hash(state);
                 variant.hash(state);
                 match data {
@@ -166,7 +193,11 @@ impl Hash for Value {
                     }
                 }
             }
-            Value::Typestate { type_name, current_state, fields } => {
+            Value::Typestate {
+                type_name,
+                current_state,
+                fields,
+            } => {
                 type_name.hash(state);
                 current_state.hash(state);
                 let borrow = fields.borrow();
@@ -178,7 +209,7 @@ impl Hash for Value {
                 }
             }
             // クロージャ・ネイティブ関数はハッシュ不可 → ポインタアドレスで代替
-            Value::Closure { .. }    => 0_u8.hash(state),
+            Value::Closure { .. } => 0_u8.hash(state),
             Value::NativeFunction(_) => 1_u8.hash(state),
         }
     }
@@ -187,15 +218,15 @@ impl Hash for Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Int(n)    => write!(f, "{}", n),
-            Value::Float(n)  => write!(f, "{}", n),
+            Value::Int(n) => write!(f, "{}", n),
+            Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "{}", s),
-            Value::Bool(b)   => write!(f, "{}", b),
-            Value::Unit      => Ok(()), // 表示なし
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Unit => Ok(()), // 表示なし
             Value::Option(Some(v)) => write!(f, "some({})", v),
-            Value::Option(None)    => write!(f, "none"),
-            Value::Result(Ok(v))   => write!(f, "ok({})", v),
-            Value::Result(Err(e))  => write!(f, "err({})", e),
+            Value::Option(None) => write!(f, "none"),
+            Value::Result(Ok(v)) => write!(f, "ok({})", v),
+            Value::Result(Err(e)) => write!(f, "err({})", e),
             Value::List(items) => {
                 let items = items.borrow();
                 write!(f, "[")?;
@@ -207,31 +238,37 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Closure { .. }    => write!(f, "<closure>"),
+            Value::Closure { .. } => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<function>"),
-            Value::Enum { type_name, variant, data } => {
-                match data {
-                    EnumData::Unit => write!(f, "{}::{}", type_name, variant),
-                    EnumData::Tuple(items) => {
-                        write!(f, "{}::{}(", type_name, variant)?;
-                        for (i, item) in items.iter().enumerate() {
-                            if i > 0 { write!(f, ", ")?; }
-                            write!(f, "{}", item)?;
+            Value::Enum {
+                type_name,
+                variant,
+                data,
+            } => match data {
+                EnumData::Unit => write!(f, "{}::{}", type_name, variant),
+                EnumData::Tuple(items) => {
+                    write!(f, "{}::{}(", type_name, variant)?;
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
                         }
-                        write!(f, ")")
+                        write!(f, "{}", item)?;
                     }
-                    EnumData::Struct(fields) => {
-                        write!(f, "{}::{}{{", type_name, variant)?;
-                        let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
-                        sorted.sort_by_key(|(k, _)| k.as_str());
-                        for (i, (k, v)) in sorted.iter().enumerate() {
-                            if i > 0 { write!(f, ", ")?; }
-                            write!(f, " {}: {}", k, v)?;
-                        }
-                        write!(f, " }}")
-                    }
+                    write!(f, ")")
                 }
-            }
+                EnumData::Struct(fields) => {
+                    write!(f, "{}::{}{{", type_name, variant)?;
+                    let mut sorted: Vec<(&String, &Value)> = fields.iter().collect();
+                    sorted.sort_by_key(|(k, _)| k.as_str());
+                    for (i, (k, v)) in sorted.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, " {}: {}", k, v)?;
+                    }
+                    write!(f, " }}")
+                }
+            },
             Value::Struct { type_name, fields } => {
                 write!(f, "{} {{", type_name)?;
                 let fields = fields.borrow();
@@ -245,7 +282,11 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, " }}")
             }
-            Value::Typestate { type_name, current_state, .. } => {
+            Value::Typestate {
+                type_name,
+                current_state,
+                ..
+            } => {
                 write!(f, "{}<{}>", type_name, current_state)
             }
         }
@@ -256,27 +297,27 @@ impl Value {
     /// 型名を文字列で返す（`type_of` 組み込み関数用）
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Int(_)            => "number",
-            Value::Float(_)          => "float",
-            Value::String(_)         => "string",
-            Value::Bool(_)           => "bool",
-            Value::Unit              => "unit",
-            Value::Option(_)         => "option",
-            Value::Result(_)         => "result",
-            Value::List(_)           => "list",
-            Value::Closure { .. }    => "closure",
+            Value::Int(_) => "number",
+            Value::Float(_) => "float",
+            Value::String(_) => "string",
+            Value::Bool(_) => "bool",
+            Value::Unit => "unit",
+            Value::Option(_) => "option",
+            Value::Result(_) => "result",
+            Value::List(_) => "list",
+            Value::Closure { .. } => "closure",
             Value::NativeFunction(_) => "function",
-            Value::Struct { .. }     => "struct",
-            Value::Enum { .. }       => "enum",
-            Value::Typestate { .. }  => "typestate",
+            Value::Struct { .. } => "struct",
+            Value::Enum { .. } => "enum",
+            Value::Typestate { .. } => "typestate",
         }
     }
 
     /// struct / enum の場合、型名を動的に返す
     pub fn dynamic_type_name(&self) -> String {
         match self {
-            Value::Struct { type_name, .. }    => type_name.clone(),
-            Value::Enum { type_name, .. }      => type_name.clone(),
+            Value::Struct { type_name, .. } => type_name.clone(),
+            Value::Enum { type_name, .. } => type_name.clone(),
             Value::Typestate { type_name, .. } => type_name.clone(),
             _ => self.type_name().to_string(),
         }
@@ -286,7 +327,8 @@ impl Value {
     pub fn deep_clone(&self) -> Value {
         match self {
             Value::Struct { type_name, fields } => {
-                let cloned: HashMap<String, Value> = fields.borrow()
+                let cloned: HashMap<String, Value> = fields
+                    .borrow()
                     .iter()
                     .map(|(k, v)| (k.clone(), v.deep_clone()))
                     .collect();
@@ -299,15 +341,22 @@ impl Value {
                 let cloned: Vec<Value> = items.borrow().iter().map(|v| v.deep_clone()).collect();
                 Value::List(Rc::new(RefCell::new(cloned)))
             }
-            Value::Enum { type_name, variant, data } => {
+            Value::Enum {
+                type_name,
+                variant,
+                data,
+            } => {
                 let cloned_data = match data {
                     EnumData::Unit => EnumData::Unit,
                     EnumData::Tuple(items) => {
                         EnumData::Tuple(items.iter().map(|v| v.deep_clone()).collect())
                     }
-                    EnumData::Struct(fields) => {
-                        EnumData::Struct(fields.iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect())
-                    }
+                    EnumData::Struct(fields) => EnumData::Struct(
+                        fields
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.deep_clone()))
+                            .collect(),
+                    ),
                 };
                 Value::Enum {
                     type_name: type_name.clone(),
@@ -315,8 +364,13 @@ impl Value {
                     data: cloned_data,
                 }
             }
-            Value::Typestate { type_name, current_state, fields } => {
-                let cloned: HashMap<String, Value> = fields.borrow()
+            Value::Typestate {
+                type_name,
+                current_state,
+                fields,
+            } => {
+                let cloned: HashMap<String, Value> = fields
+                    .borrow()
                     .iter()
                     .map(|(k, v)| (k.clone(), v.deep_clone()))
                     .collect();

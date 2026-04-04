@@ -1,7 +1,7 @@
 // forge-compiler: Phase 1 結合テスト
 
-use forge_compiler::parser::parse_source;
 use forge_compiler::ast::*;
+use forge_compiler::parser::parse_source;
 
 fn parse_ok(src: &str) -> Module {
     parse_source(src).unwrap_or_else(|e| panic!("parse failed: {}", e))
@@ -51,10 +51,34 @@ let doubled = items.map(x => x * 2)
 "#;
     let module = parse_ok(src);
     assert_eq!(module.stmts.len(), 5);
-    assert!(matches!(&module.stmts[0], Stmt::Let { value: Expr::Closure { .. }, .. }));
-    assert!(matches!(&module.stmts[1], Stmt::Let { value: Expr::Closure { .. }, .. }));
-    assert!(matches!(&module.stmts[2], Stmt::Let { value: Expr::Closure { .. }, .. }));
-    assert!(matches!(&module.stmts[4], Stmt::Let { value: Expr::MethodCall { .. }, .. }));
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            value: Expr::Closure { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[1],
+        Stmt::Let {
+            value: Expr::Closure { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[2],
+        Stmt::Let {
+            value: Expr::Closure { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[4],
+        Stmt::Let {
+            value: Expr::MethodCall { .. },
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -68,9 +92,39 @@ let e = "hello"
 "#;
     let module = parse_ok(src);
     assert_eq!(module.stmts.len(), 5);
-    assert!(matches!(&module.stmts[0], Stmt::Let { value: Expr::Literal(Literal::Int(42), _), .. }));
-    assert!(matches!(&module.stmts[1], Stmt::Let { value: Expr::Literal(Literal::Float(_), _), .. }));
-    assert!(matches!(&module.stmts[2], Stmt::Let { value: Expr::Literal(Literal::Bool(true), _), .. }));
-    assert!(matches!(&module.stmts[3], Stmt::Let { value: Expr::Literal(Literal::Bool(false), _), .. }));
-    assert!(matches!(&module.stmts[4], Stmt::Let { value: Expr::Literal(Literal::String(_), _), .. }));
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            value: Expr::Literal(Literal::Int(42), _),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[1],
+        Stmt::Let {
+            value: Expr::Literal(Literal::Float(_), _),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[2],
+        Stmt::Let {
+            value: Expr::Literal(Literal::Bool(true), _),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[3],
+        Stmt::Let {
+            value: Expr::Literal(Literal::Bool(false), _),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &module.stmts[4],
+        Stmt::Let {
+            value: Expr::Literal(Literal::String(_), _),
+            ..
+        }
+    ));
 }

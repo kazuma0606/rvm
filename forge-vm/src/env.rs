@@ -1,8 +1,8 @@
 // forge-vm: 環境（変数スコープ）
 // Phase 2-B で実装する
 
-use std::collections::HashMap;
 use crate::value::Value;
+use std::collections::HashMap;
 
 /// 変数環境（スコープチェーン）
 pub struct Env {
@@ -13,7 +13,9 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Self {
-        Self { vars: HashMap::new() }
+        Self {
+            vars: HashMap::new(),
+        }
     }
 }
 

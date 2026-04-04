@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 
+use super::types::Type;
 use crate::ast::*;
 use crate::lexer::Span;
-use super::types::Type;
 
 // ── エラー型 ─────────────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.span {
             Some(s) => write!(f, "型エラー [{}:{}]: {}", s.line, s.col, self.message),
-            None    => write!(f, "型エラー: {}", self.message),
+            None => write!(f, "型エラー: {}", self.message),
         }
     }
 }
@@ -37,14 +37,21 @@ pub struct TypeChecker {
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self { env: vec![HashMap::new()], errors: Vec::new() }
+        Self {
+            env: vec![HashMap::new()],
+            errors: Vec::new(),
+        }
     }
 
     // ── スコープ操作 ──────────────────────────────────────────────────────
 
-    fn push_scope(&mut self) { self.env.push(HashMap::new()); }
+    fn push_scope(&mut self) {
+        self.env.push(HashMap::new());
+    }
 
-    fn pop_scope(&mut self) { self.env.pop(); }
+    fn pop_scope(&mut self) {
+        self.env.pop();
+    }
 
     fn define(&mut self, name: &str, ty: Type) {
         if let Some(scope) = self.env.last_mut() {
@@ -63,7 +70,10 @@ impl TypeChecker {
     }
 
     fn add_error(&mut self, message: impl Into<String>, span: Option<Span>) {
-        self.errors.push(TypeError { message: message.into(), span });
+        self.errors.push(TypeError {
+            message: message.into(),
+            span,
+        });
     }
 
     // ── モジュール・文 ────────────────────────────────────────────────────
@@ -77,22 +87,51 @@ impl TypeChecker {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let   { name, type_ann, value, .. } => self.check_binding(name, type_ann, value),
-            Stmt::State { name, type_ann, value, .. } => self.check_binding(name, type_ann, value),
-            Stmt::Const { name, type_ann, value, .. } => self.check_binding(name, type_ann, value),
+            Stmt::Let {
+                name,
+                type_ann,
+                value,
+                ..
+            } => self.check_binding(name, type_ann, value),
+            Stmt::State {
+                name,
+                type_ann,
+                value,
+                ..
+            } => self.check_binding(name, type_ann, value),
+            Stmt::Const {
+                name,
+                type_ann,
+                value,
+                ..
+            } => self.check_binding(name, type_ann, value),
 
-            Stmt::Fn { name, params, return_type, body, .. } => {
-                let declared_ret = return_type.as_ref().map(Type::from_ann).unwrap_or(Type::Unknown);
+            Stmt::Fn {
+                name,
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                let declared_ret = return_type
+                    .as_ref()
+                    .map(Type::from_ann)
+                    .unwrap_or(Type::Unknown);
 
                 self.push_scope();
                 for param in params {
-                    let ty = param.type_ann.as_ref().map(Type::from_ann).unwrap_or(Type::Unknown);
+                    let ty = param
+                        .type_ann
+                        .as_ref()
+                        .map(Type::from_ann)
+                        .unwrap_or(Type::Unknown);
                     self.define(&param.name, ty);
                 }
                 let body_ty = self.infer_expr(body);
                 self.pop_scope();
 
-                if declared_ret != Type::Unknown && body_ty != Type::Unknown
+                if declared_ret != Type::Unknown
+                    && body_ty != Type::Unknown
                     && declared_ret != body_ty
                 {
                     self.add_error(
@@ -103,15 +142,23 @@ impl TypeChecker {
                         None,
                     );
                 }
-                let fn_ty = if declared_ret != Type::Unknown { declared_ret } else { body_ty };
+                let fn_ty = if declared_ret != Type::Unknown {
+                    declared_ret
+                } else {
+                    body_ty
+                };
                 self.define(name, fn_ty);
             }
 
             Stmt::Return(expr, _) => {
-                if let Some(e) = expr { self.infer_expr(e); }
+                if let Some(e) = expr {
+                    self.infer_expr(e);
+                }
             }
 
-            Stmt::Expr(expr) => { self.infer_expr(expr); }
+            Stmt::Expr(expr) => {
+                self.infer_expr(expr);
+            }
 
             // T-1: 型定義は型チェッカーでは現在スキップ（将来対応）
             Stmt::StructDef { .. } | Stmt::ImplBlock { .. } | Stmt::EnumDef { .. } => {}
@@ -134,9 +181,13 @@ impl TypeChecker {
 
     /// let / state / const バインディングの型チェック
     fn check_binding(&mut self, name: &str, ann: &Option<TypeAnn>, value: &Expr) {
-        let inferred  = self.infer_expr(value);
-        let declared  = ann.as_ref().map(Type::from_ann).unwrap_or(Type::Unknown);
-        let final_ty  = if declared != Type::Unknown { declared.clone() } else { inferred.clone() };
+        let inferred = self.infer_expr(value);
+        let declared = ann.as_ref().map(Type::from_ann).unwrap_or(Type::Unknown);
+        let final_ty = if declared != Type::Unknown {
+            declared.clone()
+        } else {
+            inferred.clone()
+        };
 
         if declared != Type::Unknown && inferred != Type::Unknown && declared != inferred {
             self.add_error(
@@ -158,13 +209,14 @@ impl TypeChecker {
             // リテラルはそのまま型が決まる
             Expr::Literal(lit, _) => infer_literal(lit),
 
-            Expr::Ident(name, _) => {
-                self.lookup(name).cloned().unwrap_or(Type::Unknown)
-            }
+            Expr::Ident(name, _) => self.lookup(name).cloned().unwrap_or(Type::Unknown),
 
-            Expr::BinOp { op, left, right, span } => {
-                self.infer_binop(op, left, right, span)
-            }
+            Expr::BinOp {
+                op,
+                left,
+                right,
+                span,
+            } => self.infer_binop(op, left, right, span),
 
             Expr::UnaryOp { op, operand, .. } => {
                 let ty = self.infer_expr(operand);
@@ -174,13 +226,22 @@ impl TypeChecker {
                 }
             }
 
-            Expr::If { cond, then_block, else_block, .. } => {
+            Expr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.infer_expr(cond);
                 let then_ty = self.infer_expr(then_block);
                 match else_block {
                     Some(e) => {
                         let else_ty = self.infer_expr(e);
-                        if then_ty == else_ty { then_ty } else { Type::Unknown }
+                        if then_ty == else_ty {
+                            then_ty
+                        } else {
+                            Type::Unknown
+                        }
                     }
                     None => Type::Unit,
                 }
@@ -192,11 +253,13 @@ impl TypeChecker {
                 Type::Unit
             }
 
-            Expr::For { var, iter, body, .. } => {
+            Expr::For {
+                var, iter, body, ..
+            } => {
                 let iter_ty = self.infer_expr(iter);
                 let elem_ty = match iter_ty {
                     Type::List(t) => *t,
-                    _             => Type::Unknown,
+                    _ => Type::Unknown,
                 };
                 self.push_scope();
                 self.define(var, elem_ty);
@@ -207,45 +270,56 @@ impl TypeChecker {
 
             Expr::Block { stmts, tail, .. } => {
                 self.push_scope();
-                for stmt in stmts { self.check_stmt(stmt); }
+                for stmt in stmts {
+                    self.check_stmt(stmt);
+                }
                 let ty = match tail {
                     Some(e) => self.infer_expr(e),
-                    None    => Type::Unit,
+                    None => Type::Unit,
                 };
                 self.pop_scope();
                 ty
             }
 
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let scrut_ty = self.infer_expr(scrutinee);
                 self.check_match_exhaustiveness(&scrut_ty, arms);
-                arms.first().map(|arm| self.infer_expr(&arm.body)).unwrap_or(Type::Unit)
+                arms.first()
+                    .map(|arm| self.infer_expr(&arm.body))
+                    .unwrap_or(Type::Unit)
             }
 
             Expr::List(items, _) => {
-                let elem = items.first().map(|e| self.infer_expr(e)).unwrap_or(Type::Unknown);
+                let elem = items
+                    .first()
+                    .map(|e| self.infer_expr(e))
+                    .unwrap_or(Type::Unknown);
                 Type::List(Box::new(elem))
             }
 
-            Expr::Range { .. }         => Type::List(Box::new(Type::Number)),
+            Expr::Range { .. } => Type::List(Box::new(Type::Number)),
             Expr::Interpolation { .. } => Type::String,
 
-            Expr::Question(inner, _) => {
-                match self.infer_expr(inner) {
-                    Type::Result(t) => *t,
-                    _               => Type::Unknown,
-                }
-            }
+            Expr::Question(inner, _) => match self.infer_expr(inner) {
+                Type::Result(t) => *t,
+                _ => Type::Unknown,
+            },
 
             // 関数呼び出し・メソッド呼び出し・クロージャは Unknown（Phase 4 では未推論）
             Expr::Call { callee, args, .. } => {
                 self.infer_expr(callee);
-                for a in args { self.infer_expr(a); }
+                for a in args {
+                    self.infer_expr(a);
+                }
                 Type::Unknown
             }
             Expr::MethodCall { object, args, .. } => {
                 self.infer_expr(object);
-                for a in args { self.infer_expr(a); }
+                for a in args {
+                    self.infer_expr(a);
+                }
                 Type::Unknown
             }
             Expr::Closure { body, .. } => {
@@ -269,7 +343,9 @@ impl TypeChecker {
         match op {
             BinOp::Add => {
                 // string + string → string
-                if lt == Type::String && rt == Type::String { return Type::String; }
+                if lt == Type::String && rt == Type::String {
+                    return Type::String;
+                }
                 self.numeric_result(&lt, &rt, op, span)
             }
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -300,7 +376,7 @@ impl TypeChecker {
     fn numeric_result(&mut self, lt: &Type, rt: &Type, op: &BinOp, span: &Span) -> Type {
         match (lt, rt) {
             (Type::Number, Type::Number) => Type::Number,
-            (Type::Float,  Type::Float)  => Type::Float,
+            (Type::Float, Type::Float) => Type::Float,
             (Type::Unknown, _) | (_, Type::Unknown) => Type::Unknown,
             _ => {
                 self.add_error(
@@ -316,24 +392,40 @@ impl TypeChecker {
 
     fn check_match_exhaustiveness(&mut self, scrut_ty: &Type, arms: &[MatchArm]) {
         let patterns: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
-        let has_wildcard = patterns.iter().any(|p| matches!(p, Pattern::Wildcard | Pattern::Ident(_)));
-        if has_wildcard { return; }
+        let has_wildcard = patterns
+            .iter()
+            .any(|p| matches!(p, Pattern::Wildcard | Pattern::Ident(_)));
+        if has_wildcard {
+            return;
+        }
 
         match scrut_ty {
             Type::Option(_) => {
                 if !patterns.iter().any(|p| matches!(p, Pattern::Some(_))) {
-                    self.add_error("match が網羅的ではありません: some(_) のアームがありません", None);
+                    self.add_error(
+                        "match が網羅的ではありません: some(_) のアームがありません",
+                        None,
+                    );
                 }
                 if !patterns.iter().any(|p| matches!(p, Pattern::None)) {
-                    self.add_error("match が網羅的ではありません: none のアームがありません", None);
+                    self.add_error(
+                        "match が網羅的ではありません: none のアームがありません",
+                        None,
+                    );
                 }
             }
             Type::Result(_) => {
                 if !patterns.iter().any(|p| matches!(p, Pattern::Ok(_))) {
-                    self.add_error("match が網羅的ではありません: ok(_) のアームがありません", None);
+                    self.add_error(
+                        "match が網羅的ではありません: ok(_) のアームがありません",
+                        None,
+                    );
                 }
                 if !patterns.iter().any(|p| matches!(p, Pattern::Err(_))) {
-                    self.add_error("match が網羅的ではありません: err(_) のアームがありません", None);
+                    self.add_error(
+                        "match が網羅的ではありません: err(_) のアームがありません",
+                        None,
+                    );
                 }
             }
             _ => {}
@@ -342,7 +434,9 @@ impl TypeChecker {
 }
 
 impl Default for TypeChecker {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -350,10 +444,10 @@ impl Default for TypeChecker {
 /// リテラルから型を推論する
 fn infer_literal(lit: &Literal) -> Type {
     match lit {
-        Literal::Int(_)    => Type::Number,
-        Literal::Float(_)  => Type::Float,
+        Literal::Int(_) => Type::Number,
+        Literal::Float(_) => Type::Float,
         Literal::String(_) => Type::String,
-        Literal::Bool(_)   => Type::Bool,
+        Literal::Bool(_) => Type::Bool,
     }
 }
 
@@ -362,7 +456,12 @@ pub fn type_check_source(source: &str) -> Vec<TypeError> {
     use crate::parser::parse_source;
     let module = match parse_source(source) {
         Ok(m) => m,
-        Err(e) => return vec![TypeError { message: e.to_string(), span: None }],
+        Err(e) => {
+            return vec![TypeError {
+                message: e.to_string(),
+                span: None,
+            }]
+        }
     };
     let mut checker = TypeChecker::new();
     checker.check_module(&module);
@@ -402,8 +501,11 @@ mod tests {
         // 数値 + 文字列 → 型エラーが発生する
         let tc = checker_for(r#"1 + "hello""#);
         assert!(!tc.errors.is_empty(), "型エラーが検出されるはず");
-        assert!(tc.errors[0].message.contains("型不一致") || tc.errors[0].message.contains("不一致"),
-            "エラーメッセージ: {}", tc.errors[0].message);
+        assert!(
+            tc.errors[0].message.contains("型不一致") || tc.errors[0].message.contains("不一致"),
+            "エラーメッセージ: {}",
+            tc.errors[0].message
+        );
     }
 
     #[test]
@@ -429,7 +531,11 @@ match v {
 "#;
         let tc = checker_for(src);
         let has_none_err = tc.errors.iter().any(|e| e.message.contains("none"));
-        assert!(has_none_err, "none アーム欠如のエラーが検出されるはず: {:?}", tc.errors);
+        assert!(
+            has_none_err,
+            "none アーム欠如のエラーが検出されるはず: {:?}",
+            tc.errors
+        );
     }
 
     #[test]
@@ -443,6 +549,10 @@ match r {
 "#;
         let tc = checker_for(src);
         let has_err_err = tc.errors.iter().any(|e| e.message.contains("err"));
-        assert!(has_err_err, "err アーム欠如のエラーが検出されるはず: {:?}", tc.errors);
+        assert!(
+            has_err_err,
+            "err アーム欠如のエラーが検出されるはず: {:?}",
+            tc.errors
+        );
     }
 }

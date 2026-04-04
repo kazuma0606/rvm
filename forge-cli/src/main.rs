@@ -11,9 +11,9 @@ use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
 use forge_compiler::typechecker::type_check_source;
+use forge_transpiler::transpile;
 use forge_vm::interpreter::Interpreter;
 use forge_vm::value::Value;
-use forge_transpiler::transpile;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,7 +41,9 @@ fn main() {
         }
         Some("transpile") => {
             if let Some(path) = args.get(2) {
-                let output = args.iter().position(|s| s == "-o")
+                let output = args
+                    .iter()
+                    .position(|s| s == "-o")
                     .and_then(|i| args.get(i + 1));
                 transpile_file(path, output.map(|s| s.as_str()));
             } else {
@@ -52,7 +54,9 @@ fn main() {
         }
         Some("build") => {
             if let Some(path) = args.get(2) {
-                let output = args.iter().position(|s| s == "-o")
+                let output = args
+                    .iter()
+                    .position(|s| s == "-o")
                     .and_then(|i| args.get(i + 1));
                 build_file(path, output.map(|s| s.as_str()));
             } else {
@@ -64,7 +68,9 @@ fn main() {
         Some("test") => {
             if let Some(path) = args.get(2) {
                 // --filter オプションを手動でパース
-                let filter = args.iter().position(|s| s == "--filter")
+                let filter = args
+                    .iter()
+                    .position(|s| s == "--filter")
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str());
                 test_file(path, filter);
@@ -225,9 +231,10 @@ fn run_repl() {
                 match interp.eval(&module) {
                     Ok(Value::Unit) => {
                         // use 文で新たに追加されたシンボルを loaded_modules に記録する
-                        let has_use_decl = module.stmts.iter().any(|s| {
-                            matches!(s, forge_compiler::ast::Stmt::UseDecl { .. })
-                        });
+                        let has_use_decl = module
+                            .stmts
+                            .iter()
+                            .any(|s| matches!(s, forge_compiler::ast::Stmt::UseDecl { .. }));
                         if has_use_decl {
                             let after_keys: std::collections::HashSet<String> =
                                 interp.imported_symbols.keys().cloned().collect();
@@ -243,7 +250,8 @@ fn run_repl() {
                                             forge_compiler::ast::UsePath::External(p) => p.clone(),
                                             forge_compiler::ast::UsePath::Stdlib(p) => p.clone(),
                                         };
-                                        let entry = interp.loaded_modules
+                                        let entry = interp
+                                            .loaded_modules
                                             .entry(mod_path.clone())
                                             .or_insert_with(Vec::new);
                                         for sym in &new_syms {
@@ -286,7 +294,9 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
     if let Some(rest) = input.strip_prefix(":reload ") {
         let path = rest.trim();
         if path.is_empty() {
-            return Some(Err(":reload にはモジュールパスを指定してください".to_string()));
+            return Some(Err(
+                ":reload にはモジュールパスを指定してください".to_string()
+            ));
         }
         // キャッシュから削除してアンロード
         interp.unload_module(path);
@@ -305,7 +315,8 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
                         let new_syms: Vec<String> =
                             after_keys.difference(&before_keys).cloned().collect();
                         if !new_syms.is_empty() {
-                            let entry = interp.loaded_modules
+                            let entry = interp
+                                .loaded_modules
                                 .entry(path.to_string())
                                 .or_insert_with(Vec::new);
                             for sym in new_syms {
@@ -316,7 +327,10 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
                         }
                         Some(Ok(format!("✔ {} を再ロードしました", path)))
                     }
-                    Err(e) => Some(Err(format!("モジュール '{}' の再ロードに失敗しました: {}", path, e))),
+                    Err(e) => Some(Err(format!(
+                        "モジュール '{}' の再ロードに失敗しました: {}",
+                        path, e
+                    ))),
                 }
             }
             Err(e) => Some(Err(format!("パースエラー: {}", e))),
@@ -324,7 +338,9 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
     } else if let Some(rest) = input.strip_prefix(":unload ") {
         let path = rest.trim();
         if path.is_empty() {
-            return Some(Err(":unload にはモジュールパスを指定してください".to_string()));
+            return Some(Err(
+                ":unload にはモジュールパスを指定してください".to_string()
+            ));
         }
         if interp.loaded_modules.contains_key(path) {
             interp.unload_module(path);
@@ -334,7 +350,10 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
         }
     } else if input.starts_with(':') {
         // 未知のコマンド
-        Some(Err(format!("不明なコマンド '{}'\n利用可能: :modules, :reload <path>, :unload <path>", input)))
+        Some(Err(format!(
+            "不明なコマンド '{}'\n利用可能: :modules, :reload <path>, :unload <path>",
+            input
+        )))
     } else {
         None
     }
@@ -380,7 +399,10 @@ fn transpile_file(path: &str, output: Option<&str>) {
     match output {
         Some(out_path) => {
             if let Err(e) = fs::write(out_path, &rust_code) {
-                eprintln!("エラー: ファイル '{}' への書き込みに失敗しました: {}", out_path, e);
+                eprintln!(
+                    "エラー: ファイル '{}' への書き込みに失敗しました: {}",
+                    out_path, e
+                );
                 std::process::exit(1);
             }
             println!("Rust コードを '{}' に書き込みました", out_path);
@@ -406,7 +428,10 @@ fn build_file(path: &str, output: Option<&str>) {
     proj_dir.push(format!("forge_build_{}_{}", stem, unique_suffix()));
 
     if let Err(e) = fs::create_dir_all(proj_dir.join("src")) {
-        eprintln!("エラー: 一時プロジェクトディレクトリを作成できませんでした: {}", e);
+        eprintln!(
+            "エラー: 一時プロジェクトディレクトリを作成できませんでした: {}",
+            e
+        );
         std::process::exit(1);
     }
 
@@ -420,7 +445,10 @@ fn build_file(path: &str, output: Option<&str>) {
     }
 
     if let Err(e) = write_transpiled_project(entry_path, &proj_dir.join("src")) {
-        eprintln!("エラー: トランスパイル済みプロジェクトの生成に失敗しました: {}", e);
+        eprintln!(
+            "エラー: トランスパイル済みプロジェクトの生成に失敗しました: {}",
+            e
+        );
         std::process::exit(1);
     }
 
@@ -456,7 +484,11 @@ fn build_file(path: &str, output: Option<&str>) {
             // バイナリを出力先にコピー
             let built_bin = proj_dir.join(format!("target/release/{}", stem));
             let built_bin_exe = proj_dir.join(format!("target/release/{}.exe", stem));
-            let src_bin = if built_bin_exe.exists() { built_bin_exe } else { built_bin };
+            let src_bin = if built_bin_exe.exists() {
+                built_bin_exe
+            } else {
+                built_bin
+            };
 
             if let Err(e) = fs::copy(&src_bin, &binary_path) {
                 eprintln!("エラー: バイナリのコピーに失敗しました: {}", e);
@@ -470,7 +502,10 @@ fn build_file(path: &str, output: Option<&str>) {
         }
         Ok(s) => {
             let _ = fs::remove_dir_all(&proj_dir);
-            eprintln!("cargo build がエラーを返しました (exit code: {:?})", s.code());
+            eprintln!(
+                "cargo build がエラーを返しました (exit code: {:?})",
+                s.code()
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -493,7 +528,12 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
     let files = collect_forge_files(&source_root, entry_path)?;
     let entry_rel = entry_path
         .strip_prefix(&source_root)
-        .map_err(|_| format!("entry path '{}' is outside source root", entry_path.display()))?
+        .map_err(|_| {
+            format!(
+                "entry path '{}' is outside source root",
+                entry_path.display()
+            )
+        })?
         .to_path_buf();
 
     let mut deps = DepsManager::new();
@@ -502,8 +542,8 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
     for file in &files {
         collect_external_deps(&source_root, file, &mut deps)?;
 
-        let mut rust_code = transpile(&file.source)
-            .map_err(|e| format!("{}: {}", file.rel_path.display(), e))?;
+        let mut rust_code =
+            transpile(&file.source).map_err(|e| format!("{}: {}", file.rel_path.display(), e))?;
 
         let rel_dir = file
             .rel_path
@@ -528,7 +568,10 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
     write_synthesized_mod_files(out_src_dir, &module_index, &files)?;
 
     update_generated_cargo_toml(
-        &out_src_dir.parent().unwrap_or(out_src_dir).join("Cargo.toml"),
+        &out_src_dir
+            .parent()
+            .unwrap_or(out_src_dir)
+            .join("Cargo.toml"),
         &deps,
     )?;
 
@@ -536,9 +579,12 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
 }
 
 fn detect_source_root(entry_path: &Path) -> Result<PathBuf, String> {
-    let parent = entry_path
-        .parent()
-        .ok_or_else(|| format!("cannot determine parent directory for '{}'", entry_path.display()))?;
+    let parent = entry_path.parent().ok_or_else(|| {
+        format!(
+            "cannot determine parent directory for '{}'",
+            entry_path.display()
+        )
+    })?;
 
     if parent.file_name().and_then(|s| s.to_str()) == Some("src") {
         Ok(parent.to_path_buf())
@@ -547,18 +593,31 @@ fn detect_source_root(entry_path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn collect_forge_files(source_root: &Path, entry_path: &Path) -> Result<Vec<ForgeSourceFile>, String> {
+fn collect_forge_files(
+    source_root: &Path,
+    entry_path: &Path,
+) -> Result<Vec<ForgeSourceFile>, String> {
     if entry_path.file_name().and_then(|s| s.to_str()) != Some("main.forge") {
         let rel_path = entry_path
             .strip_prefix(source_root)
-            .map_err(|_| format!("{} is outside {}", entry_path.display(), source_root.display()))?
+            .map_err(|_| {
+                format!(
+                    "{} is outside {}",
+                    entry_path.display(),
+                    source_root.display()
+                )
+            })?
             .to_path_buf();
         let source = fs::read_to_string(entry_path)
             .map_err(|e| format!("{}: {}", entry_path.display(), e))?;
         return Ok(vec![ForgeSourceFile { rel_path, source }]);
     }
 
-    fn walk(dir: &Path, source_root: &Path, files: &mut Vec<ForgeSourceFile>) -> Result<(), String> {
+    fn walk(
+        dir: &Path,
+        source_root: &Path,
+        files: &mut Vec<ForgeSourceFile>,
+    ) -> Result<(), String> {
         let mut entries = fs::read_dir(dir)
             .map_err(|e| format!("{}: {}", dir.display(), e))?
             .collect::<Result<Vec<_>, _>>()
@@ -579,12 +638,9 @@ fn collect_forge_files(source_root: &Path, entry_path: &Path) -> Result<Vec<Forg
                 .strip_prefix(source_root)
                 .map_err(|_| format!("{} is outside {}", path.display(), source_root.display()))?
                 .to_path_buf();
-            let source = fs::read_to_string(&path)
-                .map_err(|e| format!("{}: {}", path.display(), e))?;
-            files.push(ForgeSourceFile {
-                rel_path,
-                source,
-            });
+            let source =
+                fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            files.push(ForgeSourceFile { rel_path, source });
         }
 
         Ok(())
@@ -615,7 +671,10 @@ fn build_module_index(
         {
             if let Some(stem) = file.rel_path.file_stem().and_then(|s| s.to_str()) {
                 if stem != "mod" {
-                    index.entry(rel_dir.clone()).or_default().insert(stem.to_string());
+                    index
+                        .entry(rel_dir.clone())
+                        .or_default()
+                        .insert(stem.to_string());
                 }
             }
         }
@@ -623,7 +682,10 @@ fn build_module_index(
         if !rel_dir.as_os_str().is_empty() {
             let parent = rel_dir.parent().map(Path::to_path_buf).unwrap_or_default();
             if let Some(dir_name) = rel_dir.file_name().and_then(|s| s.to_str()) {
-                index.entry(parent).or_default().insert(dir_name.to_string());
+                index
+                    .entry(parent)
+                    .or_default()
+                    .insert(dir_name.to_string());
             }
         }
     }
@@ -715,7 +777,11 @@ fn collect_external_deps(
 ) -> Result<(), String> {
     let module = parse_source(&file.source).map_err(|e| e.to_string())?;
     for stmt in module.stmts {
-        if let Stmt::UseDecl { path: UsePath::External(crate_name), .. } = stmt {
+        if let Stmt::UseDecl {
+            path: UsePath::External(crate_name),
+            ..
+        } = stmt
+        {
             let current_dir = source_root.join(
                 file.rel_path
                     .parent()
@@ -741,6 +807,9 @@ fn collect_codegen_deps(rust_code: &str, deps: &mut DepsManager) {
     if rust_code.contains("serde::Serialize") || rust_code.contains("serde::Deserialize") {
         deps.add("serde");
     }
+    if rust_code.contains("tokio::") || rust_code.contains(".await") {
+        deps.add("tokio");
+    }
 }
 
 fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Result<(), String> {
@@ -755,10 +824,15 @@ fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Re
     if crates.contains("serde") && !content.contains("\nserde = ") {
         extra_lines.push("serde = { version = \"1.0.228\", features = [\"derive\"] }".to_string());
     }
+    if crates.contains("tokio") && !content.contains("\ntokio = ") {
+        extra_lines.push("tokio = { version = \"1\", features = [\"full\"] }".to_string());
+    }
 
     let mut others = crates
         .iter()
-        .filter(|name| name.as_str() != "once_cell" && name.as_str() != "serde")
+        .filter(|name| {
+            name.as_str() != "once_cell" && name.as_str() != "serde" && name.as_str() != "tokio"
+        })
         .cloned()
         .collect::<Vec<_>>();
     others.sort();

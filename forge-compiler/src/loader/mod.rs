@@ -27,7 +27,12 @@ impl std::fmt::Display for LoadError {
                 write!(f, "モジュールが見つかりません: {}", path.display())
             }
             LoadError::Io { path, message } => {
-                write!(f, "ファイル読み込みエラー '{}': {}", path.display(), message)
+                write!(
+                    f,
+                    "ファイル読み込みエラー '{}': {}",
+                    path.display(),
+                    message
+                )
             }
             LoadError::Parse { path, message } => {
                 write!(f, "パースエラー '{}': {}", path.display(), message)
@@ -79,14 +84,10 @@ impl ModuleLoader {
         // src/ ディレクトリが存在する場合はそちらを優先
         let src_dir = self.project_root.join("src");
         let candidates: Vec<PathBuf> = if src_dir.exists() {
-            vec![
-                src_dir.join(format!("{}.forge", use_path)),
-            ]
+            vec![src_dir.join(format!("{}.forge", use_path))]
         } else {
             // src/ がなければ project_root 直下
-            vec![
-                self.project_root.join(format!("{}.forge", use_path)),
-            ]
+            vec![self.project_root.join(format!("{}.forge", use_path))]
         };
 
         for candidate in &candidates {
@@ -97,9 +98,10 @@ impl ModuleLoader {
 
         // 見つからなかった場合は最初の候補をエラーとして返す
         Err(LoadError::NotFound {
-            path: candidates.into_iter().next().unwrap_or_else(|| {
-                self.project_root.join(format!("{}.forge", use_path))
-            }),
+            path: candidates
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.project_root.join(format!("{}.forge", use_path))),
         })
     }
 
@@ -159,7 +161,13 @@ impl ModuleLoader {
         };
 
         for stmt in &module.stmts {
-            if let Stmt::UseDecl { path, symbols, is_pub, .. } = stmt {
+            if let Stmt::UseDecl {
+                path,
+                symbols,
+                is_pub,
+                ..
+            } = stmt
+            {
                 if !is_pub {
                     continue;
                 }
@@ -174,17 +182,15 @@ impl ModuleLoader {
 
                 match symbols {
                     UseSymbols::Single(name, _alias) => {
-                        export.symbols.insert(
-                            name.clone(),
-                            (source_module.clone(), name.clone()),
-                        );
+                        export
+                            .symbols
+                            .insert(name.clone(), (source_module.clone(), name.clone()));
                     }
                     UseSymbols::Multiple(names) => {
                         for (name, _alias) in names {
-                            export.symbols.insert(
-                                name.clone(),
-                                (source_module.clone(), name.clone()),
-                            );
+                            export
+                                .symbols
+                                .insert(name.clone(), (source_module.clone(), name.clone()));
                         }
                     }
                     UseSymbols::All => {
@@ -287,9 +293,7 @@ impl ModuleLoader {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("src") {
-            dir.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(dir)
+            dir.parent().map(|p| p.to_path_buf()).unwrap_or(dir)
         } else {
             dir
         };
@@ -319,7 +323,11 @@ mod tests {
     #[test]
     fn test_loader_resolve_with_src_dir() {
         let tmp = make_tmp_project();
-        write_file(tmp.path(), "src/utils/helper.forge", "fn add(a: number, b: number) -> number { a + b }");
+        write_file(
+            tmp.path(),
+            "src/utils/helper.forge",
+            "fn add(a: number, b: number) -> number { a + b }",
+        );
 
         let loader = ModuleLoader::new(tmp.path().to_path_buf());
         let resolved = loader.resolve_path("utils/helper").expect("resolve");
@@ -338,7 +346,11 @@ mod tests {
     #[test]
     fn test_loader_cache() {
         let tmp = make_tmp_project();
-        write_file(tmp.path(), "src/utils/helper.forge", "fn add(a: number, b: number) -> number { a + b }");
+        write_file(
+            tmp.path(),
+            "src/utils/helper.forge",
+            "fn add(a: number, b: number) -> number { a + b }",
+        );
 
         let mut loader = ModuleLoader::new(tmp.path().to_path_buf());
         let stmts1 = loader.load("utils/helper").expect("load 1");
@@ -373,11 +385,13 @@ mod tests {
     fn test_mod_forge_routing() {
         let tmp = make_tmp_project();
         // math/basic.forge に pub fn add を定義
-        write_file(tmp.path(), "math/basic.forge",
-            "pub fn add(a: number, b: number) -> number { a + b }");
+        write_file(
+            tmp.path(),
+            "math/basic.forge",
+            "pub fn add(a: number, b: number) -> number { a + b }",
+        );
         // math/mod.forge で re-export
-        write_file(tmp.path(), "math/mod.forge",
-            "pub use basic.{add}");
+        write_file(tmp.path(), "math/mod.forge", "pub use basic.{add}");
 
         let mut loader = ModuleLoader::new(tmp.path().to_path_buf());
 
@@ -390,7 +404,10 @@ mod tests {
 
         // parse_mod_forge が "add" → ("basic", "add") のマッピングを返すことを確認
         let export = loader.parse_mod_forge(&path).expect("parse_mod_forge");
-        assert!(export.symbols.contains_key("add"), "add が re-export されているべき");
+        assert!(
+            export.symbols.contains_key("add"),
+            "add が re-export されているべき"
+        );
         let (src_module, src_sym) = &export.symbols["add"];
         assert_eq!(src_module, "basic");
         assert_eq!(src_sym, "add");
@@ -401,14 +418,23 @@ mod tests {
     fn test_reexport_chain() {
         let tmp = make_tmp_project();
         // math/basic.forge: pub fn add
-        write_file(tmp.path(), "math/basic.forge",
-            "pub fn add(a: number, b: number) -> number { a + b }");
+        write_file(
+            tmp.path(),
+            "math/basic.forge",
+            "pub fn add(a: number, b: number) -> number { a + b }",
+        );
         // math/advanced.forge: pub fn fast_pow
-        write_file(tmp.path(), "math/advanced.forge",
-            "pub fn fast_pow(base: number, exp: number) -> number { base * exp }");
+        write_file(
+            tmp.path(),
+            "math/advanced.forge",
+            "pub fn fast_pow(base: number, exp: number) -> number { base * exp }",
+        );
         // math/mod.forge: 両方を re-export
-        write_file(tmp.path(), "math/mod.forge",
-            "pub use basic.{add}\npub use advanced.fast_pow");
+        write_file(
+            tmp.path(),
+            "math/mod.forge",
+            "pub use basic.{add}\npub use advanced.fast_pow",
+        );
 
         let mut loader = ModuleLoader::new(tmp.path().to_path_buf());
 
@@ -418,8 +444,14 @@ mod tests {
         let export = loader.parse_mod_forge(&mod_forge_path).expect("parse");
 
         // add と fast_pow の両方が re-export されていること
-        assert!(export.symbols.contains_key("add"), "add が re-export されるべき");
-        assert!(export.symbols.contains_key("fast_pow"), "fast_pow が re-export されるべき");
+        assert!(
+            export.symbols.contains_key("add"),
+            "add が re-export されるべき"
+        );
+        assert!(
+            export.symbols.contains_key("fast_pow"),
+            "fast_pow が re-export されるべき"
+        );
 
         let (src_add, _) = &export.symbols["add"];
         assert_eq!(src_add, "basic");
@@ -436,10 +468,12 @@ mod tests {
         // インタープリタが depth カウンタを渡すことを確認するシミュレーション
         // ここでは 3段階を超えるディレクトリ構造を作って parse_mod_forge が成功することを確認
         let tmp = make_tmp_project();
-        write_file(tmp.path(), "a/b/c/d/leaf.forge",
-            "pub fn value() -> number { 42 }");
-        write_file(tmp.path(), "a/b/c/d/mod.forge",
-            "pub use leaf.{value}");
+        write_file(
+            tmp.path(),
+            "a/b/c/d/leaf.forge",
+            "pub fn value() -> number { 42 }",
+        );
+        write_file(tmp.path(), "a/b/c/d/mod.forge", "pub use leaf.{value}");
 
         let mut loader = ModuleLoader::new(tmp.path().to_path_buf());
         let mod_path = loader.resolve_mod_forge("a/b/c/d").expect("dir exists");

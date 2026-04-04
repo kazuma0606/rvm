@@ -82,10 +82,7 @@ impl DepsManager {
     /// Cargo.toml の内容文字列に対して依存クレートを挿入した新しい文字列を返す
     ///
     /// `[dependencies]` セクションが存在しない場合はファイル末尾に追記する。
-    fn insert_missing_deps(
-        content: &str,
-        crates: &HashSet<String>,
-    ) -> Result<String, DepsError> {
+    fn insert_missing_deps(content: &str, crates: &HashSet<String>) -> Result<String, DepsError> {
         if crates.is_empty() {
             return Ok(content.to_string());
         }
@@ -163,10 +160,8 @@ impl DepsManager {
                 }
                 result.push_str("\n[dependencies]\n");
 
-                let mut new_lines: Vec<String> = crates
-                    .iter()
-                    .map(|c| format!("{} = \"*\"", c))
-                    .collect();
+                let mut new_lines: Vec<String> =
+                    crates.iter().map(|c| format!("{} = \"*\"", c)).collect();
                 new_lines.sort();
 
                 for line in new_lines {
@@ -227,8 +222,16 @@ anyhow = "1"
         let updated = std::fs::read_to_string(&path).expect("read");
 
         // serde と reqwest が追記されているはず
-        assert!(updated.contains("serde = \"*\""), "serde が追記されていません: {}", updated);
-        assert!(updated.contains("reqwest = \"*\""), "reqwest が追記されていません: {}", updated);
+        assert!(
+            updated.contains("serde = \"*\""),
+            "serde が追記されていません: {}",
+            updated
+        );
+        assert!(
+            updated.contains("reqwest = \"*\""),
+            "reqwest が追記されていません: {}",
+            updated
+        );
 
         // anyhow は重複追記されないはず（元の `anyhow = "1"` のみ）
         let anyhow_count = updated.matches("anyhow").count();
