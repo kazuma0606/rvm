@@ -675,6 +675,12 @@ impl Parser {
     fn parse_type_ann(&mut self) -> Result<TypeAnn, ParseError> {
         let tok = self.peek().clone();
         let base = match tok.kind {
+            // () → TypeAnn::Unit
+            TokenKind::LParen => {
+                self.advance();
+                self.expect_token(&TokenKind::RParen)?;
+                TypeAnn::Unit
+            }
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
@@ -689,7 +695,57 @@ impl Parser {
                         self.expect_token(&TokenKind::Gt)?;
                         TypeAnn::List(Box::new(inner))
                     }
-                    other => TypeAnn::Named(other.to_string()),
+                    "map" => {
+                        self.expect_token(&TokenKind::Lt)?;
+                        let key = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Comma)?;
+                        let val = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        TypeAnn::Map(Box::new(key), Box::new(val))
+                    }
+                    "set" => {
+                        self.expect_token(&TokenKind::Lt)?;
+                        let inner = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        TypeAnn::Set(Box::new(inner))
+                    }
+                    "ordered_map" => {
+                        self.expect_token(&TokenKind::Lt)?;
+                        let key = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Comma)?;
+                        let val = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        TypeAnn::OrderedMap(Box::new(key), Box::new(val))
+                    }
+                    "ordered_set" => {
+                        self.expect_token(&TokenKind::Lt)?;
+                        let inner = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        TypeAnn::OrderedSet(Box::new(inner))
+                    }
+                    other => {
+                        // Named の後に `<` が続く場合は Generic
+                        if matches!(self.peek_kind(), TokenKind::Lt) {
+                            self.advance(); // consume '<'
+                            let mut args = Vec::new();
+                            loop {
+                                args.push(self.parse_type_ann()?);
+                                match self.peek_kind() {
+                                    TokenKind::Comma => {
+                                        self.advance();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            self.expect_token(&TokenKind::Gt)?;
+                            TypeAnn::Generic {
+                                name: other.to_string(),
+                                args,
+                            }
+                        } else {
+                            TypeAnn::Named(other.to_string())
+                        }
+                    }
                 }
             }
             _ => {
@@ -701,6 +757,7 @@ impl Parser {
             }
         };
 
+        // postfix: `?`, `!`, `![E]`、および `=> ReturnType`（関数型注釈）
         match self.peek_kind() {
             TokenKind::Question => {
                 self.advance();
@@ -708,7 +765,24 @@ impl Parser {
             }
             TokenKind::Bang => {
                 self.advance();
-                Ok(TypeAnn::Result(Box::new(base)))
+                // T![E] チェック
+                if matches!(self.peek_kind(), TokenKind::LBracket) {
+                    self.advance(); // consume '['
+                    let err_type = self.parse_type_ann()?;
+                    self.expect_token(&TokenKind::RBracket)?;
+                    Ok(TypeAnn::ResultWith(Box::new(base), Box::new(err_type)))
+                } else {
+                    Ok(TypeAnn::Result(Box::new(base)))
+                }
+            }
+            TokenKind::Arrow => {
+                // T => U 関数型注釈
+                self.advance(); // consume '=>'
+                let return_type = self.parse_type_ann()?;
+                Ok(TypeAnn::Fn {
+                    params: vec![base],
+                    return_type: Box::new(return_type),
+                })
             }
             _ => Ok(base),
         }

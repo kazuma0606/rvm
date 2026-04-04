@@ -460,6 +460,14 @@ pub enum TypeAnn {
     ResultWith(Box<TypeAnn>, Box<TypeAnn>), // T![E]
     List(Box<TypeAnn>),                     // list<T>
     Named(String),                          // ユーザー定義型（Phase 5 以降）
+    // G-1-A: ジェネリクス拡張
+    Generic { name: String, args: Vec<TypeAnn> }, // Response<T>, Pair<A, B>
+    Map(Box<TypeAnn>, Box<TypeAnn>),              // map<K, V>
+    Set(Box<TypeAnn>),                            // set<T>
+    OrderedMap(Box<TypeAnn>, Box<TypeAnn>),       // ordered_map<K, V>
+    OrderedSet(Box<TypeAnn>),                     // ordered_set<T>
+    Unit,                                         // ()
+    Fn { params: Vec<TypeAnn>, return_type: Box<TypeAnn> }, // T => U
 }
 
 /// 関数パラメータ

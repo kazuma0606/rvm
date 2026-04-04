@@ -40,6 +40,14 @@ impl Type {
             TypeAnn::ResultWith(inner, _err) => Type::Result(Box::new(Type::from_ann(inner))),
             TypeAnn::List(inner) => Type::List(Box::new(Type::from_ann(inner))),
             TypeAnn::Named(_) => Type::Unknown,
+            // G-1-A: 新バリアント — 型チェッカーは Unknown で扱う
+            TypeAnn::Generic { .. }
+            | TypeAnn::Map(_, _)
+            | TypeAnn::Set(_)
+            | TypeAnn::OrderedMap(_, _)
+            | TypeAnn::OrderedSet(_)
+            | TypeAnn::Unit
+            | TypeAnn::Fn { .. } => Type::Unknown,
         }
     }
 
