@@ -152,6 +152,12 @@ pub enum Stmt {
         is_pub: bool,
         span: Span,
     },
+    /// use raw { ... } — 生 Rust コードの埋め込み（M-6）
+    /// `forge run` ではスキップ、`forge build` 時のみ有効
+    UseRaw {
+        rust_code: String,
+        span: Span,
+    },
     /// when platform.linux { ... } / when feature.debug { ... } / when test { ... } （M-5）
     When {
         condition: WhenCondition,

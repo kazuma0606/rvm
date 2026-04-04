@@ -173,6 +173,9 @@ pub struct Interpreter {
     loading_stack: Vec<String>,
     /// テストモードフラグ（M-5-C）: `forge test` コマンドで true になる
     pub is_test_mode: bool,
+    /// REPL でロード済みのモジュール情報（M-7-A）
+    /// モジュールパス → そのモジュールからインポートしたシンボル名リスト
+    pub loaded_modules: HashMap<String, Vec<String>>,
 }
 
 impl Interpreter {
@@ -185,6 +188,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             is_test_mode: false,
+            loaded_modules: HashMap::new(),
         };
         interp.register_builtins();
         interp
@@ -200,6 +204,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             is_test_mode: false,
+            loaded_modules: HashMap::new(),
         };
         interp.register_builtins();
         interp
@@ -215,6 +220,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             is_test_mode: false,
+            loaded_modules: HashMap::new(),
         };
         interp.register_builtins();
         interp
@@ -229,6 +235,37 @@ impl Interpreter {
                     name, info.source_path, name
                 );
             }
+        }
+    }
+
+    /// REPL 用: 指定モジュールをアンロードし、そのシンボルをスコープから削除する（M-7-A）
+    pub fn unload_module(&mut self, path: &str) {
+        if let Some(symbols) = self.loaded_modules.remove(path) {
+            // グローバルスコープ（scopes[0]）からシンボルを削除する
+            if let Some(global_scope) = self.scopes.first_mut() {
+                for sym in &symbols {
+                    global_scope.remove(sym);
+                }
+            }
+            // 未使用インポート情報からも削除する
+            for sym in &symbols {
+                self.imported_symbols.remove(sym);
+            }
+        }
+    }
+
+    /// REPL 用: モジュールローダーを現在のディレクトリから初期化する（M-7-A）
+    pub fn init_module_loader_from_cwd(&mut self) {
+        if self.module_loader.is_none() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            self.module_loader = Some(ModuleLoader::new(cwd));
+        }
+    }
+
+    /// REPL 用: 指定モジュールのローダーキャッシュをクリアする（M-7-A）
+    pub fn clear_module_loader_cache(&mut self, path: &str) {
+        if let Some(loader) = &mut self.module_loader {
+            loader.clear_cache(path);
         }
     }
 
@@ -442,6 +479,12 @@ impl Interpreter {
             }
             Stmt::UseDecl { path, symbols, .. } => {
                 self.eval_use_decl(path, symbols)
+            }
+            Stmt::UseRaw { .. } => {
+                // `forge run` では use raw ブロックをスキップして警告を出す（M-6-C）
+                // `forge build` 時のみ有効
+                eprintln!("警告: `use raw` ブロックは `forge run` ではスキップされます（`forge build` 時のみ有効）");
+                Ok(Value::Unit)
             }
             Stmt::When { condition, body, .. } => {
                 self.eval_when(condition, body)
@@ -4332,5 +4375,176 @@ not_feature_fn()
         let result = run(src);
         assert_eq!(result, Ok(Value::Int(1)),
             "feature.testfeat が未設定のとき when not feature.testfeat が実行されるべき");
+    }
+
+    // ── Phase M-6: use raw テスト ─────────────────────────────────────────
+
+    /// M-6-D: `forge run` では use raw がスキップされ警告が出る
+    #[test]
+    fn test_use_raw_skipped_in_run() {
+        // use raw ブロックは forge run ではスキップされ、後続のコードは正常に実行される
+        let src = r#"
+use raw {
+    let map = ::std::collections::HashMap::new();
+    let val = ::std::env::var("HOME");
+}
+let x = 42
+x
+"#;
+        // forge run モードでは use raw をスキップして正常終了すること
+        let result = run(src);
+        assert_eq!(result, Ok(Value::Int(42)),
+            "use raw はスキップされ、後続の let x = 42 が評価されること");
+    }
+
+    // ── Phase M-7: REPL でのモジュールインポート テスト ───────────────────
+
+    /// REPL でのモジュールロードと loaded_modules の記録をテストするヘルパー
+    fn run_repl_with_module(
+        module_path: &str,
+        module_src: &str,
+        use_stmt: &str,
+        code: &str,
+    ) -> Result<(Value, Vec<String>), RuntimeError> {
+        use std::fs;
+        use forge_compiler::parser::parse_source;
+
+        let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        // モジュールファイルを配置（src/ 以下）
+        let mod_file = tmp.path().join("src").join(module_path);
+        if let Some(parent) = mod_file.parent() {
+            fs::create_dir_all(parent).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        }
+        fs::write(&mod_file, module_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        // REPL 用インタープリタを project_root で初期化する
+        let mut interp = Interpreter::with_project_root(tmp.path().to_path_buf());
+
+        // use 文を実行する（REPL 入力をシミュレート）
+        let before_keys: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+
+        let use_module = parse_source(use_stmt)
+            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        interp.eval(&use_module)?;
+
+        let after_keys: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+        let new_syms: Vec<String> = after_keys.difference(&before_keys).cloned().collect();
+
+        // loaded_modules に記録する（REPL と同じロジック）
+        if !new_syms.is_empty() {
+            // use パスを取得する
+            let use_path = use_module.stmts.iter().filter_map(|s| {
+                if let Stmt::UseDecl { path, .. } = s {
+                    Some(match path {
+                        UsePath::Local(p) => p.clone(),
+                        UsePath::External(p) => p.clone(),
+                        UsePath::Stdlib(p) => p.clone(),
+                    })
+                } else {
+                    None
+                }
+            }).next().unwrap_or_default();
+
+            let entry = interp.loaded_modules.entry(use_path).or_insert_with(Vec::new);
+            for sym in &new_syms {
+                if !entry.contains(sym) {
+                    entry.push(sym.clone());
+                }
+            }
+        }
+
+        // コードを評価する
+        let code_module = parse_source(code)
+            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let val = interp.eval(&code_module)?;
+
+        // ロード済みシンボルのリストを返す
+        let loaded_syms: Vec<String> = interp.loaded_modules.values()
+            .flat_map(|v| v.iter().cloned())
+            .collect();
+
+        Ok((val, loaded_syms))
+    }
+
+    /// M-7-B: REPL でのモジュールロード — モジュールをロードしてシンボルが使える
+    #[test]
+    fn test_repl_module_load() {
+        let module_src = r#"
+pub fn add(a: number, b: number) -> number { a + b }
+"#;
+        let result = run_repl_with_module(
+            "math.forge",
+            module_src,
+            "use ./math.add",
+            "add(10, 5)",
+        );
+        match result {
+            Ok((val, loaded_syms)) => {
+                assert_eq!(val, Value::Int(15), "add(10, 5) が 15 を返すこと");
+                assert!(
+                    loaded_syms.contains(&"add".to_string()),
+                    "loaded_modules に 'add' が記録されていること: {:?}", loaded_syms
+                );
+            }
+            Err(e) => panic!("テスト失敗: {}", e),
+        }
+    }
+
+    /// M-7-B: :reload による再読み込み — reload でシンボルが更新される
+    #[test]
+    fn test_repl_module_reload() {
+        use std::fs;
+        use forge_compiler::parser::parse_source;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // 初期バージョンのモジュールを配置
+        let mod_file = tmp.path().join("src").join("math.forge");
+        fs::create_dir_all(mod_file.parent().unwrap()).expect("create_dir_all");
+        fs::write(&mod_file, "pub fn value() -> number { 1 }").expect("write v1");
+
+        let mut interp = Interpreter::with_project_root(tmp.path().to_path_buf());
+
+        // 最初のロード
+        let use_src = "use ./math.value";
+        let use_module = parse_source(use_src).expect("parse use v1");
+        let before_keys: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+        interp.eval(&use_module).expect("eval use v1");
+        let after_keys: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+        let new_syms: Vec<String> = after_keys.difference(&before_keys).cloned().collect();
+        let entry = interp.loaded_modules.entry("math".to_string()).or_insert_with(Vec::new);
+        for sym in &new_syms { entry.push(sym.clone()); }
+
+        // 初期値の確認
+        let v1 = parse_source("value()").expect("parse v1");
+        let result1 = interp.eval(&v1).expect("eval v1");
+        assert_eq!(result1, Value::Int(1), "初期値は 1 であること");
+
+        // モジュールを更新する（ファイルを上書き）
+        fs::write(&mod_file, "pub fn value() -> number { 42 }").expect("write v2");
+
+        // reload をシミュレート: アンロード + キャッシュクリア + 再ロード
+        interp.unload_module("math");
+        interp.clear_module_loader_cache("math");
+
+        let use_module2 = parse_source(use_src).expect("parse use v2");
+        let before_keys2: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+        interp.eval(&use_module2).expect("eval use v2");
+        let after_keys2: std::collections::HashSet<String> =
+            interp.imported_symbols.keys().cloned().collect();
+        let new_syms2: Vec<String> = after_keys2.difference(&before_keys2).cloned().collect();
+        let entry2 = interp.loaded_modules.entry("math".to_string()).or_insert_with(Vec::new);
+        for sym in &new_syms2 { entry2.push(sym.clone()); }
+
+        // 更新後の値の確認
+        let v2 = parse_source("value()").expect("parse v2");
+        let result2 = interp.eval(&v2).expect("eval v2");
+        assert_eq!(result2, Value::Int(42), "reload 後は 42 を返すこと");
     }
 }

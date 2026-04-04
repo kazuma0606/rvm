@@ -100,6 +100,8 @@ impl CodeGenerator {
             Stmt::TypestateDef { .. } => false,
             // M-0: use 宣言は現時点ではトランスパイル非対応
             Stmt::UseDecl { .. } => false,
+            // M-6: use raw ブロックは anyhow 不要
+            Stmt::UseRaw { .. } => false,
             // M-5: when 文は現時点ではトランスパイル非対応
             Stmt::When { .. } => false,
         }
@@ -220,6 +222,10 @@ impl CodeGenerator {
             // M-0: use 宣言は現時点ではトランスパイル非対応（スタブ）
             Stmt::UseDecl { .. } => {
                 format!("{}// use (transpile pending)\n", self.indent_str())
+            }
+            // M-6: use raw ブロックはそのまま Rust コードとして出力
+            Stmt::UseRaw { rust_code, .. } => {
+                format!("{}{}\n", self.indent_str(), rust_code)
             }
             // M-5: when 文は現時点ではトランスパイル非対応（スタブ）
             Stmt::When { .. } => {

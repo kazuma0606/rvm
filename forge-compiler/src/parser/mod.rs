@@ -301,6 +301,14 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Use)?;
 
+        // `use raw { ... }` のパース（M-6-B）
+        if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+            if name == "raw" {
+                self.advance(); // consume 'raw'
+                return self.parse_use_raw(span);
+            }
+        }
+
         // パスを読み取る
         // ローカル: ./utils/helper
         // 外部: serde
@@ -318,6 +326,55 @@ impl Parser {
 
         self.skip_sep();
         Ok(Stmt::UseDecl { path, symbols, is_pub, span })
+    }
+
+    /// `use raw { ... }` をパース（M-6-B）
+    /// `use` と `raw` は消費済みで呼び出されること
+    /// `{` から対応する `}` までの内容を生文字列として保持する
+    fn parse_use_raw(&mut self, span: Span) -> Result<Stmt, ParseError> {
+        self.expect_token(&TokenKind::LBrace)?;
+
+        // ブレースのネストを考慮して { ... } の内容を生文字列として収集する
+        // トークン列からソース文字列を再構成するのではなく、
+        // トークン位置をそのまま利用してソーステキストの区間を取得する
+        let mut rust_code = String::new();
+        let mut depth: usize = 1;
+
+        // 行番号とカラムを利用して元のソースを再現するのは難しいため、
+        // トークンを stringify して文字列を構築する
+        loop {
+            let tok = self.peek().clone();
+            match &tok.kind {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.advance();
+                    rust_code.push('{');
+                }
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance(); // consume 終了の '}'
+                        break;
+                    }
+                    self.advance();
+                    rust_code.push('}');
+                }
+                TokenKind::Eof => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "use raw ブロックの閉じ括弧 '}'".to_string(),
+                    });
+                }
+                _ => {
+                    // トークンを文字列化して追加
+                    let tok_str = token_kind_to_raw_str(&tok.kind);
+                    rust_code.push_str(&tok_str);
+                    self.advance();
+                }
+            }
+        }
+
+        self.skip_sep();
+        Ok(Stmt::UseRaw { rust_code: rust_code.trim().to_string(), span })
     }
 
     /// `./utils/helper` / `serde` / `forge/std/io` をパース
@@ -2053,6 +2110,57 @@ impl Parser {
 /// 型名かどうかを判定（大文字から始まる識別子）
 fn is_type_name(name: &str) -> bool {
     name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+}
+
+/// `use raw { ... }` のパース用: TokenKind を生文字列に変換する（M-6-B）
+/// ブレースのネストを考慮して内部コードを再構成するために使用する
+fn token_kind_to_raw_str(kind: &TokenKind) -> String {
+    match kind {
+        TokenKind::Ident(s)      => format!(" {}", s),
+        TokenKind::Int(n)        => format!(" {}", n),
+        TokenKind::Float(f)      => format!(" {}", f),
+        TokenKind::Str(s)        => format!(" \"{}\"", s),
+        TokenKind::Plus          => " +".to_string(),
+        TokenKind::Minus         => " -".to_string(),
+        TokenKind::Star          => " *".to_string(),
+        TokenKind::Slash         => "/".to_string(),
+        TokenKind::Percent       => " %".to_string(),
+        TokenKind::Eq            => " =".to_string(),
+        TokenKind::EqEq          => " ==".to_string(),
+        TokenKind::BangEq        => " !=".to_string(),
+        TokenKind::Lt            => " <".to_string(),
+        TokenKind::Gt            => " >".to_string(),
+        TokenKind::LtEq          => " <=".to_string(),
+        TokenKind::GtEq          => " >=".to_string(),
+        TokenKind::And           => " &&".to_string(),
+        TokenKind::Or            => " ||".to_string(),
+        TokenKind::Bang          => " !".to_string(),
+        TokenKind::Dot           => ".".to_string(),
+        TokenKind::Comma         => ",".to_string(),
+        TokenKind::Colon         => ":".to_string(),
+        TokenKind::Semicolon     => ";".to_string(),
+        TokenKind::ThinArrow     => " ->".to_string(),
+        TokenKind::Arrow         => " =>".to_string(),
+        TokenKind::LParen        => "(".to_string(),
+        TokenKind::RParen        => ")".to_string(),
+        TokenKind::LBracket      => "[".to_string(),
+        TokenKind::RBracket      => "]".to_string(),
+        TokenKind::ColonColon    => "::".to_string(),
+        TokenKind::Question      => "?".to_string(),
+        TokenKind::DotDot        => "..".to_string(),
+        TokenKind::DotDotEq      => "..=".to_string(),
+        TokenKind::Let           => " let".to_string(),
+        TokenKind::Fn            => " fn".to_string(),
+        TokenKind::Return        => " return".to_string(),
+        TokenKind::If            => " if".to_string(),
+        TokenKind::Else          => " else".to_string(),
+        TokenKind::True          => " true".to_string(),
+        TokenKind::False         => " false".to_string(),
+        TokenKind::Use           => " use".to_string(),
+        TokenKind::Pub           => " pub".to_string(),
+        TokenKind::At            => "@".to_string(),
+        _ => " ".to_string(),
+    }
 }
 
 // ── 公開ユーティリティ ────────────────────────────────────────────────────

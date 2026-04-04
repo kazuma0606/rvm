@@ -202,19 +202,19 @@
 
 ### M-6-A: AST 拡張
 
-- [ ] `Stmt::UseRaw { rust_code: String }` を追加
+- [x] `Stmt::UseRaw { rust_code: String }` を追加
 
 ### M-6-B: パーサー拡張
 
-- [ ] `use raw { ... }` のパース（ブロック内は生文字列として保持）
+- [x] `use raw { ... }` のパース（ブロック内は生文字列として保持）
 
 ### M-6-C: インタープリタ拡張
 
-- [ ] `UseRaw` の評価: `forge run` では警告を出してスキップ
+- [x] `UseRaw` の評価: `forge run` では警告を出してスキップ
 
 ### M-6-D: テスト
 
-- [ ] テスト: `test_use_raw_skipped_in_run` — `forge run` でのスキップと警告
+- [x] テスト: `test_use_raw_skipped_in_run` — `forge run` でのスキップと警告
 
 ---
 
@@ -222,12 +222,12 @@
 
 ### M-7-A: REPL 拡張
 
-- [ ] `use ./utils/helper.add` 入力 → ロード・スコープに追加
-- [ ] `:modules` コマンド → ロード済みモジュール一覧の表示
-- [ ] `:reload utils/helper` コマンド → モジュールの再読み込み
-- [ ] `:unload utils/helper` コマンド → アンロード
+- [x] `use ./utils/helper.add` 入力 → ロード・スコープに追加
+- [x] `:modules` コマンド → ロード済みモジュール一覧の表示
+- [x] `:reload utils/helper` コマンド → モジュールの再読み込み
+- [x] `:unload utils/helper` コマンド → アンロード
 
 ### M-7-B: テスト
 
-- [ ] テスト: `test_repl_module_load` — REPL でのモジュールロード
-- [ ] テスト: `test_repl_module_reload` — `:reload` による再読み込み
+- [x] テスト: `test_repl_module_load` — REPL でのモジュールロード
+- [x] テスト: `test_repl_module_reload` — `:reload` による再読み込み

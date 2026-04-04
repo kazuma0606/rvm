@@ -100,8 +100,12 @@ fn run_file(path: &str) {
 fn run_repl() {
     println!("ForgeScript REPL v0.0.1");
     println!("終了: exit と入力するか Ctrl+C を押してください");
+    println!("モジュールコマンド: :modules, :reload <path>, :unload <path>");
 
     let mut interp = Interpreter::new();
+    // REPL ではカレントディレクトリをプロジェクトルートとしてモジュールローダーを初期化する（M-7-A）
+    interp.init_module_loader_from_cwd();
+
     let stdin = io::stdin();
 
     loop {
@@ -128,14 +132,141 @@ fn run_repl() {
             continue;
         }
 
-        match parse_source(trimmed) {
-            Ok(module) => match interp.eval(&module) {
-                Ok(Value::Unit) => {}
-                Ok(val) => println!("{}", val),
+        // REPL 専用コマンド（M-7-A）
+        if let Some(cmd_result) = handle_repl_command(trimmed, &mut interp) {
+            match cmd_result {
+                Ok(msg) => {
+                    if !msg.is_empty() {
+                        println!("{}", msg);
+                    }
+                }
                 Err(e) => eprintln!("エラー: {}", e),
-            },
+            }
+            continue;
+        }
+
+        // `use ...` 文の場合はモジュールロードとして処理してシンボルを記録する（M-7-A）
+        match parse_source(trimmed) {
+            Ok(module) => {
+                // use 文の実行前に imported_symbols のキーを記録する
+                let before_keys: std::collections::HashSet<String> =
+                    interp.imported_symbols.keys().cloned().collect();
+
+                match interp.eval(&module) {
+                    Ok(Value::Unit) => {
+                        // use 文で新たに追加されたシンボルを loaded_modules に記録する
+                        let has_use_decl = module.stmts.iter().any(|s| {
+                            matches!(s, forge_compiler::ast::Stmt::UseDecl { .. })
+                        });
+                        if has_use_decl {
+                            let after_keys: std::collections::HashSet<String> =
+                                interp.imported_symbols.keys().cloned().collect();
+                            let new_syms: Vec<String> =
+                                after_keys.difference(&before_keys).cloned().collect();
+
+                            if !new_syms.is_empty() {
+                                // use 文からモジュールパスを取得する
+                                for stmt in &module.stmts {
+                                    if let forge_compiler::ast::Stmt::UseDecl { path, .. } = stmt {
+                                        let mod_path = match path {
+                                            forge_compiler::ast::UsePath::Local(p) => p.clone(),
+                                            forge_compiler::ast::UsePath::External(p) => p.clone(),
+                                            forge_compiler::ast::UsePath::Stdlib(p) => p.clone(),
+                                        };
+                                        let entry = interp.loaded_modules
+                                            .entry(mod_path.clone())
+                                            .or_insert_with(Vec::new);
+                                        for sym in &new_syms {
+                                            if !entry.contains(sym) {
+                                                entry.push(sym.clone());
+                                            }
+                                        }
+                                        println!("✔ {} をロード済み", mod_path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(val) => println!("{}", val),
+                    Err(e) => eprintln!("エラー: {}", e),
+                }
+            }
             Err(e) => eprintln!("構文エラー: {}", e),
         }
+    }
+}
+
+/// REPL 専用コマンドを処理する（M-7-A）
+/// コマンドでない場合は None を返す
+fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<String, String>> {
+    if input == ":modules" {
+        // ロード済みモジュール一覧を表示
+        if interp.loaded_modules.is_empty() {
+            return Some(Ok("ロード済みモジュール: なし".to_string()));
+        }
+        let mut output = "ロード済みモジュール:".to_string();
+        let mut paths: Vec<&String> = interp.loaded_modules.keys().collect();
+        paths.sort();
+        for path in paths {
+            output.push_str(&format!("\n  - {}", path));
+        }
+        return Some(Ok(output));
+    }
+
+    if let Some(rest) = input.strip_prefix(":reload ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            return Some(Err(":reload にはモジュールパスを指定してください".to_string()));
+        }
+        // キャッシュから削除してアンロード
+        interp.unload_module(path);
+        // モジュールローダーのキャッシュもクリアする
+        interp.clear_module_loader_cache(path);
+        // 再度ロードする: use パスとして再評価する
+        let use_src = format!("use ./{}.{}", path, "*");
+        match parse_source(&use_src) {
+            Ok(module) => {
+                let before_keys: std::collections::HashSet<String> =
+                    interp.imported_symbols.keys().cloned().collect();
+                match interp.eval(&module) {
+                    Ok(_) => {
+                        let after_keys: std::collections::HashSet<String> =
+                            interp.imported_symbols.keys().cloned().collect();
+                        let new_syms: Vec<String> =
+                            after_keys.difference(&before_keys).cloned().collect();
+                        if !new_syms.is_empty() {
+                            let entry = interp.loaded_modules
+                                .entry(path.to_string())
+                                .or_insert_with(Vec::new);
+                            for sym in new_syms {
+                                if !entry.contains(&sym) {
+                                    entry.push(sym);
+                                }
+                            }
+                        }
+                        Some(Ok(format!("✔ {} を再ロードしました", path)))
+                    }
+                    Err(e) => Some(Err(format!("モジュール '{}' の再ロードに失敗しました: {}", path, e))),
+                }
+            }
+            Err(e) => Some(Err(format!("パースエラー: {}", e))),
+        }
+    } else if let Some(rest) = input.strip_prefix(":unload ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            return Some(Err(":unload にはモジュールパスを指定してください".to_string()));
+        }
+        if interp.loaded_modules.contains_key(path) {
+            interp.unload_module(path);
+            Some(Ok(format!("✔ {} をアンロードしました", path)))
+        } else {
+            Some(Err(format!("モジュール '{}' はロードされていません", path)))
+        }
+    } else if input.starts_with(':') {
+        // 未知のコマンド
+        Some(Err(format!("不明なコマンド '{}'\n利用可能: :modules, :reload <path>, :unload <path>", input)))
+    } else {
+        None
     }
 }
 

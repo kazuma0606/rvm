@@ -269,6 +269,12 @@ impl ModuleLoader {
         Ok(stmts)
     }
 
+    /// REPL 用: 指定パスのキャッシュを削除する（M-7-A）
+    /// `:reload` コマンドでモジュールを再読み込みするときに使用する
+    pub fn clear_cache(&mut self, use_path: &str) {
+        self.cache.remove(use_path);
+    }
+
     /// ファイルパスから `ModuleLoader` を作成する
     ///
     /// `main.forge` などのファイルパスを受け取り、プロジェクトルートを決定する。
