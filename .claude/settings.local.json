@@ -15,7 +15,8 @@
       "Bash(rustc /tmp/hello_forge.rs -o /tmp/hello_forge --edition=2021)",
       "Bash(./target/debug/forge-new transpile:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git mv:*)"
     ]
   }
 }

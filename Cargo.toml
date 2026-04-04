@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "forge-compiler",
-    "forge-vm",
-    "forge-stdlib",
-    "forge-cli",
-    "forge-transpiler",
+    "crates/forge-compiler",
+    "crates/forge-vm",
+    "crates/forge-stdlib",
+    "crates/forge-cli",
+    "crates/forge-transpiler",
 ]
 
 [workspace.package]

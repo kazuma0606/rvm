@@ -20,7 +20,7 @@ ForgeScript は Rust にトランスパイルされる独自言語です。
 
 `forge/transpiler/tasks.md` の B-3 に未完了（`[ ]`）のタスクが2件あります。
 
-**実装箇所**: `forge-transpiler/src/codegen.rs` の `gen_closure()` 関数に TODO コメントあり。
+**実装箇所**: `crates/forge-transpiler/src/codegen.rs` の `gen_closure()` 関数に TODO コメントあり。
 
 - `state` 変数をクロージャ本体内で**変更**している → `FnMut`（`move |x| ...`）
 - 変数をクロージャ本体内で**消費**している → `FnOnce`（`move |x| ...`）
@@ -57,7 +57,7 @@ ForgeScript は Rust にトランスパイルされる独自言語です。
 4. **クロージャ内 await の禁止（B-7-G）**: クロージャ本体内に `.await` を発見したら
    `TranspileError` を返す。Rust の async closure は nightly 機能のため未サポート。
 
-5. **forge run フォールバック（B-7-H）**: インタープリタ（`forge-vm/src/interpreter.rs`）で
+5. **forge run フォールバック（B-7-H）**: インタープリタ（`crates/forge-vm/src/interpreter.rs`）で
    `Expr::Await { expr }` を `expr` の評価結果をそのまま返す no-op として実装。
 
 6. **test ブロック（B-7-F）**: `.await` を含む test ブロックは `#[tokio::test] async fn` に変換。
@@ -116,11 +116,11 @@ cargo test --workspace
 
 ## 参考: 既存の実装パターン
 
-- `forge-transpiler/src/codegen.rs`: メインのコード生成器（`CodeGenerator` 構造体）
-- `forge-transpiler/src/builtin.rs`: 組み込み関数の変換テーブル
-- `forge-compiler/src/parser/mod.rs`: AST の定義（`Expr` / `Stmt` 等）
-- `forge-vm/src/interpreter.rs`: インタープリタ（B-7-H の変更対象）
-- `forge-cli/tests/e2e.rs`: E2E テスト（ラウンドトリップテストのパターン参照）
+- `crates/forge-transpiler/src/codegen.rs`: メインのコード生成器（`CodeGenerator` 構造体）
+- `crates/forge-transpiler/src/builtin.rs`: 組み込み関数の変換テーブル
+- `crates/forge-compiler/src/parser/mod.rs`: AST の定義（`Expr` / `Stmt` 等）
+- `crates/forge-vm/src/interpreter.rs`: インタープリタ（B-7-H の変更対象）
+- `crates/forge-cli/tests/e2e.rs`: E2E テスト（ラウンドトリップテストのパターン参照）
 
 スナップショットテストは `insta` クレートを使わず `assert!(out.contains(...))` 形式で
 既存テストに合わせること。
