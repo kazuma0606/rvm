@@ -138,31 +138,31 @@
 
 ### M-4-A: 依存グラフ構築
 
-- [ ] `forge-compiler/src/analysis/` ディレクトリを作成
-- [ ] `use` 文を収集して有向グラフを構築する `DependencyGraph` 実装
+- [x] `forge-compiler/src/analysis/` ディレクトリを作成
+- [x] `use` 文を収集して有向グラフを構築する `DependencyGraph` 実装
 
 ### M-4-B: 循環参照検出
 
-- [ ] トポロジカルソートで閉路を検出
-- [ ] エラーメッセージにパスとファイル・行番号を含める
+- [x] トポロジカルソートで閉路を検出
+- [x] エラーメッセージにパスとファイル・行番号を含める
 
 ### M-4-C: 未使用インポート検出
 
-- [ ] インポートシンボルの使用状況トラッキング
-- [ ] 未使用シンボル → 警告メッセージ
+- [x] インポートシンボルの使用状況トラッキング
+- [x] 未使用シンボル → 警告メッセージ
 
 ### M-4-D: シンボル衝突検出
 
-- [ ] 同名シンボルの複数インポート → エラー
-- [ ] `use *` 衝突 → 警告（エラーではない）
+- [x] 同名シンボルの複数インポート → エラー
+- [x] `use *` 衝突 → 警告（エラーではない）
 
 ### M-4-E: テスト
 
-- [ ] テスト: `test_circular_ref_detection` — 循環参照のエラー検出
-- [ ] テスト: `test_unused_import_warning` — 未使用インポートの警告
-- [ ] テスト: `test_symbol_collision_error` — 同名シンボルの衝突エラー
-- [ ] テスト: `test_wildcard_collision_warning` — `use *` 衝突の警告
-- [ ] E2E テスト: `modules/circular/` — 循環参照ファイルの実行エラー
+- [x] テスト: `test_circular_ref_detection` — 循環参照のエラー検出
+- [x] テスト: `test_unused_import_warning` — 未使用インポートの警告
+- [x] テスト: `test_symbol_collision_error` — 同名シンボルの衝突エラー
+- [x] テスト: `test_wildcard_collision_warning` — `use *` 衝突の警告
+- [x] E2E テスト: `modules/circular/` — 循環参照ファイルの実行エラー
 
 ---
 

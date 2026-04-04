@@ -1,0 +1,3 @@
+use ./a
+
+pub fn fn_b() -> string { "b" }

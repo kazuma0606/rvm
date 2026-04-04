@@ -108,6 +108,8 @@ pub enum RuntimeError {
     /// let 変数への再代入
     Immutable(String),
     Custom(String),
+    /// 循環参照検出（M-4-B）
+    CircularDependency { cycle: Vec<String> },
     // ── 内部制御フロー ──
     /// return 文による早期脱出（関数呼び出しが補足）
     Return(Value),
@@ -126,6 +128,8 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "インデックス範囲外: {} (長さ: {})", index, len),
             RuntimeError::Immutable(n)          => write!(f, "変数 '{}' は不変です", n),
             RuntimeError::Custom(msg)           => write!(f, "{}", msg),
+            RuntimeError::CircularDependency { cycle } =>
+                write!(f, "循環参照エラー: {}", cycle.join(" → ")),
             RuntimeError::Return(_)             => write!(f, "<return>"),
             RuntimeError::PropagateErr(e)       => write!(f, "<propagate err: {}>", e),
         }
@@ -139,6 +143,19 @@ impl std::error::Error for RuntimeError {}
 /// バインディング: (値, 可変かどうか)
 type Binding = (Value, bool);
 
+// ── M-4-C: インポート情報（未使用インポート検出用）────────────────────────────
+
+/// インポートされたシンボルの情報（未使用インポート検出用）
+#[derive(Debug, Clone)]
+pub struct ImportInfo {
+    /// インポートしたシンボル名
+    pub name: String,
+    /// インポート元のパス
+    pub source_path: String,
+    /// 使用されたかどうか
+    pub used: bool,
+}
+
 // ── インタプリタ ─────────────────────────────────────────────────────────────
 
 pub struct Interpreter {
@@ -150,6 +167,10 @@ pub struct Interpreter {
     module_loader: Option<ModuleLoader>,
     /// 外部クレート依存関係マネージャー（forge build 連携用）
     pub deps_manager: DepsManager,
+    /// インポートされたシンボルの追跡（未使用インポート検出用）（M-4-C）
+    pub imported_symbols: HashMap<String, ImportInfo>,
+    /// 現在ロード中のモジュールパスのスタック（循環参照検出用）（M-4-B）
+    loading_stack: Vec<String>,
 }
 
 impl Interpreter {
@@ -159,6 +180,8 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: None,
             deps_manager: DepsManager::new(),
+            imported_symbols: HashMap::new(),
+            loading_stack: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -171,6 +194,8 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::from_file_path(path)),
             deps_manager: DepsManager::new(),
+            imported_symbols: HashMap::new(),
+            loading_stack: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -183,9 +208,23 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::new(project_root)),
             deps_manager: DepsManager::new(),
+            imported_symbols: HashMap::new(),
+            loading_stack: Vec::new(),
         };
         interp.register_builtins();
         interp
+    }
+
+    /// 未使用インポートの警告を stderr に出力する（M-4-C）
+    pub fn warn_unused_imports(&self) {
+        for (name, info) in &self.imported_symbols {
+            if !info.used {
+                eprintln!(
+                    "警告: `{}` はインポートされていますが使用されていません\n   --> use {}.{}",
+                    name, info.source_path, name
+                );
+            }
+        }
     }
 
     // ── スコープ操作 ──────────────────────────────────────────────────────
@@ -415,18 +454,39 @@ impl Interpreter {
                     )));
                 }
 
+                // M-4-B: 循環参照チェック
+                // ./ プレフィックスを除去して正規化
+                let clean_path = use_path.trim_start_matches("./").to_string();
+                if self.loading_stack.contains(&clean_path) {
+                    let mut cycle = self.loading_stack
+                        .iter()
+                        .skip_while(|p| p.as_str() != clean_path.as_str())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    cycle.push(clean_path.clone());
+                    return Err(RuntimeError::CircularDependency { cycle });
+                }
+
                 // ディレクトリかどうかを確認する
                 let is_dir = self.module_loader.as_ref()
-                    .map(|l| l.is_directory(use_path))
+                    .map(|l| l.is_directory(&clean_path))
                     .unwrap_or(false);
 
-                if is_dir {
+                // ローディングスタックに追加
+                self.loading_stack.push(clean_path.clone());
+
+                let result = if is_dir {
                     // ディレクトリ指定: mod.forge の存在を確認する
-                    self.eval_directory_use(use_path, symbols, 0)
+                    self.eval_directory_use_with_tracking(&clean_path, symbols, 0)
                 } else {
                     // 通常のファイル指定
-                    self.eval_file_use(use_path, symbols)
-                }
+                    self.eval_file_use_with_tracking(&clean_path, symbols)
+                };
+
+                // ローディングスタックから削除
+                self.loading_stack.pop();
+
+                result
             }
             UsePath::External(crate_name) => {
                 // forge run では外部クレートのインポートをスキップ（警告なし）
@@ -439,6 +499,161 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
         }
+    }
+
+    /// M-4-C/D: シンボルをインポート記録しながらスコープにバインドする
+    fn record_import(&mut self, sym_name: &str, bind_name: &str, source_path: &str, value: Value, is_wildcard: bool) -> Result<(), RuntimeError> {
+        // M-4-D: シンボル衝突検出
+        if self.imported_symbols.contains_key(bind_name) {
+            let existing_source = self.imported_symbols[bind_name].source_path.clone();
+            if is_wildcard {
+                // use * の衝突は警告のみ
+                eprintln!(
+                    "警告: `{}` が複数のモジュールから use * でインポートされています\n  {}.{}\n  {}.{}",
+                    bind_name, existing_source, bind_name, source_path, bind_name
+                );
+            } else {
+                // 明示的インポートの衝突はエラー
+                return Err(RuntimeError::Custom(format!(
+                    "シンボル衝突エラー: `{}` が複数のモジュールからインポートされています\n  use {}.{}\n  use {}.{}\n解決策: エイリアスを使用してください（use {}.{} as {}_{}_alias）",
+                    bind_name,
+                    existing_source, bind_name,
+                    source_path, bind_name,
+                    source_path, sym_name,
+                    source_path.replace('/', "_"), sym_name
+                )));
+            }
+        }
+
+        // インポート情報を記録
+        self.imported_symbols.insert(bind_name.to_string(), ImportInfo {
+            name: sym_name.to_string(),
+            source_path: source_path.to_string(),
+            used: false,
+        });
+
+        self.define(bind_name, value, false);
+        Ok(())
+    }
+
+    /// M-4-C/D 対応のファイル use 評価
+    fn eval_file_use_with_tracking(&mut self, use_path: &str, symbols: &UseSymbols) -> Result<Value, RuntimeError> {
+        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+
+        // モジュールを読み込む
+        let stmts = loader.load(use_path).map_err(|e| {
+            RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e))
+        })?;
+
+        // モジュールを別スコープで評価して、エクスポートを取得する
+        let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
+
+        // シンボルを現在のスコープにバインド（インポート記録付き）
+        self.bind_symbols_to_scope_with_tracking(use_path, symbols, &all_symbols, &pub_names)
+    }
+
+    /// M-4-C/D 対応のディレクトリ use 評価
+    fn eval_directory_use_with_tracking(&mut self, dir_path: &str, symbols: &UseSymbols, depth: usize) -> Result<Value, RuntimeError> {
+        // 元のメソッドに委譲するが内部のバインドは tracking 付きに置き換える
+        // シンプルに既存の eval_directory_use を呼んで OK（tracking は bind_symbols_to_scope_with_tracking で行う）
+        // ただし eval_directory_use は bind_symbols_to_scope を使っているため、
+        // 別の方法で tracking を統合する必要がある
+        // ここでは tracking なしの既存実装を呼び、その後で imported_symbols を更新する
+        if depth > 3 {
+            eprintln!(
+                "警告: re-export チェーンが3段階を超えています (depth={}): {}",
+                depth, dir_path
+            );
+        }
+
+        let loader = self.module_loader.as_mut().expect("module_loader should be set");
+
+        let mod_forge_path = loader.resolve_mod_forge(dir_path);
+
+        match mod_forge_path {
+            None => {
+                Err(RuntimeError::Custom(format!(
+                    "ディレクトリ '{}' が見つかりません",
+                    dir_path
+                )))
+            }
+            Some(resolved_path) => {
+                if resolved_path.is_dir() {
+                    let stmts = {
+                        let loader = self.module_loader.as_mut().expect("module_loader");
+                        loader.load_directory_all_pub(dir_path).map_err(|e| {
+                            RuntimeError::Custom(format!("ディレクトリ読み込みエラー: {}", e))
+                        })?
+                    };
+                    let (all_syms, pub_names) = self.eval_module_stmts(&stmts)?;
+                    self.bind_symbols_to_scope_with_tracking(dir_path, symbols, &all_syms, &pub_names)
+                } else {
+                    let mod_forge_path_clone = resolved_path.clone();
+                    let export = {
+                        let loader = self.module_loader.as_mut().expect("module_loader");
+                        loader.parse_mod_forge(&mod_forge_path_clone).map_err(|e| {
+                            RuntimeError::Custom(format!("mod.forge 読み込みエラー: {}", e))
+                        })?
+                    };
+                    self.eval_mod_forge_use(dir_path, symbols, &export, depth)
+                }
+            }
+        }
+    }
+
+    /// M-4-C/D 対応のシンボルバインド（インポート記録付き）
+    fn bind_symbols_to_scope_with_tracking(
+        &mut self,
+        use_path: &str,
+        symbols: &UseSymbols,
+        all_symbols: &HashMap<String, Value>,
+        pub_names: &std::collections::HashSet<String>,
+    ) -> Result<Value, RuntimeError> {
+        match symbols {
+            UseSymbols::Single(name, alias) => {
+                if !pub_names.contains(name.as_str()) {
+                    return Err(RuntimeError::Custom(format!(
+                        "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                        name, use_path
+                    )));
+                }
+                let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                let value = all_symbols.get(name).cloned().ok_or_else(|| {
+                    RuntimeError::Custom(format!(
+                        "モジュール '{}' にシンボル '{}' が見つかりません",
+                        use_path, name
+                    ))
+                })?;
+                self.record_import(name, bind_name, use_path, value, false)?;
+            }
+            UseSymbols::Multiple(names) => {
+                for (name, alias) in names {
+                    if !pub_names.contains(name.as_str()) {
+                        return Err(RuntimeError::Custom(format!(
+                            "`{}` は非公開です（`pub` キーワードがありません）\n  --> {}",
+                            name, use_path
+                        )));
+                    }
+                    let bind_name = alias.as_deref().unwrap_or(name.as_str());
+                    let value = all_symbols.get(name).cloned().ok_or_else(|| {
+                        RuntimeError::Custom(format!(
+                            "モジュール '{}' にシンボル '{}' が見つかりません",
+                            use_path, name
+                        ))
+                    })?;
+                    self.record_import(name, bind_name, use_path, value, false)?;
+                }
+            }
+            UseSymbols::All => {
+                // ワイルドカード: pub シンボルのみをインポート（衝突は警告）
+                for (name, value) in all_symbols {
+                    if pub_names.contains(name) {
+                        self.record_import(name, name, use_path, value.clone(), true)?;
+                    }
+                }
+            }
+        }
+        Ok(Value::Unit)
     }
 
     /// ファイルを直接指定した場合の use 評価
@@ -784,7 +999,11 @@ impl Interpreter {
 
     // ── 各評価メソッド ────────────────────────────────────────────────────
 
-    fn eval_ident(&self, name: &str) -> Result<Value, RuntimeError> {
+    fn eval_ident(&mut self, name: &str) -> Result<Value, RuntimeError> {
+        // M-4-C: インポート済みシンボルの使用をマークする
+        if let Some(info) = self.imported_symbols.get_mut(name) {
+            info.used = true;
+        }
         match self.lookup(name) {
             Some((v, _)) => Ok(v.clone()),
             None => Err(RuntimeError::UndefinedVariable(name.to_string())),
@@ -3885,5 +4104,126 @@ private_fn()
             "エラーメッセージに 'private_fn' と '非公開' が含まれていません: {}",
             err_msg
         );
+    }
+
+    // ── Phase M-4 tests ───────────────────────────────────────────────────
+
+    /// 複数モジュールを持つテスト用ヘルパー
+    fn run_with_two_modules(
+        main_src: &str,
+        mod1_path: &str,
+        mod1_src: &str,
+        mod2_path: &str,
+        mod2_src: &str,
+    ) -> Result<Value, RuntimeError> {
+        use std::fs;
+        use forge_compiler::parser::parse_source;
+
+        let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let m1 = tmp.path().join(mod1_path);
+        if let Some(p) = m1.parent() {
+            fs::create_dir_all(p).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        }
+        fs::write(&m1, mod1_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let m2 = tmp.path().join(mod2_path);
+        if let Some(p) = m2.parent() {
+            fs::create_dir_all(p).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        }
+        fs::write(&m2, mod2_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let main_file = tmp.path().join("main.forge");
+        fs::write(&main_file, main_src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let module = parse_source(main_src)
+            .map_err(|e| RuntimeError::Custom(e.to_string()))?;
+
+        let mut interp = Interpreter::with_file_path(&main_file);
+        interp.eval(&module)
+    }
+
+    /// M-4-E: 未使用インポートで警告が出る
+    #[test]
+    fn test_unused_import_warning() {
+        let module_src = r#"
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn subtract(a: number, b: number) -> number { a - b }
+"#;
+        // add のみインポートして subtract はインポートしない → 未使用インポートなし
+        // add をインポートして使わない → 未使用インポートあり
+        let main_src = r#"
+use ./math.add
+42
+"#;
+        let result = run_with_module(main_src, "math.forge", module_src);
+        assert_eq!(result, Ok(Value::Int(42)));
+
+        // インタープリタの imported_symbols を確認するために別の方法で実行
+        use std::fs;
+        use forge_compiler::parser::parse_source;
+
+        let tmp = tempfile::tempdir().map_err(|e| RuntimeError::Custom(e.to_string())).unwrap();
+        let mod_file = tmp.path().join("math.forge");
+        fs::write(&mod_file, module_src).unwrap();
+        let main_file = tmp.path().join("main.forge");
+        fs::write(&main_file, main_src).unwrap();
+
+        let module = parse_source(main_src).unwrap();
+        let mut interp = Interpreter::with_file_path(&main_file);
+        interp.eval(&module).unwrap();
+
+        // add がインポートされていること
+        assert!(interp.imported_symbols.contains_key("add"), "add がインポートされているべき");
+        // add は使われていない（本文が `42` のみ）
+        let add_info = &interp.imported_symbols["add"];
+        assert!(!add_info.used, "add は使用されていないはず");
+    }
+
+    /// M-4-E: 同名シンボルの衝突でエラー
+    #[test]
+    fn test_symbol_collision_error() {
+        let math1_src = r#"
+pub fn add(a: number, b: number) -> number { a + b }
+"#;
+        let math2_src = r#"
+pub fn add(a: number, b: number) -> number { a + b + 100 }
+"#;
+        // 同名 add を2つのモジュールからインポート → エラー
+        let main_src = r#"
+use ./math1.add
+use ./math2.add
+add(1, 2)
+"#;
+        let result = run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
+        assert!(result.is_err(), "シンボル衝突はエラーになるべき");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("add") && err_msg.contains("衝突"),
+            "エラーメッセージに 'add' と '衝突' が含まれるべき: {}",
+            err_msg
+        );
+    }
+
+    /// M-4-E: use * 衝突で警告（エラーではない）
+    #[test]
+    fn test_wildcard_collision_warning() {
+        let math1_src = r#"
+pub fn add(a: number, b: number) -> number { a + b }
+pub fn multiply(a: number, b: number) -> number { a * b }
+"#;
+        let math2_src = r#"
+pub fn add(a: number, b: number) -> number { a + b + 100 }
+pub fn subtract(a: number, b: number) -> number { a - b }
+"#;
+        // use * で add が衝突 → 警告のみ（エラーにならない）
+        let main_src = r#"
+use ./math1.*
+use ./math2.*
+multiply(2, 3)
+"#;
+        let result = run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
+        // use * 衝突は警告のみなのでエラーにならない
+        assert!(result.is_ok(), "use * の衝突は警告のみでエラーにならないべき: {:?}", result);
     }
 }

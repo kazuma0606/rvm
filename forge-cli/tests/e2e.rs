@@ -743,3 +743,25 @@ fn e2e_modules_mod_forge() {
     let out = run_forge_file(main_path).unwrap();
     assert_eq!(out, "7\n12\n16\n");
 }
+
+// ── Phase M-4 E2E テスト ────────────────────────────────────────────────────
+
+/// M-4-E: 循環参照ファイルの実行がエラーになることを確認
+#[test]
+fn e2e_modules_circular_error() {
+    let main_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/modules/circular/main.forge"
+    );
+    let result = run_forge_file(main_path);
+    assert!(
+        result.is_err(),
+        "循環参照ファイルの実行はエラーになるべきですが成功しました"
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("循環参照") || err_msg.contains("circular") || err_msg.contains("Circular"),
+        "エラーメッセージに循環参照の説明が含まれるべきです: {}",
+        err_msg
+    );
+}
