@@ -42,6 +42,34 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BraceExprKind {
+    Block,
+    EmptyMap,
+    Map,
+    Set,
+}
+
+fn is_block_start_token(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Let
+            | TokenKind::State
+            | TokenKind::Const
+            | TokenKind::Fn
+            | TokenKind::Return
+            | TokenKind::Struct
+            | TokenKind::Trait
+            | TokenKind::Impl
+            | TokenKind::Typestate
+            | TokenKind::Pub
+            | TokenKind::Use
+            | TokenKind::When
+            | TokenKind::Test
+            | TokenKind::At
+    ) || matches!(kind, TokenKind::Ident(name) if name == "enum")
+}
+
 // ── パーサー本体 ────────────────────────────────────────────────────────────
 
 pub struct Parser {
@@ -618,6 +646,7 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Fn)?;
         let (name, _) = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LParen)?;
 
         let mut params = Vec::new();
@@ -650,6 +679,7 @@ impl Parser {
         let body = self.parse_block()?;
         Ok(Stmt::Fn {
             name,
+            type_params,
             params,
             return_type,
             body: Box::new(body),
@@ -729,7 +759,23 @@ impl Parser {
                             self.advance(); // consume '<'
                             let mut args = Vec::new();
                             loop {
-                                args.push(self.parse_type_ann()?);
+                                // Pick/Omit の Keys 引数: "id" | "name" 形式
+                                if let TokenKind::Str(s) = self.peek_kind().clone() {
+                                    let mut keys = vec![s.clone()];
+                                    self.advance();
+                                    while matches!(self.peek_kind(), TokenKind::Pipe) {
+                                        self.advance(); // '|' を消費
+                                        if let TokenKind::Str(next) = self.peek_kind().clone() {
+                                            keys.push(next.clone());
+                                            self.advance();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    args.push(TypeAnn::StringLiteralUnion(keys));
+                                } else {
+                                    args.push(self.parse_type_ann()?);
+                                }
                                 match self.peek_kind() {
                                     TokenKind::Comma => {
                                         self.advance();
@@ -791,7 +837,7 @@ impl Parser {
     // ── パース: 式 ────────────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        // 代入: base を or レベルで解析し、直後に `=` があれば Assign / FieldAssign
+        // 代入: base を or レベルで解析し、直後に `=` があれば Assign / FieldAssign / IndexAssign
         let base = self.parse_or()?;
         if matches!(self.peek_kind(), TokenKind::Eq) {
             match base {
@@ -814,6 +860,20 @@ impl Parser {
                     return Ok(Expr::FieldAssign {
                         object,
                         field,
+                        value: Box::new(value),
+                        span,
+                    });
+                }
+                Expr::Index {
+                    object,
+                    index,
+                    span,
+                } => {
+                    self.advance(); // consume '='
+                    let value = self.parse_expr()?;
+                    return Ok(Expr::IndexAssign {
+                        object,
+                        index,
                         value: Box::new(value),
                         span,
                     });
@@ -1251,8 +1311,8 @@ impl Parser {
                 }
             }
 
-            // ── ブロック ──
-            TokenKind::LBrace => self.parse_block(),
+            // ── ブロック / Map / Set ──
+            TokenKind::LBrace => self.parse_brace_expr(),
 
             // ── if / while / for / match ──
             TokenKind::If => self.parse_if(),
@@ -1589,8 +1649,10 @@ impl Parser {
     fn parse_impl_or_impl_trait(&mut self) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Impl)?;
+        let type_params = self.parse_type_params()?;
 
         let first_name = self.expect_ident()?.0;
+        let first_type_args = self.parse_type_args()?;
 
         // `impl Name for Type ...` 形式か判断（for は TokenKind::For として届く）
         let is_for = matches!(self.peek_kind(), TokenKind::For);
@@ -1642,6 +1704,8 @@ impl Parser {
             self.expect_token(&TokenKind::RBrace)?;
             Ok(Stmt::ImplBlock {
                 target: first_name,
+                type_params,
+                target_type_args: first_type_args,
                 trait_name: None,
                 methods,
                 span,
@@ -1701,6 +1765,7 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Struct)?;
         let (name, _) = self.expect_ident()?;
+        let generic_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LBrace)?;
 
         let mut fields: Vec<(String, TypeAnn)> = Vec::new();
@@ -1722,6 +1787,7 @@ impl Parser {
         self.expect_token(&TokenKind::RBrace)?;
         Ok(Stmt::StructDef {
             name,
+            generic_params,
             fields,
             derives,
             is_pub,
@@ -1769,6 +1835,8 @@ impl Parser {
         self.expect_token(&TokenKind::RBrace)?;
         Ok(Stmt::ImplBlock {
             target,
+            type_params: vec![],
+            target_type_args: vec![],
             trait_name,
             methods,
             span,
@@ -1780,6 +1848,7 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Fn)?;
         let (name, _) = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LParen)?;
 
         let mut params = Vec::new();
@@ -1831,6 +1900,7 @@ impl Parser {
         let body = self.parse_block()?;
         Ok(FnDef {
             name,
+            type_params,
             params,
             return_type,
             body: Box::new(body),
@@ -1859,6 +1929,58 @@ impl Parser {
         Ok(Expr::StructInit { name, fields, span })
     }
 
+    fn parse_brace_expr(&mut self) -> Result<Expr, ParseError> {
+        match self.classify_brace_expr() {
+            BraceExprKind::Block => self.parse_block(),
+            BraceExprKind::EmptyMap => {
+                let span = self.current_span();
+                self.expect_token(&TokenKind::LBrace)?;
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(Expr::MapLiteral {
+                    pairs: vec![],
+                    span,
+                })
+            }
+            BraceExprKind::Map => {
+                let span = self.current_span();
+                self.expect_token(&TokenKind::LBrace)?;
+                let mut pairs = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    let key = self.parse_expr()?;
+                    self.expect_token(&TokenKind::Colon)?;
+                    let value = self.parse_expr()?;
+                    pairs.push((key, value));
+                    if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(Expr::MapLiteral { pairs, span })
+            }
+            BraceExprKind::Set => {
+                let span = self.current_span();
+                self.expect_token(&TokenKind::LBrace)?;
+                let mut items = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    items.push(self.parse_expr()?);
+                    if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(Expr::SetLiteral { items, span })
+            }
+        }
+    }
+
     /// `enum` キーワードを消費した後の本体をパース
     fn parse_enum_def_body(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
         self.parse_enum_def_body_with_pub(derives, false)
@@ -1871,6 +1993,7 @@ impl Parser {
     ) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         let (name, _) = self.expect_ident()?;
+        let generic_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LBrace)?;
 
         let mut variants: Vec<EnumVariant> = Vec::new();
@@ -1927,6 +2050,7 @@ impl Parser {
         self.expect_token(&TokenKind::RBrace)?;
         Ok(Stmt::EnumDef {
             name,
+            generic_params,
             variants,
             derives,
             is_pub,
@@ -2162,7 +2286,7 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Typestate)?;
         let (name, _) = self.expect_ident()?;
-        let generic_params = self.parse_optional_generic_params()?;
+        let generic_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LBrace)?;
 
         let mut fields: Vec<(String, TypeAnn)> = Vec::new();
@@ -2265,7 +2389,7 @@ impl Parser {
         })
     }
 
-    fn parse_optional_generic_params(&mut self) -> Result<Vec<String>, ParseError> {
+    fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
         let mut params = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::Lt) {
             return Ok(params);
@@ -2285,6 +2409,43 @@ impl Parser {
         }
         self.expect_token(&TokenKind::Gt)?;
         Ok(params)
+    }
+
+    fn parse_type_args(&mut self) -> Result<Vec<TypeAnn>, ParseError> {
+        let mut args = Vec::new();
+        if !matches!(self.peek_kind(), TokenKind::Lt) {
+            return Ok(args);
+        }
+
+        self.advance();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::Gt | TokenKind::Eof) {
+                break;
+            }
+            // Pick/Omit の Keys 引数: "id" | "name" | "email" 形式
+            if let TokenKind::Str(s) = self.peek_kind().clone() {
+                let mut keys = vec![s.clone()];
+                self.advance();
+                while matches!(self.peek_kind(), TokenKind::Pipe) {
+                    self.advance(); // '|' を消費
+                    if let TokenKind::Str(next) = self.peek_kind().clone() {
+                        keys.push(next.clone());
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                args.push(TypeAnn::StringLiteralUnion(keys));
+            } else {
+                args.push(self.parse_type_ann()?);
+            }
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::Gt)?;
+        Ok(args)
     }
 
     fn parse_typestate_marker_decl(&mut self) -> Result<TypestateMarker, ParseError> {
@@ -2384,12 +2545,66 @@ impl Parser {
         };
         Ok(FnDef {
             name,
+            type_params: vec![],
             params,
             return_type,
             body: Box::new(body),
             has_state_self,
             span,
         })
+    }
+
+    fn classify_brace_expr(&self) -> BraceExprKind {
+        let mut i = self.pos + 1;
+        let Some(first) = self.tokens.get(i) else {
+            return BraceExprKind::Block;
+        };
+        if matches!(first.kind, TokenKind::RBrace) {
+            return BraceExprKind::EmptyMap;
+        }
+        if is_block_start_token(&first.kind) {
+            return BraceExprKind::Block;
+        }
+
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut saw_comma = false;
+
+        while let Some(tok) = self.tokens.get(i) {
+            match tok.kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
+                        return if saw_comma {
+                            BraceExprKind::Set
+                        } else {
+                            BraceExprKind::Block
+                        };
+                    }
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+                TokenKind::Colon if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    return BraceExprKind::Map;
+                }
+                TokenKind::Semicolon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    return BraceExprKind::Block;
+                }
+                TokenKind::Comma if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    saw_comma = true;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        BraceExprKind::Block
     }
 
     /// validate { field: constraint, constraint, ... } をパース
@@ -2815,11 +3030,13 @@ mod tests {
         match first_stmt("fn add(a: number, b: number) -> number { a + b }") {
             Stmt::Fn {
                 name,
+                type_params,
                 params,
                 return_type: Some(TypeAnn::Number),
                 ..
             } => {
                 assert_eq!(name, "add");
+                assert!(type_params.is_empty());
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "a");
                 assert_eq!(params[1].name, "b");
@@ -3020,6 +3237,167 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_type_ann_map() {
+        match first_stmt("let x: map<string, number> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Map(key, value)),
+                ..
+            } => {
+                assert_eq!(*key, TypeAnn::String);
+                assert_eq!(*value, TypeAnn::Number);
+            }
+            other => panic!("expected Let with Map(String, Number) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_set() {
+        match first_stmt("let x: set<string> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Set(inner)),
+                ..
+            } => {
+                assert_eq!(*inner, TypeAnn::String);
+            }
+            other => panic!("expected Let with Set(String) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_ordered_map() {
+        match first_stmt("let x: ordered_map<string, number> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::OrderedMap(key, value)),
+                ..
+            } => {
+                assert_eq!(*key, TypeAnn::String);
+                assert_eq!(*value, TypeAnn::Number);
+            }
+            other => panic!(
+                "expected Let with OrderedMap(String, Number) type, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_ordered_set() {
+        match first_stmt("let x: ordered_set<string> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::OrderedSet(inner)),
+                ..
+            } => {
+                assert_eq!(*inner, TypeAnn::String);
+            }
+            other => panic!("expected Let with OrderedSet(String) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_unit() {
+        match first_stmt("let x: () = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Unit),
+                ..
+            } => {}
+            other => panic!("expected Let with Unit type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_generic_single() {
+        match first_stmt("let x: Response<string> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Generic { name, args }),
+                ..
+            } => {
+                assert_eq!(name, "Response");
+                assert_eq!(args, vec![TypeAnn::String]);
+            }
+            other => panic!("expected Let with Generic(Response<String>) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_generic_multi() {
+        match first_stmt("let x: Pair<string, number> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Generic { name, args }),
+                ..
+            } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(args, vec![TypeAnn::String, TypeAnn::Number]);
+            }
+            other => panic!(
+                "expected Let with Generic(Pair<String, Number>) type, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_generic_nested() {
+        match first_stmt("let x: Response<list<string>> = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Generic { name, args }),
+                ..
+            } => {
+                assert_eq!(name, "Response");
+                assert_eq!(args, vec![TypeAnn::List(Box::new(TypeAnn::String))]);
+            }
+            other => panic!(
+                "expected Let with Generic(Response<List<String>>) type, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_fn() {
+        match first_stmt("let f: string => bool = none") {
+            Stmt::Let {
+                type_ann: Some(TypeAnn::Fn {
+                    params,
+                    return_type,
+                }),
+                ..
+            } => {
+                assert_eq!(params, vec![TypeAnn::String]);
+                assert_eq!(*return_type, TypeAnn::Bool);
+            }
+            other => panic!("expected Let with Fn(String => Bool) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_map_literal() {
+        match first_stmt(r#"{"a": 1, "b": 2}"#) {
+            Stmt::Expr(Expr::MapLiteral { pairs, .. }) => {
+                assert_eq!(pairs.len(), 2);
+            }
+            other => panic!("expected MapLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_set_literal() {
+        match first_stmt(r#"{"rust", "forge"}"#) {
+            Stmt::Expr(Expr::SetLiteral { items, .. }) => {
+                assert_eq!(items.len(), 2);
+            }
+            other => panic!("expected SetLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_index_assign() {
+        match first_stmt(r#"m["a"] = 1"#) {
+            Stmt::Expr(Expr::IndexAssign { .. }) => {}
+            other => panic!("expected IndexAssign, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_error_unexpected_token() {
         // `let = 10` — let の後に識別子が必要
         let tokens = lex("let = 10").expect("lex failed");
@@ -3038,11 +3416,13 @@ mod tests {
         match first_stmt("struct Point { x: number, y: number }") {
             Stmt::StructDef {
                 name,
+                generic_params,
                 fields,
                 derives,
                 ..
             } => {
                 assert_eq!(name, "Point");
+                assert!(generic_params.is_empty());
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "x");
                 assert!(matches!(fields[0].1, TypeAnn::Number));
@@ -3070,11 +3450,15 @@ mod tests {
         match first_stmt(src) {
             Stmt::ImplBlock {
                 target,
+                type_params,
+                target_type_args,
                 trait_name,
                 methods,
                 ..
             } => {
                 assert_eq!(target, "Rectangle");
+                assert!(type_params.is_empty());
+                assert!(target_type_args.is_empty());
                 assert!(trait_name.is_none());
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "area");
@@ -3117,6 +3501,111 @@ mod tests {
                 assert!(methods[0].has_state_self);
             }
             other => panic!("expected ImplBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_struct_single() {
+        match first_stmt("struct Response<T> { status: number, body: T }") {
+            Stmt::StructDef {
+                name,
+                generic_params,
+                fields,
+                ..
+            } => {
+                assert_eq!(name, "Response");
+                assert_eq!(generic_params, vec!["T".to_string()]);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[1].0, "body");
+                assert_eq!(fields[1].1, TypeAnn::Named("T".to_string()));
+            }
+            other => panic!("expected generic StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_struct_multi() {
+        match first_stmt("struct Pair<A, B> { first: A, second: B }") {
+            Stmt::StructDef {
+                name,
+                generic_params,
+                fields,
+                ..
+            } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(generic_params, vec!["A".to_string(), "B".to_string()]);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].1, TypeAnn::Named("A".to_string()));
+                assert_eq!(fields[1].1, TypeAnn::Named("B".to_string()));
+            }
+            other => panic!("expected generic StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_enum() {
+        match first_stmt("enum Either<L, R> { Left(L), Right(R) }") {
+            Stmt::EnumDef {
+                name,
+                generic_params,
+                variants,
+                ..
+            } => {
+                assert_eq!(name, "Either");
+                assert_eq!(generic_params, vec!["L".to_string(), "R".to_string()]);
+                assert_eq!(variants.len(), 2);
+                assert_eq!(
+                    variants[0],
+                    EnumVariant::Tuple("Left".to_string(), vec![TypeAnn::Named("L".to_string())])
+                );
+                assert_eq!(
+                    variants[1],
+                    EnumVariant::Tuple("Right".to_string(), vec![TypeAnn::Named("R".to_string())])
+                );
+            }
+            other => panic!("expected generic EnumDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_fn() {
+        match first_stmt("fn wrap<T>(value: T) -> Response<T> { value }") {
+            Stmt::Fn {
+                name,
+                type_params,
+                params,
+                return_type: Some(TypeAnn::Generic { name: ret_name, args }),
+                ..
+            } => {
+                assert_eq!(name, "wrap");
+                assert_eq!(type_params, vec!["T".to_string()]);
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].type_ann, Some(TypeAnn::Named("T".to_string())));
+                assert_eq!(ret_name, "Response");
+                assert_eq!(args, vec![TypeAnn::Named("T".to_string())]);
+            }
+            other => panic!("expected generic Fn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_impl() {
+        let src = "impl<T> Response<T> { fn is_ok(self) -> bool { true } }";
+        match first_stmt(src) {
+            Stmt::ImplBlock {
+                target,
+                type_params,
+                target_type_args,
+                methods,
+                ..
+            } => {
+                assert_eq!(target, "Response");
+                assert_eq!(type_params, vec!["T".to_string()]);
+                assert_eq!(target_type_args, vec![TypeAnn::Named("T".to_string())]);
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "is_ok");
+            }
+            other => panic!("expected generic ImplBlock, got {:?}", other),
         }
     }
 

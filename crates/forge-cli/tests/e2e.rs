@@ -330,6 +330,40 @@ print(result)
 }
 
 #[test]
+fn e2e_generics_basic() {
+    let src = r#"
+struct Response<T> {
+    body: T
+}
+
+impl<T> Response<T> {
+    fn is_ok() -> bool {
+        true
+    }
+}
+
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+fn wrap<T>(v: T) -> Response<T> {
+    Response { body: v }
+}
+
+let r = wrap(42)
+print(r.body)
+print(r.is_ok())
+print(match Either::Left(7) {
+    Either::Left(x) => x,
+    Either::Right(_) => 0,
+})
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "42\ntrue\n7\n");
+}
+
+#[test]
 fn e2e_for_plus_collection() {
     let src = r#"
 let squares = for i in [1..=5] { i * i }

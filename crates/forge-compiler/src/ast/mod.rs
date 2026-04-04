@@ -76,6 +76,7 @@ pub enum Stmt {
     /// fn name(params) -> T { body }
     Fn {
         name: String,
+        type_params: Vec<String>,
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
         body: Box<Expr>,
@@ -89,6 +90,7 @@ pub enum Stmt {
     /// struct Name { field: Type, ... }
     StructDef {
         name: String,
+        generic_params: Vec<String>,
         fields: Vec<(String, TypeAnn)>,
         derives: Vec<String>,
         is_pub: bool,
@@ -97,6 +99,8 @@ pub enum Stmt {
     /// impl Name { fn ... }  /  impl Trait for Name { fn ... }
     ImplBlock {
         target: String,
+        type_params: Vec<String>,
+        target_type_args: Vec<TypeAnn>,
         trait_name: Option<String>,
         methods: Vec<FnDef>,
         span: Span,
@@ -104,6 +108,7 @@ pub enum Stmt {
     /// enum Name { Variant, Variant(Type), Variant { field: Type } }
     EnumDef {
         name: String,
+        generic_params: Vec<String>,
         variants: Vec<EnumVariant>,
         derives: Vec<String>,
         is_pub: bool,
@@ -328,6 +333,16 @@ pub enum Expr {
     },
     /// リストリテラル [1, 2, 3]
     List(Vec<Expr>, Span),
+    /// マップリテラル { key: value, ... }
+    MapLiteral {
+        pairs: Vec<(Expr, Expr)>,
+        span: Span,
+    },
+    /// セットリテラル { value1, value2, ... }
+    SetLiteral {
+        items: Vec<Expr>,
+        span: Span,
+    },
     /// ? 演算子
     Question(Box<Expr>, Span),
     /// .await
@@ -335,6 +350,13 @@ pub enum Expr {
     /// 再代入（state のみ） x = expr
     Assign {
         name: String,
+        value: Box<Expr>,
+        span: Span,
+    },
+    /// インデックス代入（state map のみ） obj[key] = value
+    IndexAssign {
+        object: Box<Expr>,
+        index: Box<Expr>,
         value: Box<Expr>,
         span: Span,
     },
@@ -418,7 +440,7 @@ pub enum Pattern {
 }
 
 /// enum バリアント定義
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EnumVariant {
     /// データなし: North
     Unit(String),
@@ -449,7 +471,7 @@ pub enum Literal {
 }
 
 /// 型注釈
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeAnn {
     Number,
     Float,
@@ -468,6 +490,8 @@ pub enum TypeAnn {
     OrderedSet(Box<TypeAnn>),                     // ordered_set<T>
     Unit,                                         // ()
     Fn { params: Vec<TypeAnn>, return_type: Box<TypeAnn> }, // T => U
+    /// Pick/Omit の Keys 引数: "id" | "name" | "email" 形式
+    StringLiteralUnion(Vec<String>),
 }
 
 /// 関数パラメータ
@@ -503,6 +527,7 @@ pub enum TraitMethod {
 #[derive(Debug, Clone)]
 pub struct FnDef {
     pub name: String,
+    pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: Option<TypeAnn>,
     pub body: Box<Expr>,

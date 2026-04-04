@@ -58,6 +58,10 @@ pub enum Value {
     Result(Result<Box<Value>, String>),
     /// 共有可変リスト
     List(Rc<RefCell<Vec<Value>>>),
+    /// 順序付きマップ
+    Map(Vec<(Value, Value)>),
+    /// 順序付きセット
+    Set(Vec<Value>),
     /// ForgeScript クロージャ
     Closure {
         params: Vec<String>,
@@ -97,6 +101,8 @@ impl PartialEq for Value {
             (Value::Result(Ok(a)), Value::Result(Ok(b))) => a == b,
             (Value::Result(Err(a)), Value::Result(Err(b))) => a == b,
             (Value::List(a), Value::List(b)) => *a.borrow() == *b.borrow(),
+            (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => a == b,
             (
                 Value::Struct {
                     type_name: ta,
@@ -153,6 +159,17 @@ impl Hash for Value {
             Value::Result(Err(e)) => e.hash(state),
             Value::List(items) => {
                 for item in items.borrow().iter() {
+                    item.hash(state);
+                }
+            }
+            Value::Map(entries) => {
+                for (k, v) in entries {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            Value::Set(items) => {
+                for item in items {
                     item.hash(state);
                 }
             }
@@ -238,6 +255,26 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Map(entries) => {
+                write!(f, "{{")?;
+                for (i, (key, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", key, value)?;
+                }
+                write!(f, "}}")
+            }
+            Value::Set(items) => {
+                write!(f, "{{")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "}}")
+            }
             Value::Closure { .. } => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<function>"),
             Value::Enum {
@@ -305,6 +342,8 @@ impl Value {
             Value::Option(_) => "option",
             Value::Result(_) => "result",
             Value::List(_) => "list",
+            Value::Map(_) => "map",
+            Value::Set(_) => "set",
             Value::Closure { .. } => "closure",
             Value::NativeFunction(_) => "function",
             Value::Struct { .. } => "struct",
@@ -341,6 +380,13 @@ impl Value {
                 let cloned: Vec<Value> = items.borrow().iter().map(|v| v.deep_clone()).collect();
                 Value::List(Rc::new(RefCell::new(cloned)))
             }
+            Value::Map(entries) => Value::Map(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.deep_clone(), v.deep_clone()))
+                    .collect(),
+            ),
+            Value::Set(items) => Value::Set(items.iter().map(|v| v.deep_clone()).collect()),
             Value::Enum {
                 type_name,
                 variant,
@@ -431,6 +477,24 @@ mod tests {
             Value::Int(3),
         ])));
         assert_eq!(list.to_string(), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_value_display_map() {
+        let map = Value::Map(vec![
+            (Value::String("a".to_string()), Value::Int(1)),
+            (Value::String("b".to_string()), Value::Int(2)),
+        ]);
+        assert_eq!(map.to_string(), "{a: 1, b: 2}");
+    }
+
+    #[test]
+    fn test_value_display_set() {
+        let set = Value::Set(vec![
+            Value::String("rust".to_string()),
+            Value::String("forge".to_string()),
+        ]);
+        assert_eq!(set.to_string(), "{rust, forge}");
     }
 
     #[test]

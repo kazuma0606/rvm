@@ -47,7 +47,8 @@ impl Type {
             | TypeAnn::OrderedMap(_, _)
             | TypeAnn::OrderedSet(_)
             | TypeAnn::Unit
-            | TypeAnn::Fn { .. } => Type::Unknown,
+            | TypeAnn::Fn { .. }
+            | TypeAnn::StringLiteralUnion(_) => Type::Unknown,
         }
     }
 
