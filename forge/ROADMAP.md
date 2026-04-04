@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
 > 最終更新: 2026-04-04
-> テスト総数: 268本（全通過）
+> テスト総数: 293本（全通過）
 
 ---
 
@@ -44,7 +44,9 @@
 | B-4: コレクション | Vec + イテレータチェーン変換 | 2本（snapshot）|
 | B-5: 型定義変換 | struct/data/enum/impl/trait/mixin → Rust変換 | 14本（snapshot）|
 | B-6: モジュール変換 | use/when/use raw/test → Rust変換 | 7本（snapshot）|
-| ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 16本 |
+| B-7: async/await | async fn 自動昇格・tokio・Box::pin再帰 | 実装済み |
+| B-8: typestate変換 | PhantomData パターン・制約チェック付き | 実装済み |
+| ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 18本 |
 
 ### 型定義（forge run）✅
 
@@ -94,9 +96,7 @@
 
 - **参照**: `forge/transpiler/tasks.md`
 - **内容**:
-  - B-3: FnMut（state キャプチャ）/ FnOnce（消費キャプチャ）→ TODO コメント済み
-  - B-7: `async` / `await` / tokio 自動挿入
-  - B-8: `typestate` / `@derive(Singleton)` / `when` の Rust 変換
+  - B-3: FnOnce の判定が tail position 限定（spawn 未実装のため実用上問題なし）
 - **ブロッカー**: なし
 
 ---
