@@ -123,6 +123,8 @@ impl TypeChecker {
             Stmt::TypestateDef { .. } => {}
             // M-0: use 宣言は型チェッカーでは現在スキップ
             Stmt::UseDecl { .. } => {}
+            // M-5: when 文は型チェッカーでは現在スキップ
+            Stmt::When { .. } => {}
         }
     }
 

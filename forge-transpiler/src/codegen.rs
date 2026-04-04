@@ -100,6 +100,8 @@ impl CodeGenerator {
             Stmt::TypestateDef { .. } => false,
             // M-0: use 宣言は現時点ではトランスパイル非対応
             Stmt::UseDecl { .. } => false,
+            // M-5: when 文は現時点ではトランスパイル非対応
+            Stmt::When { .. } => false,
         }
     }
 
@@ -218,6 +220,10 @@ impl CodeGenerator {
             // M-0: use 宣言は現時点ではトランスパイル非対応（スタブ）
             Stmt::UseDecl { .. } => {
                 format!("{}// use (transpile pending)\n", self.indent_str())
+            }
+            // M-5: when 文は現時点ではトランスパイル非対応（スタブ）
+            Stmt::When { .. } => {
+                format!("{}// when (transpile pending)\n", self.indent_str())
             }
         }
     }

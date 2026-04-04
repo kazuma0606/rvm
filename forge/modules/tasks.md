@@ -170,31 +170,31 @@
 
 ### M-5-A: AST 拡張
 
-- [ ] `Stmt::When { condition: WhenCondition, body: Vec<Stmt> }` を追加
-- [ ] `WhenCondition::Platform(String)` を追加
-- [ ] `WhenCondition::Feature(String)` を追加
-- [ ] `WhenCondition::Env(String)` を追加
-- [ ] `WhenCondition::Test` を追加
-- [ ] `WhenCondition::Not(Box<WhenCondition>)` を追加
+- [x] `Stmt::When { condition: WhenCondition, body: Vec<Stmt> }` を追加
+- [x] `WhenCondition::Platform(String)` を追加
+- [x] `WhenCondition::Feature(String)` を追加
+- [x] `WhenCondition::Env(String)` を追加
+- [x] `WhenCondition::Test` を追加
+- [x] `WhenCondition::Not(Box<WhenCondition>)` を追加
 
 ### M-5-B: パーサー拡張
 
-- [ ] `when platform.linux { ... }` のパース
-- [ ] `when feature.debug { ... }` のパース
-- [ ] `when env.dev { ... }` のパース
-- [ ] `when test { ... }` のパース
-- [ ] `when not feature.debug { ... }` のパース
+- [x] `when platform.linux { ... }` のパース
+- [x] `when feature.debug { ... }` のパース
+- [x] `when env.dev { ... }` のパース
+- [x] `when test { ... }` のパース
+- [x] `when not feature.debug { ... }` のパース
 
 ### M-5-C: インタープリタ拡張
 
-- [ ] `When` の評価: 実行時の `platform`/`feature`/`env` に基づいてブロックを実行
-- [ ] `when test` は `forge test` コマンドでのみ実行（`forge run` ではスキップ）
+- [x] `When` の評価: 実行時の `platform`/`feature`/`env` に基づいてブロックを実行
+- [x] `when test` は `forge test` コマンドでのみ実行（`forge run` ではスキップ）
 
 ### M-5-D: テスト
 
-- [ ] テスト: `test_when_platform` — platform 条件の評価
-- [ ] テスト: `test_when_test_skipped` — `forge run` では `when test` がスキップ
-- [ ] テスト: `test_when_not` — `when not` の反転
+- [x] テスト: `test_when_platform` — platform 条件の評価
+- [x] テスト: `test_when_test_skipped` — `forge run` では `when test` がスキップ
+- [x] テスト: `test_when_not` — `when not` の反転
 
 ---
 

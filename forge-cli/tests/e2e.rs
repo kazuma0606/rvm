@@ -765,3 +765,29 @@ fn e2e_modules_circular_error() {
         err_msg
     );
 }
+
+// ── Phase M-5: when キーワード E2E テスト ──────────────────────────────────
+
+/// M-5-D E2E: platform 条件 — 実行環境に応じた出力を確認
+#[test]
+fn e2e_when_platform() {
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/when_basic.forge"
+    );
+    let result = run_forge_file(fixture_path);
+    assert!(result.is_ok(), "when_basic.forge の実行に失敗しました: {:?}", result.err());
+
+    let output = result.unwrap();
+    // 実行環境に応じた出力（windows/linux/macos）を動的に決定
+    let expected_os = std::env::consts::OS;
+    let trimmed = output.trim();
+    assert_eq!(
+        trimmed,
+        expected_os,
+        "when platform.{} ブロックが実行され '{}' が出力されるべきですが '{}' でした",
+        expected_os,
+        expected_os,
+        trimmed
+    );
+}

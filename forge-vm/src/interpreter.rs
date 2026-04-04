@@ -171,6 +171,8 @@ pub struct Interpreter {
     pub imported_symbols: HashMap<String, ImportInfo>,
     /// 現在ロード中のモジュールパスのスタック（循環参照検出用）（M-4-B）
     loading_stack: Vec<String>,
+    /// テストモードフラグ（M-5-C）: `forge test` コマンドで true になる
+    pub is_test_mode: bool,
 }
 
 impl Interpreter {
@@ -182,6 +184,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            is_test_mode: false,
         };
         interp.register_builtins();
         interp
@@ -196,6 +199,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            is_test_mode: false,
         };
         interp.register_builtins();
         interp
@@ -210,6 +214,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            is_test_mode: false,
         };
         interp.register_builtins();
         interp
@@ -438,6 +443,40 @@ impl Interpreter {
             Stmt::UseDecl { path, symbols, .. } => {
                 self.eval_use_decl(path, symbols)
             }
+            Stmt::When { condition, body, .. } => {
+                self.eval_when(condition, body)
+            }
+        }
+    }
+
+    // ── When の評価（M-5-C）──────────────────────────────────────────────
+
+    fn eval_when_condition(&self, condition: &WhenCondition) -> bool {
+        match condition {
+            WhenCondition::Platform(name) => {
+                std::env::consts::OS == name.as_str()
+            }
+            WhenCondition::Feature(name) => {
+                let key = format!("FORGE_FEATURE_{}", name.to_uppercase());
+                std::env::var(&key).map(|v| v == "1").unwrap_or(false)
+            }
+            WhenCondition::Env(name) => {
+                std::env::var("FORGE_ENV").map(|v| v == *name).unwrap_or(false)
+            }
+            WhenCondition::Test => self.is_test_mode,
+            WhenCondition::Not(inner) => !self.eval_when_condition(inner),
+        }
+    }
+
+    fn eval_when(&mut self, condition: &WhenCondition, body: &[Stmt]) -> Result<Value, RuntimeError> {
+        if self.eval_when_condition(condition) {
+            let mut result = Value::Unit;
+            for stmt in body {
+                result = self.eval_stmt(stmt)?;
+            }
+            Ok(result)
+        } else {
+            Ok(Value::Unit)
         }
     }
 
@@ -4225,5 +4264,73 @@ multiply(2, 3)
         let result = run_with_two_modules(main_src, "math1.forge", math1_src, "math2.forge", math2_src);
         // use * 衝突は警告のみなのでエラーにならない
         assert!(result.is_ok(), "use * の衝突は警告のみでエラーにならないべき: {:?}", result);
+    }
+
+    // ── Phase M-5: when キーワードテスト ─────────────────────────────────
+
+    /// M-5-D: platform 条件の評価 — 現在の OS に対応する when ブロックが実行される
+    #[test]
+    fn test_when_platform() {
+        let current_os = std::env::consts::OS;
+
+        // 現在のプラットフォームに合致する when ブロックで定義した関数が呼べる
+        let src = format!(r#"
+when platform.{os} {{
+    fn platform_fn() -> number {{ 42 }}
+}}
+platform_fn()
+"#, os = current_os);
+
+        let result = run(&src);
+        assert_eq!(result, Ok(Value::Int(42)),
+            "現在の OS ({}) に対応する when ブロックが実行されるべき", current_os);
+    }
+
+    /// M-5-D: `forge run` モード（is_test_mode = false）では `when test` がスキップされる
+    #[test]
+    fn test_when_test_skipped() {
+        // is_test_mode = false (デフォルト) で when test ブロックはスキップ
+        let src = r#"
+when test {
+    fn test_helper() -> number { 99 }
+}
+42
+"#;
+        // when test がスキップされるのでエラーにならず、42 が返る
+        let result = run(src);
+        assert_eq!(result, Ok(Value::Int(42)),
+            "forge run モードでは when test ブロックがスキップされるべき");
+
+        // test_helper が定義されていないことを確認
+        let src2 = r#"
+when test {
+    fn test_helper() -> number { 99 }
+}
+test_helper()
+"#;
+        let result2 = run(src2);
+        assert!(matches!(result2, Err(RuntimeError::UndefinedVariable(_))),
+            "when test がスキップされた場合、test_helper は未定義のはず: {:?}", result2);
+    }
+
+    /// M-5-D: `when not` の反転 — when not feature.x は when feature.x の逆になる
+    #[test]
+    fn test_when_not() {
+        // FORGE_FEATURE_TESTFEAT が未設定 → feature.testfeat は false → not feature.testfeat は true
+        // 環境変数が未設定の状態でテスト
+        std::env::remove_var("FORGE_FEATURE_TESTFEAT");
+
+        let src = r#"
+when not feature.testfeat {
+    fn not_feature_fn() -> number { 1 }
+}
+when feature.testfeat {
+    fn not_feature_fn() -> number { 2 }
+}
+not_feature_fn()
+"#;
+        let result = run(src);
+        assert_eq!(result, Ok(Value::Int(1)),
+            "feature.testfeat が未設定のとき when not feature.testfeat が実行されるべき");
     }
 }

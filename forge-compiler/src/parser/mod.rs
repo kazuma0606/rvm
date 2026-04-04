@@ -193,6 +193,7 @@ impl Parser {
             TokenKind::Typestate => self.parse_typestate_def(),
             TokenKind::Use      => self.parse_use_decl(false),
             TokenKind::Pub      => self.parse_pub_stmt(),
+            TokenKind::When     => self.parse_when_stmt(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
@@ -223,6 +224,71 @@ impl Parser {
                 Err(ParseError::UnexpectedToken {
                     expected: "use, fn, let, const, struct, enum, data, trait, または mixin".to_string(),
                     found: tok.kind,
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    // ── パース: when 文 ─────────────────────────────────────────────────
+
+    /// `when platform.linux { ... }` / `when feature.debug { ... }` / `when test { ... }`
+    fn parse_when_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::When)?;
+
+        let condition = self.parse_when_condition()?;
+
+        // ボディブロック { stmt... } をパース
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            body.push(self.parse_stmt()?);
+            self.skip_sep();
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        self.skip_sep();
+
+        Ok(Stmt::When { condition, body, span })
+    }
+
+    /// `when` の後に続く条件をパース
+    fn parse_when_condition(&mut self) -> Result<WhenCondition, ParseError> {
+        // `not` キーワードのチェック（Ident("not") として届く）
+        if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+            if name == "not" {
+                self.advance(); // consume 'not'
+                let inner = self.parse_when_condition()?;
+                return Ok(WhenCondition::Not(Box::new(inner)));
+            }
+        }
+
+        // `test` キーワード（Ident("test") として届く）
+        if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+            if name == "test" {
+                self.advance(); // consume 'test'
+                return Ok(WhenCondition::Test);
+            }
+        }
+
+        // `platform` / `feature` / `env` + `.` + name
+        let (prefix, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::Dot)?;
+        let (name, _) = self.expect_ident()?;
+
+        match prefix.as_str() {
+            "platform" => Ok(WhenCondition::Platform(name)),
+            "feature"  => Ok(WhenCondition::Feature(name)),
+            "env"      => Ok(WhenCondition::Env(name)),
+            _ => {
+                let tok = self.peek().clone();
+                Err(ParseError::UnexpectedToken {
+                    expected: "platform, feature, または env".to_string(),
+                    found: TokenKind::Ident(prefix),
                     span: tok.span,
                 })
             }

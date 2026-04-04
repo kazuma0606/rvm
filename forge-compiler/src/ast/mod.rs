@@ -10,6 +10,21 @@ pub struct Module {
     pub stmts: Vec<Stmt>,
 }
 
+/// when 条件の種類（M-5-A）
+#[derive(Debug, Clone, PartialEq)]
+pub enum WhenCondition {
+    /// when platform.linux / platform.windows / platform.macos
+    Platform(String),
+    /// when feature.debug / feature.release
+    Feature(String),
+    /// when env.dev / env.prod / env.test
+    Env(String),
+    /// when test
+    Test,
+    /// when not <condition>
+    Not(Box<WhenCondition>),
+}
+
 /// use パスの種類
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsePath {
@@ -135,6 +150,12 @@ pub enum Stmt {
         path: UsePath,
         symbols: UseSymbols,
         is_pub: bool,
+        span: Span,
+    },
+    /// when platform.linux { ... } / when feature.debug { ... } / when test { ... } （M-5）
+    When {
+        condition: WhenCondition,
+        body: Vec<Stmt>,
         span: Span,
     },
 }

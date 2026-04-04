@@ -1,0 +1,15 @@
+when platform.windows {
+    fn platform_name() -> string { "windows" }
+}
+when platform.linux {
+    fn platform_name() -> string { "linux" }
+}
+when platform.macos {
+    fn platform_name() -> string { "macos" }
+}
+
+fn main() {
+    println(platform_name())
+}
+
+main()
