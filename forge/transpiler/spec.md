@@ -1,6 +1,6 @@
 # ForgeScript トランスパイラ仕様（forge build）
 
-> ステータス: 設計中（未実装）
+> ステータス: B-0〜B-6 実装済み / B-7・B-8 設計済み
 > 対象: forge 0.2.0 以降
 > クレート: `forge-transpiler`
 
@@ -190,7 +190,7 @@ let add    = |a: i64, b: i64| -> i64 { a + b };
 
 | ForgeScript | Rust |
 |---|---|
-| `print(x)` | `print!("{}", x)` |
+| `print(x)` | `println!("{}", x)` | ForgeScript の print は改行付き（インタープリタと同挙動） |
 | `println(x)` | `println!("{}", x)` |
 | `string(x)` | `x.to_string()` |
 | `number(x)` | `x.to_string().parse::<i64>()?` |
@@ -265,12 +265,279 @@ ForgeScript → 期待する Rust コードの文字列比較。
 
 ---
 
-## 12. 未対応（Phase B-5 以降）
+## 12. 実装済みフェーズ一覧
 
-- `struct` / `data` / `enum` / `impl` / `trait`
-- モジュールシステム（`use ./module`）
-- `use raw {}` ブロック
-- 外部クレートのインポート
-- `async` / `await`
+| Phase | 内容 | 状態 |
+|---|---|---|
+| B-0 | クレート準備・CLI | ✅ |
+| B-1 | 基本変換（let/fn/if/for/while/match/補間/組み込み） | ✅ |
+| B-2 | 型システム（T?/T!/Option/Result/?） | ✅ |
+| B-3 | クロージャ（Fn推論・FnMut は TODO） | ✅ 一部 |
+| B-4 | コレクション（Vec/イテレータチェーン） | ✅ |
+| B-5 | 型定義（struct/data/enum/impl/trait/mixin） | ✅ |
+| B-6 | モジュール（use/when/use raw/test ブロック） | ✅ |
+| B-7 | async/await / tokio 自動挿入 | 📐 設計済み |
+| B-8 | typestate 変換 | 📐 設計済み（制約あり） |
+
+未対応（将来）:
 - ジェネリクス（`<T>`）
-- `typestate` / `mixin` / `when`
+- FnMut（state キャプチャ）/ FnOnce（消費キャプチャ）
+
+---
+
+## 13. Phase B-7: async / await
+
+### 13-1. 基本方針
+
+- ForgeScript は `async` キーワードを持たない。`.await` 式を検出した時点でコンパイラが自動的に `async fn` に昇格させる
+- `forge run` では `.await` を no-op として評価する（組み込み関数はブロッキング同期実装を持つ）
+- `forge build` では Rust の `async fn` + tokio に変換する
+
+### 13-2. async 伝播ルール
+
+```
+1. 関数本体内に .await 式がある → その関数を async fn に昇格
+2. async fn を呼び出して .await している関数 → 同様に async fn に昇格
+3. 1〜2 を固定点に達するまで繰り返す（呼び出しグラフ全体で伝播）
+4. main が async fn になる場合 → #[tokio::main] を付与
+```
+
+```forge
+fn fetch(id: number) -> User! {
+    let res = http.get("/users/{id}").await?
+    res.json()
+}
+
+fn load() {
+    let u = fetch(1).await?   // fetch が async → load も async に昇格
+    println(u.name)
+}
+```
+
+```rust
+async fn fetch(id: i64) -> Result<User, anyhow::Error> {
+    let res = http::get(&format!("/users/{}", id)).await?;
+    res.json()
+}
+
+async fn load() -> Result<(), anyhow::Error> {
+    let u = fetch(1).await?;
+    println!("{}", u.name);
+    Ok(())
+}
+```
+
+### 13-3. main エントリーポイント
+
+```forge
+fn main() {
+    let user = fetch(1).await?
+    println(user.name)
+}
+```
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let user = fetch(1).await?;
+    println!("{}", user.name);
+    Ok(())
+}
+```
+
+tokio が必要になった場合、`Cargo.toml` に自動追記：
+```toml
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+```
+
+### 13-4. .await 式変換
+
+```forge
+expr.await      →  expr.await
+expr.await?     →  expr.await?
+```
+
+### 13-5. async 再帰
+
+async fn の再帰は Rust でそのままコンパイルできないため、`Box::pin` を自動挿入する：
+
+```forge
+fn fib(n: number) -> number! {
+    if n <= 1 { ok(n) }
+    else { ok(fib(n-1).await? + fib(n-2).await?) }
+}
+```
+
+```rust
+fn fib(n: i64) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64, anyhow::Error>>>> {
+    Box::pin(async move {
+        if n <= 1 { Ok(n) }
+        else { Ok(fib(n - 1).await? + fib(n - 2).await?) }
+    })
+}
+```
+
+### 13-6. test ブロック内の await
+
+```forge
+test "fetch works" {
+    let u = fetch(1).await?
+    assert_eq(u.name, "Alice")
+}
+```
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_fetch_works() -> Result<(), anyhow::Error> {
+        let u = fetch(1).await?;
+        assert_eq!(u.name, "Alice");
+        Ok(())
+    }
+}
+```
+
+### 13-7. 禁止事項
+
+**クロージャ内の `.await` は禁止**（コンパイルエラー）：
+
+```forge
+// ❌ エラー: クロージャ内での .await は未サポート
+let f = () => { http.get("/api").await }
+```
+
+Rust の async closure は nightly 機能のため、安定化されるまでサポートしない。
+
+### 13-8. forge run フォールバック
+
+インタープリタでは `.await` を no-op として扱う：
+- `expr.await` → `expr` を同期評価してそのまま返す
+- 組み込み非同期関数（`http.get` 等）はブロッキング同期実装を持つ（reqwest の blocking など）
+
+---
+
+## 14. Phase B-8: typestate 変換
+
+### 14-1. 制約条件（重要）
+
+B-8 でサポートする typestate には以下の制約を設ける。制約に違反した場合はコンパイルエラー。
+
+| 制約 | 内容 |
+|---|---|
+| **Unit 状態のみ** | `states:` に列挙する状態はフィールドを持たない Unit 型のみ |
+| **ジェネリクスなし** | `typestate Query<T> { ... }` は未サポート |
+| **@derive なし** | typestate への `@derive` は未サポート |
+| **any の制限** | `any { }` ブロックは1つのみ・メソッド定義のみ（フィールドアクセス可） |
+| **初期状態** | コンストラクタは `states:` の最初の状態で生成される |
+
+### 14-2. 変換パターン
+
+```forge
+typestate Connection {
+    states: [Disconnected, Connected, Authenticated]
+
+    Disconnected {
+        fn connect(self, host: string) -> Connection<Connected> {
+            // ...
+        }
+    }
+
+    Connected {
+        fn login(self, user: string) -> Connection<Authenticated> {
+            // ...
+        }
+        fn disconnect(self) -> Connection<Disconnected> {
+            // ...
+        }
+    }
+
+    Authenticated {
+        fn query(self, sql: string) -> string {
+            // ...
+        }
+    }
+
+    any {
+        fn host(self) -> string { self.host }
+    }
+}
+```
+
+生成される Rust：
+
+```rust
+use std::marker::PhantomData;
+
+// 状態マーカー型
+struct Disconnected;
+struct Connected;
+struct Authenticated;
+
+// 本体 struct
+struct Connection<S> {
+    host: String,
+    _state: PhantomData<S>,
+}
+
+// 状態別 impl
+impl Connection<Disconnected> {
+    pub fn new(host: String) -> Self {
+        Connection { host, _state: PhantomData }
+    }
+
+    pub fn connect(self, host: String) -> Connection<Connected> {
+        Connection { host, _state: PhantomData }
+    }
+}
+
+impl Connection<Connected> {
+    pub fn login(self, user: String) -> Connection<Authenticated> {
+        Connection { host: self.host, _state: PhantomData }
+    }
+
+    pub fn disconnect(self) -> Connection<Disconnected> {
+        Connection { host: self.host, _state: PhantomData }
+    }
+}
+
+impl Connection<Authenticated> {
+    pub fn query(&self, sql: String) -> String {
+        // ...
+    }
+}
+
+// any ブロック → 各状態に同一 impl を生成
+impl Connection<Disconnected> {
+    pub fn host(&self) -> String { self.host.clone() }
+}
+impl Connection<Connected> {
+    pub fn host(&self) -> String { self.host.clone() }
+}
+impl Connection<Authenticated> {
+    pub fn host(&self) -> String { self.host.clone() }
+}
+```
+
+### 14-3. コンストラクタ生成
+
+`typestate Name { ... }` のコンストラクタは `states:` の**最初の状態**で自動生成：
+
+```forge
+let conn = Connection::new(host: "localhost")
+// → Connection<Disconnected> が生成される
+```
+
+### 14-4. 遷移メソッドの self 変換
+
+| ForgeScript | Rust |
+|---|---|
+| `fn method(self)` | `pub fn method(self)` |
+| `fn method(self) -> NextState` | `pub fn method(self) -> TypeName<NextState>` |
+| `fn getter(self) -> T` | `pub fn getter(&self) -> T`（値を返すだけなら `&self`） |
+
+遷移メソッド（戻り値が別状態）は `self` を消費する（所有権移動）。
+参照のみのメソッド（戻り値が同型 or プリミティブ）は `&self` に変換する。

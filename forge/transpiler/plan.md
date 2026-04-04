@@ -5,17 +5,16 @@
 ## フェーズ構成
 
 ```
-Phase B-1: 基本変換（コア言語機能）
-Phase B-2: 型システム（Option / Result / ? 演算子）
-Phase B-3: クロージャ（Fn / FnMut / FnOnce 推論）
-Phase B-4: コレクション（Vec + イテレータチェーン）
-Phase B-5: 複合型（struct / data / enum）       ← 将来
-Phase B-6: モジュール / use raw / 外部クレート   ← 将来
-Phase B-7: async / await                        ← 将来
+Phase B-0: クレート準備                          ✅ 完了
+Phase B-1: 基本変換（コア言語機能）              ✅ 完了
+Phase B-2: 型システム（Option / Result / ?）     ✅ 完了
+Phase B-3: クロージャ（Fn推論・FnMut は TODO）   ✅ 一部完了
+Phase B-4: コレクション（Vec + イテレータ）      ✅ 完了
+Phase B-5: 型定義（struct / data / enum 等）     ✅ 完了
+Phase B-6: モジュール / use raw / test ブロック  ✅ 完了
+Phase B-7: async / await / tokio 自動挿入        📐 設計済み・未実装
+Phase B-8: typestate 変換（制約付き）            📐 設計済み・未実装
 ```
-
-Phase B-1〜B-4 が完了した時点で、現在の `forge run` で動く ForgeScript プログラムの
-大半が `forge build` でもネイティブバイナリになる。
 
 ---
 
@@ -105,14 +104,80 @@ Rust のイテレータチェーンに正しく変換されること。
 
 ---
 
-## Phase B-5 以降（将来）
+## Phase B-7: async / await
 
-| Phase | 内容 | 前提 |
-|---|---|---|
-| B-5 | `struct` / `data` / `enum` / `impl` | 型定義仕様の確定 |
-| B-6 | モジュールシステム / `use raw` / 外部クレート | モジュール仕様の確定 |
-| B-7 | `async` / `await` / tokio 自動挿入 | 非同期仕様の確定 |
-| B-8 | `typestate` / `mixin` / `when` | 独自機能仕様の確定 |
+### 目標
+`.await` 式を検出して `async fn` への自動昇格・tokio 統合を行う。
+`forge run` では `.await` を no-op として同期実行する。
+
+### 実装ステップ
+
+1. **解析パス: async 関数検出**
+   - 関数本体内の `.await` 式を収集する pass を追加
+   - 呼び出しグラフを構築し、async を呼び出す関数も async に昇格（固定点反復）
+
+2. **async fn 変換**
+   - 昇格対象関数を `async fn` として生成
+   - `fn main()` が対象なら `#[tokio::main] async fn main()` に変換
+   - `Cargo.toml` に `tokio = { version = "1", features = ["full"] }` を自動追加
+
+3. **.await 式変換**
+   - `expr.await` → `expr.await`（構文はそのまま）
+   - `expr.await?` → `expr.await?`
+
+4. **async 再帰**
+   - 再帰 async fn を検出して `Box::pin(async move { ... })` を自動挿入
+
+5. **test ブロック内 await**
+   - `.await` を含む test ブロック → `#[tokio::test] async fn test_xxx()`
+
+6. **クロージャ内 await の禁止**
+   - クロージャ本体内で `.await` を発見したらコンパイルエラー
+
+7. **forge run フォールバック**
+   - インタープリタで `.await` を no-op として評価
+   - 組み込み非同期関数はブロッキング同期実装を持つ
+
+8. **テスト**
+
+---
+
+## Phase B-8: typestate 変換
+
+### 目標
+`typestate` 宣言を Rust の PhantomData パターンに変換する。
+**制約付き実装**（spec.md セクション14-1 の制約条件参照）。
+
+### 制約（再掲）
+- Unit 状態のみ（状態にフィールド不可）
+- ジェネリクス付き typestate は未サポート
+- `@derive` は未サポート
+- `any {}` ブロックは1つのみ
+
+### 実装ステップ
+
+1. **状態マーカー型の生成**
+   - `states: [A, B, C]` → `struct A; struct B; struct C;` を生成
+   - `use std::marker::PhantomData;` を自動挿入
+
+2. **本体 struct の生成**
+   - `typestate Name { ... }` → `struct Name<S> { フィールド, _state: PhantomData<S> }` を生成
+   - 初期状態（states 最初）のコンストラクタ `fn new(...)` を生成
+
+3. **状態別 impl の生成**
+   - 各状態ブロック → `impl Name<StateX> { ... }` を生成
+   - 遷移メソッド（`-> NextState`）: `self` を消費（所有権移動）
+   - 参照メソッド（戻り値がプリミティブ/参照型）: `&self` に変換
+
+4. **any ブロックの展開**
+   - `any { fn method() }` → 全状態に同一の `impl Name<StateX>` を生成
+
+5. **制約チェック**
+   - 違反時はコンパイルエラーを返す（ランタイムではなくトランスパイル時）
+
+6. **テスト**
+
+---
 
 ---
 
