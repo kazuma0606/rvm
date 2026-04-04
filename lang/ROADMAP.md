@@ -2,6 +2,7 @@
 
 > 最終更新: 2026-04-04
 > テスト総数: 293本（全通過）
+> 言語仕様: v0.2.0（ジェネリクス・forge.toml は v0.3.0 予定）
 
 ---
 
@@ -115,19 +116,32 @@
 
 ---
 
+## 設計済み・未実装 📐（言語機能）
+
+| 機能 | 仕様 | 備考 |
+|---|---|---|
+| ジェネリクス `<T>` | `lang/generics/spec.md` | Anvil の前提。v0.3.0 |
+| `forge.toml` パッケージ管理 | `lang/package/spec.md` | forge build との統合。v0.3.0 |
+
+## 設計済み・未実装 📐（パッケージ）
+
+| パッケージ | 仕様 | 概要 |
+|---|---|---|
+| **Anvil** | `packages/anvil/spec.md` | Express スタイル HTTP マイクロフレームワーク |
+| forge-grpc | `packages/forge-grpc/spec.md`（未作成） | gRPC サービス定義 DSL（tonic ラッパー） |
+| forge-graphql | `packages/forge-graphql/spec.md`（未作成） | GraphQL スキーマ DSL（async-graphql ラッパー） |
+
 ## 未設計 ⬜
 
 | 機能 | 備考 |
 |---|---|
-| `forge test` + `test "..." { }` ブロック | FT-2（コンパニオンファイル・ディレクトリ走査）のみ未実装 |
-| LSP（言語サーバー） | future_task に概要のみ。型チェッカーを活用 |
-| Playground（WASM） | future_task に概要のみ。forge-wasm クレートが必要 |
-| `forge.toml` パッケージ管理 | design-v3.md に最小仕様あり。詳細未設計 |
-| ジェネリクス `<T>` | spec に「将来」として記載のみ |
-| `forge fmt` | design-v3.md に言及のみ |
-| `forge generate` | design-v3.md に言及のみ |
-| GitHub Actions / バイナリ配布 | future_task に概要のみ |
-| Tree-sitter grammar | syntax/tasks.md にオプションとして記載 |
+| `forge test` FT-2 | コンパニオンファイル・ディレクトリ走査 |
+| LSP（言語サーバー） | 型チェッカーを活用。ホバー・補完・定義ジャンプ |
+| Playground（WASM） | forge-wasm クレートが必要 |
+| `forge fmt` | コードフォーマッタ |
+| `forge generate` | コードジェネレータ |
+| GitHub Actions / バイナリ配布 | CI/CD・リリース自動化 |
+| Tree-sitter grammar | シンタックスハイライトの拡張 |
 
 ---
 
@@ -147,12 +161,22 @@
 ✅ [3] forge test + test "..." ブロック（FT-1 完了）
   │       FT-2（コンパニオンファイル）は言語仕様安定後
   │
+  次のステップ
+  │
+  ├─ [4] ジェネリクス <T>（Anvil の前提）
+  ├─ [5] forge.toml（パッケージ管理）
+  ├─ [6] Anvil HTTP フレームワーク
+  │       Stage A-1: std のみ基礎 HTTP
+  │       Stage A-2: ルーティング
+  │       Stage A-3: ミドルウェア
+  │       Stage A-4: 非同期（tokio）
+  │
   言語仕様安定後
   │
-  ├─ [4] LSP（言語サーバー）
-  ├─ [5] Playground（WASM）
-  ├─ [6] async / await
-  └─ [7] セルフホスティング
+  ├─ [7] LSP（言語サーバー）
+  ├─ [8] forge-grpc / forge-graphql
+  ├─ [9] Playground（WASM）
+  └─ [10] セルフホスティング
 ```
 
 ---
@@ -160,31 +184,40 @@
 ## ファイル構成
 
 ```
-forge/
-  ROADMAP.md              ← 本ファイル（進行状況・ロードマップ）
+lang/                           ← 言語仕様・ドキュメント
+  ROADMAP.md                    ← 本ファイル
   v0.1.0/
-    spec_v0.0.1.md        ← 実装済み言語仕様（v0.0.1）
-    plan.md               ← Phase 0〜6 実装計画
-    tasks.md              ← Phase 0〜4 タスク（全完了）
+    spec_v0.0.1.md              ← 実装済み言語仕様
+    plan.md / tasks.md          ← Phase 0〜4（全完了）
   typedefs/
-    spec.md               ← 型定義仕様（struct/enum/trait/mixin/data/typestate）
-    plan.md               ← Phase T-1〜T-5 実装計画
-    tasks.md              ← Phase T-1〜T-5 タスク（全完了）
+    spec.md / plan.md / tasks.md ← T-1〜T-5（全完了）
   modules/
-    spec.md               ← モジュールシステム仕様
-    plan.md               ← Phase M-0〜M-7 実装計画
-    tasks.md              ← Phase M-0〜M-7 タスク（全完了）
+    spec.md / plan.md / tasks.md ← M-0〜M-7（全完了）
   transpiler/
-    spec.md               ← forge build 変換仕様
-    plan.md               ← Phase B-0〜B-8 実装計画
-    tasks.md              ← Phase B-0〜B-4 タスク（完了・B-5〜B-6 未着手）
+    spec.md / plan.md / tasks.md ← B-0〜B-8（全完了）
+  tests/
+    spec.md / plan.md / tasks.md ← FT-1（完了）・FT-2（未着手）
+  generics/
+    spec.md                     ← ジェネリクス仕様（📐 設計済み）
+  package/
+    spec.md                     ← forge.toml 仕様（📐 設計済み）
   syntax/
-    spec.md               ← シンタックスハイライト仕様
-    plan.md               ← Phase S-1〜S-3 計画
-    tasks.md              ← Phase S-1 完了
-  future_task_20260330.md ← 将来タスク一覧（設計メモ）
+    spec.md / plan.md / tasks.md ← S-1（完了）
+  future_task_20260330.md       ← 将来タスク一覧
+
+crates/                         ← RVM 実装（Rust クレート群）
+  forge-compiler/
+  forge-vm/
+  forge-stdlib/
+  forge-transpiler/
+  forge-cli/
+
+packages/                       ← ForgeScript パッケージ群
+  anvil/
+    spec.md                     ← Anvil HTTP フレームワーク仕様（📐 設計済み）
+  forge-grpc/                   ← gRPC（spec 未作成）
+  forge-graphql/                ← GraphQL（spec 未作成）
 
 dev/
-  design-v2.md            ← 詳細仕様書
-  design-v3.md            ← 設計視点・方針（typestate/mixin/data/validate等）
+  design-v2.md / design-v3.md  ← 設計方針
 ```
