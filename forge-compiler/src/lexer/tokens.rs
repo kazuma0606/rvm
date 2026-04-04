@@ -52,6 +52,8 @@ pub enum TokenKind {
     Pub,        // pub
     As,         // as
     When,       // when
+    // ── テストキーワード (Phase FT-1) ─────
+    Test,       // test
     // ── アノテーション ────────────────────────
     At,         // @
 

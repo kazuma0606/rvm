@@ -104,6 +104,8 @@ impl CodeGenerator {
             Stmt::UseRaw { .. } => false,
             // M-5: when 文は現時点ではトランスパイル非対応
             Stmt::When { .. } => false,
+            // FT-1: test ブロックは anyhow 不要
+            Stmt::TestBlock { .. } => false,
         }
     }
 
@@ -230,6 +232,11 @@ impl CodeGenerator {
             // M-5: when 文は現時点ではトランスパイル非対応（スタブ）
             Stmt::When { .. } => {
                 format!("{}// when (transpile pending)\n", self.indent_str())
+            }
+            // FT-1: test ブロックは forge build では #[cfg(test)] として出力（将来対応）
+            // 現時点ではスキップ
+            Stmt::TestBlock { .. } => {
+                format!("{}// test block (transpile pending)\n", self.indent_str())
             }
         }
     }

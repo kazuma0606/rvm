@@ -127,6 +127,8 @@ impl TypeChecker {
             Stmt::UseRaw { .. } => {}
             // M-5: when 文は型チェッカーでは現在スキップ
             Stmt::When { .. } => {}
+            // FT-1: test ブロックは型チェッカーでは現在スキップ
+            Stmt::TestBlock { .. } => {}
         }
     }
 

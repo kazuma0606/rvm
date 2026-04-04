@@ -55,6 +55,19 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("test") => {
+            if let Some(path) = args.get(2) {
+                // --filter オプションを手動でパース
+                let filter = args.iter().position(|s| s == "--filter")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str());
+                test_file(path, filter);
+            } else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge test <file.forge> [--filter <pattern>]");
+                std::process::exit(1);
+            }
+        }
         Some("repl") => {
             run_repl();
         }
@@ -93,6 +106,57 @@ fn run_file(path: &str) {
     let mut interp = Interpreter::with_file_path(file_path);
     if let Err(e) = interp.eval(&module) {
         eprintln!("実行エラー: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn test_file(path: &str, filter: Option<&str>) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let module = match parse_source(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("構文エラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let file_path = std::path::Path::new(path);
+    let mut interp = Interpreter::with_file_path(file_path);
+    interp.is_test_mode = true;
+
+    let results = interp.run_tests(&module.stmts, filter);
+
+    let total = results.len();
+    println!("running {} tests", total);
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    for result in &results {
+        if result.passed {
+            println!("  \u{2705} {}", result.name);
+            passed += 1;
+        } else {
+            println!("  \u{274c} {}", result.name);
+            if let Some(ref msg) = result.failure_message {
+                println!("       {}", msg);
+            }
+            failed += 1;
+        }
+    }
+
+    println!();
+    if failed == 0 {
+        println!("test result: ok. {} passed; 0 failed", passed);
+    } else {
+        println!("test result: FAILED. {} passed; {} failed", passed, failed);
         std::process::exit(1);
     }
 }
@@ -430,6 +494,8 @@ fn print_help() {
     println!();
     println!("使用方法:");
     println!("  forge run <file.forge>              ファイルを読み込んで実行");
+    println!("  forge test <file.forge>             インラインテストを実行");
+    println!("  forge test <file.forge> --filter <pattern>  テスト名で絞り込み");
     println!("  forge check <file.forge>            型チェックのみ（実行しない）");
     println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
     println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");

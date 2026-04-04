@@ -194,6 +194,7 @@ impl Parser {
             TokenKind::Use      => self.parse_use_decl(false),
             TokenKind::Pub      => self.parse_pub_stmt(),
             TokenKind::When     => self.parse_when_stmt(),
+            TokenKind::Test     => self.parse_test_block(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.skip_sep();
@@ -256,6 +257,44 @@ impl Parser {
         Ok(Stmt::When { condition, body, span })
     }
 
+    /// `test "テスト名" { ... }` をパース（FT-1-C）
+    fn parse_test_block(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Test)?;
+
+        // テスト名は文字列リテラルまたは補間なし文字列
+        let name = match self.peek_kind().clone() {
+            TokenKind::Str(s) => {
+                self.advance();
+                s
+            }
+            _ => {
+                let tok = self.peek().clone();
+                return Err(ParseError::UnexpectedToken {
+                    expected: "テスト名（文字列リテラル）".to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                });
+            }
+        };
+
+        // ボディブロック { stmt... } をパース
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            body.push(self.parse_stmt()?);
+            self.skip_sep();
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        self.skip_sep();
+
+        Ok(Stmt::TestBlock { name, body, span })
+    }
+
     /// `when` の後に続く条件をパース
     fn parse_when_condition(&mut self) -> Result<WhenCondition, ParseError> {
         // `not` キーワードのチェック（Ident("not") として届く）
@@ -267,12 +306,10 @@ impl Parser {
             }
         }
 
-        // `test` キーワード（Ident("test") として届く）
-        if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
-            if name == "test" {
-                self.advance(); // consume 'test'
-                return Ok(WhenCondition::Test);
-            }
+        // `test` キーワード（TokenKind::Test として届く）
+        if matches!(self.peek_kind(), TokenKind::Test) {
+            self.advance(); // consume 'test'
+            return Ok(WhenCondition::Test);
         }
 
         // `platform` / `feature` / `env` + `.` + name
@@ -2477,6 +2514,32 @@ mod tests {
                 assert!(methods[0].has_state_self);
             }
             other => panic!("expected ImplBlock, got {:?}", other),
+        }
+    }
+
+    // ── Phase FT-1 tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_test_block() {
+        let src = r#"test "add works" { let x = 1 }"#;
+        match first_stmt(src) {
+            Stmt::TestBlock { name, body, .. } => {
+                assert_eq!(name, "add works");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("expected TestBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_test_block_empty() {
+        let src = r#"test "empty" { }"#;
+        match first_stmt(src) {
+            Stmt::TestBlock { name, body, .. } => {
+                assert_eq!(name, "empty");
+                assert_eq!(body.len(), 0);
+            }
+            other => panic!("expected TestBlock, got {:?}", other),
         }
     }
 }

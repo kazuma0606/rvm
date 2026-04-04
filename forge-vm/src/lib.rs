@@ -5,3 +5,4 @@
 pub mod value;
 pub mod interpreter;
 pub mod env;
+pub mod test_runner;

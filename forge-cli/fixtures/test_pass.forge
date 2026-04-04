@@ -1,0 +1,15 @@
+fn add(a: number, b: number) -> number { a + b }
+fn greet(name: string) -> string { "Hello, {name}!" }
+
+test "add: 基本" {
+    assert_eq(add(1, 2), 3)
+    assert_eq(add(0, 0), 0)
+}
+
+test "add: 負の数" {
+    assert_eq(add(-1, 1), 0)
+}
+
+test "greet" {
+    assert_eq(greet("World"), "Hello, World!")
+}

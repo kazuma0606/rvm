@@ -294,6 +294,7 @@ impl Lexer {
                         "pub"       => TokenKind::Pub,
                         "as"        => TokenKind::As,
                         "when"      => TokenKind::When,
+                        "test"      => TokenKind::Test,
                         _           => TokenKind::Ident(ident),
                     };
                     tokens.push(Token { kind, span });

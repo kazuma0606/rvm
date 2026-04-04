@@ -115,6 +115,8 @@ pub enum RuntimeError {
     Return(Value),
     /// ? 演算子の Err 伝播（関数呼び出しが補足）
     PropagateErr(String),
+    /// アサーション失敗（forge test でテストを失敗としてマーク）（FT-1-D）
+    TestFailure(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -132,6 +134,7 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "循環参照エラー: {}", cycle.join(" → ")),
             RuntimeError::Return(_)             => write!(f, "<return>"),
             RuntimeError::PropagateErr(e)       => write!(f, "<propagate err: {}>", e),
+            RuntimeError::TestFailure(msg)      => write!(f, "assertion failed: {}", msg),
         }
     }
 }
@@ -401,6 +404,58 @@ impl Interpreter {
             if args.len() != 1 { return Err("type_of() takes 1 arg".to_string()); }
             Ok(Value::String(args.remove(0).type_name().to_string()))
         }), false);
+
+        // ── アサーション組み込み関数（FT-1-E）──────────────────────────
+        // エラー文字列に "__tf__:" プレフィックスを付けて TestFailure として識別する
+
+        self.define("assert", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("assert() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::Bool(true) => Ok(Value::Unit),
+                Value::Bool(false) => Err("__tf__:assertion failed".to_string()),
+                v => Err(format!("assert() expects bool, got {}", v.type_name())),
+            }
+        }), false);
+
+        self.define("assert_eq", native!(|mut args: Vec<Value>| {
+            if args.len() != 2 { return Err("assert_eq() takes 2 args".to_string()); }
+            let b = args.remove(1);
+            let a = args.remove(0);
+            if a == b {
+                Ok(Value::Unit)
+            } else {
+                Err(format!("__tf__:assertion failed: expected {}, got {}", b, a))
+            }
+        }), false);
+
+        self.define("assert_ne", native!(|mut args: Vec<Value>| {
+            if args.len() != 2 { return Err("assert_ne() takes 2 args".to_string()); }
+            let b = args.remove(1);
+            let a = args.remove(0);
+            if a != b {
+                Ok(Value::Unit)
+            } else {
+                Err(format!("__tf__:assertion failed: expected not {}, got {}", b, a))
+            }
+        }), false);
+
+        self.define("assert_ok", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("assert_ok() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::Result(Ok(_)) => Ok(Value::Unit),
+                Value::Result(Err(msg)) => Err(format!("__tf__:assertion failed: expected Ok, got Err({})", msg)),
+                v => Err(format!("assert_ok() expects result, got {}", v.type_name())),
+            }
+        }), false);
+
+        self.define("assert_err", native!(|mut args: Vec<Value>| {
+            if args.len() != 1 { return Err("assert_err() takes 1 arg".to_string()); }
+            match args.remove(0) {
+                Value::Result(Err(_)) => Ok(Value::Unit),
+                Value::Result(Ok(_)) => Err("__tf__:assertion failed: expected Err, got Ok".to_string()),
+                v => Err(format!("assert_err() expects result, got {}", v.type_name())),
+            }
+        }), false);
     }
 
     // ── パブリック評価 ────────────────────────────────────────────────────
@@ -489,6 +544,11 @@ impl Interpreter {
             Stmt::When { condition, body, .. } => {
                 self.eval_when(condition, body)
             }
+            Stmt::TestBlock { .. } => {
+                // `forge run` では TestBlock をスキップ（FT-1-D）
+                // `forge test` では run_tests() が直接処理する
+                Ok(Value::Unit)
+            }
         }
     }
 
@@ -521,6 +581,76 @@ impl Interpreter {
         } else {
             Ok(Value::Unit)
         }
+    }
+
+    // ── テスト実行（FT-1-D）──────────────────────────────────────────────
+
+    /// `is_test_mode = true` で TestBlock を収集して順次実行する（FT-1-D）
+    pub fn run_tests(&mut self, stmts: &[Stmt], filter: Option<&str>) -> Vec<crate::test_runner::TestResult> {
+        // まずトップレベルの fn/const/struct/enum/trait 等を実行して共有スコープを構築
+        for stmt in stmts {
+            match stmt {
+                Stmt::TestBlock { .. } => {} // スキップ
+                _ => {
+                    let _ = self.eval_stmt(stmt);
+                }
+            }
+        }
+
+        // テスト実行前のグローバルスコープのスナップショット（state リセット用）
+        let global_snapshot: HashMap<String, Binding> = self.scopes
+            .first()
+            .cloned()
+            .unwrap_or_default();
+
+        // TestBlock を収集してフィルタを適用し、順次実行する
+        let mut results = Vec::new();
+        for stmt in stmts {
+            if let Stmt::TestBlock { name, body, .. } = stmt {
+                // フィルタ
+                if let Some(pattern) = filter {
+                    if !name.contains(pattern) {
+                        continue;
+                    }
+                }
+
+                // 各テストはスコープを分離して実行（state をリセット）
+                // グローバルスコープをスナップショットに戻す
+                if let Some(global) = self.scopes.first_mut() {
+                    *global = global_snapshot.clone();
+                }
+                // テスト専用スコープを追加（テスト内 let/state の定義はここに入る）
+                self.push_scope();
+                let mut failed = false;
+                let mut failure_msg = None;
+
+                for test_stmt in body {
+                    match self.eval_stmt(test_stmt) {
+                        Ok(_) => {}
+                        Err(RuntimeError::TestFailure(msg)) => {
+                            failed = true;
+                            failure_msg = Some(msg);
+                            break;
+                        }
+                        Err(e) => {
+                            failed = true;
+                            failure_msg = Some(e.to_string());
+                            break;
+                        }
+                    }
+                }
+
+                self.pop_scope();
+
+                results.push(crate::test_runner::TestResult {
+                    name: name.clone(),
+                    passed: !failed,
+                    failure_message: failure_msg,
+                });
+            }
+        }
+
+        results
     }
 
     // ── UseDecl の評価 ────────────────────────────────────────────────────
@@ -1251,7 +1381,13 @@ impl Interpreter {
                 self.call_closure(&params, &body, &env, arg_vals)
             }
             Value::NativeFunction(NativeFn(f)) => {
-                f(arg_vals).map_err(RuntimeError::Custom)
+                f(arg_vals).map_err(|msg| {
+                    if let Some(rest) = msg.strip_prefix("__tf__:") {
+                        RuntimeError::TestFailure(rest.to_string())
+                    } else {
+                        RuntimeError::Custom(msg)
+                    }
+                })
             }
             v => Err(type_err("function", v.type_name())),
         }
@@ -4546,5 +4682,88 @@ pub fn add(a: number, b: number) -> number { a + b }
         let v2 = parse_source("value()").expect("parse v2");
         let result2 = interp.eval(&v2).expect("eval v2");
         assert_eq!(result2, Value::Int(42), "reload 後は 42 を返すこと");
+    }
+
+    // ── Phase FT-1 tests ──────────────────────────────────────────────────
+
+    use forge_compiler::parser::parse_source;
+
+    fn eval(src: &str) -> Result<Value, RuntimeError> {
+        eval_source(src)
+    }
+
+    #[test]
+    fn test_assert_eq_pass() {
+        let result = eval("assert_eq(1 + 1, 2)");
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_assert_eq_fail() {
+        let result = eval("assert_eq(1, 2)");
+        assert!(matches!(result, Err(RuntimeError::TestFailure(_))));
+        if let Err(RuntimeError::TestFailure(msg)) = result {
+            assert!(msg.contains("expected 2, got 1"), "msg: {}", msg);
+        }
+    }
+
+    #[test]
+    fn test_assert_pass() {
+        let result = eval("assert(true)");
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_assert_fail() {
+        let result = eval("assert(false)");
+        assert!(matches!(result, Err(RuntimeError::TestFailure(_))));
+    }
+
+    #[test]
+    fn test_assert_ok() {
+        let result = eval("assert_ok(ok(1))");
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_assert_err() {
+        let result = eval("assert_err(err(\"msg\"))");
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_test_scope_isolation() {
+        let src = r#"
+state counter: number = 0
+
+test "first" {
+    counter = counter + 1
+}
+
+test "second" {
+    assert_eq(counter, 0)
+}
+"#;
+        let module = parse_source(src).expect("parse failed");
+        let mut interp = Interpreter::new();
+        interp.is_test_mode = true;
+        let results = interp.run_tests(&module.stmts, None);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].passed, "first test should pass");
+        assert!(results[1].passed, "second test should pass (counter reset)");
+    }
+
+    #[test]
+    fn test_run_skips_test_blocks() {
+        let src = r#"
+test "should be skipped" {
+    assert(false)
+}
+"#;
+        let module = parse_source(src).expect("parse failed");
+        let mut interp = Interpreter::new();
+        // is_test_mode = false (default)
+        let result = interp.eval(&module);
+        assert!(result.is_ok(), "eval should succeed when skipping test blocks");
     }
 }

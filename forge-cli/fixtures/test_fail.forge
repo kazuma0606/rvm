@@ -1,0 +1,9 @@
+fn add(a: number, b: number) -> number { a + b }
+
+test "pass" {
+    assert_eq(add(1, 2), 3)
+}
+
+test "fail" {
+    assert_eq(add(1, 2), 99)
+}

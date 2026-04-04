@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
 > 最終更新: 2026-04-04
-> テスト総数: 236本（全通過）
+> テスト総数: 249本（全通過）
 
 ---
 
@@ -67,6 +67,16 @@
 | M-6: use raw | 生 Rust コード埋め込み（`forge run` ではスキップ） |
 | M-7: REPL | `:modules` / `:reload` / `:unload` |
 
+### テストシステム（forge test）✅
+
+| 機能 | 詳細 |
+|---|---|
+| `test "..." { }` | インラインテストブロック（FT-1） |
+| assert / assert_eq / assert_ne / assert_ok / assert_err | アサーション組み込み関数 |
+| `forge test <file>` | テスト収集・実行・結果表示（✅/❌・exit code） |
+| `--filter <pattern>` | テスト名の部分一致フィルタ |
+| テストスコープ分離 | 各テストで state がリセット |
+
 ### ツール・周辺 ✅
 
 | 機能 | 詳細 |
@@ -108,7 +118,7 @@
 
 | 機能 | 備考 |
 |---|---|
-| `forge test` + `test "..." { }` ブロック | future_task に概要のみ。インライン→コンパニオン順 |
+| `forge test` + `test "..." { }` ブロック | FT-2（コンパニオンファイル・ディレクトリ走査）のみ未実装 |
 | LSP（言語サーバー） | future_task に概要のみ。型チェッカーを活用 |
 | Playground（WASM） | future_task に概要のみ。forge-wasm クレートが必要 |
 | `forge.toml` パッケージ管理 | design-v3.md に最小仕様あり。詳細未設計 |
@@ -133,7 +143,8 @@
   │
 今すぐ着手可能
   │
-  ├─ [3] forge test + test "..." ブロック（M-5 when と連携）
+✅ [3] forge test + test "..." ブロック（FT-1 完了）
+  │       FT-2（コンパニオンファイル）は言語仕様安定後
   │
   言語仕様安定後
   │

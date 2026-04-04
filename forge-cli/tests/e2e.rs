@@ -791,3 +791,48 @@ fn e2e_when_platform() {
         trimmed
     );
 }
+
+// ── Phase FT-1 E2E テスト ─────────────────────────────────────────────────
+
+/// `forge test <file>` を実行して stdout を返す
+/// 失敗時（exit code != 0）は Err(stdout) を返す（stderr ではなく stdout）
+fn run_forge_test(file: &str, filter: Option<&str>) -> Result<String, String> {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_forge-new"));
+    cmd.arg("test").arg(file);
+    if let Some(f) = filter {
+        cmd.arg("--filter").arg(f);
+    }
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(stdout)
+    }
+}
+
+#[test]
+fn e2e_forge_test_pass() {
+    let fixtures_dir = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{}/fixtures/test_pass.forge", fixtures_dir);
+    let out = run_forge_test(&path, None).expect("forge test should pass");
+    assert!(out.contains("ok. 3 passed; 0 failed"), "出力: {}", out);
+}
+
+#[test]
+fn e2e_forge_test_fail() {
+    let fixtures_dir = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{}/fixtures/test_fail.forge", fixtures_dir);
+    let out = run_forge_test(&path, None).expect_err("forge test should fail with exit 1");
+    assert!(out.contains("FAILED. 1 passed; 1 failed"), "出力: {}", out);
+}
+
+#[test]
+fn e2e_forge_test_filter() {
+    let fixtures_dir = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{}/fixtures/test_pass.forge", fixtures_dir);
+    let out = run_forge_test(&path, Some("add")).expect("forge test with filter should pass");
+    // "add: 基本" と "add: 負の数" の2テストのみ実行
+    assert!(out.contains("running 2 tests"), "出力: {}", out);
+    assert!(out.contains("ok. 2 passed; 0 failed"), "出力: {}", out);
+}

@@ -164,6 +164,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// test "テスト名" { ... } （FT-1）
+    TestBlock {
+        name: String,
+        body: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 /// typestate の各状態定義（状態名とその状態で使えるメソッド）
