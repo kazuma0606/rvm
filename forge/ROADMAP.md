@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
 > 最終更新: 2026-04-04
-> テスト総数: 249本（全通過）
+> テスト総数: 268本（全通過）
 
 ---
 
@@ -42,7 +42,9 @@
 | B-2: 型システム | T?/T!/Option/Result/? 演算子 | 1本（snapshot）|
 | B-3: クロージャ | Fn推論（FnMutは未完了・TODO済み） | 2本（snapshot）|
 | B-4: コレクション | Vec + イテレータチェーン変換 | 2本（snapshot）|
-| ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 9本 |
+| B-5: 型定義変換 | struct/data/enum/impl/trait/mixin → Rust変換 | 14本（snapshot）|
+| B-6: モジュール変換 | use/when/use raw/test → Rust変換 | 7本（snapshot）|
+| ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 16本 |
 
 ### 型定義（forge run）✅
 
@@ -93,10 +95,9 @@
 - **参照**: `forge/transpiler/tasks.md`
 - **内容**:
   - B-3: FnMut（state キャプチャ）/ FnOnce（消費キャプチャ）→ TODO コメント済み
-  - B-5: struct / data / enum の Rust 変換（型定義実装済みにつき着手可能）
-  - B-6: モジュールシステムの Rust 変換（モジュール実装済みにつき着手可能）
-  - ラウンドトリップテスト残20本の選別・追加
-- **ブロッカー**: なし（B-5・B-6 ともに前提実装が完了済み）
+  - B-7: `async` / `await` / tokio 自動挿入
+  - B-8: `typestate` / `@derive(Singleton)` / `when` の Rust 変換
+- **ブロッカー**: なし
 
 ---
 
