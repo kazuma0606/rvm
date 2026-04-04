@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
 > 最終更新: 2026-04-04
-> テスト総数: 199本（全通過）
+> テスト総数: 236本（全通過）
 
 ---
 
@@ -65,9 +65,22 @@
 
 ## 設計済み・未実装 📐
 
-### モジュールシステム 📐
+### モジュールシステム（forge run）✅
 
-- **参照**: `forge/modules/spec.md` / `forge/modules/plan.md` / `forge/modules/tasks.md`
+| 機能 | 詳細 |
+|---|---|
+| M-0: ファイル解決 | `use ./path/module.symbol` / エイリアス / ワイルドカード |
+| M-1: pub 可視性 | 公開・非公開アクセス制御 |
+| M-2: mod.forge | ファサード・`pub use` re-export・深さ警告 |
+| M-3: 外部クレート | `use serde` → Cargo.toml 自動追記 |
+| M-4: 静的解析 | 循環参照検出・未使用インポート警告・シンボル衝突検出 |
+| M-5: when | 条件付きコンパイル（platform/feature/env/test） |
+| M-6: use raw | 生 Rust コード埋め込み（`forge run` ではスキップ） |
+| M-7: REPL | `:modules` / `:reload` / `:unload` |
+
+### トランスパイラ残タスク 📐
+
+- **参照**: `forge/transpiler/tasks.md`
 - **内容**:
   - M-0: `use ./path/module.symbol` ローカルファイル解決・エイリアス
   - M-1: `pub` 可視性（公開・非公開アクセス制御）
@@ -133,11 +146,9 @@
   │
 今すぐ着手可能
   │
-  ├─ [2] モジュールシステム実装（M-0〜M-7）
-  │       → forge/modules/tasks.md の M-0 から着手
-  │       → トランスパイラ対応（B-6）は M-2 以降と並走
+✅ [2] モジュールシステム実装（M-0〜M-7 完了）
   │
-  モジュール実装後
+今すぐ着手可能
   │
   ├─ [3] forge test + test "..." ブロック（M-5 when と連携）
   │
