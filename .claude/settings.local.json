@@ -16,7 +16,8 @@
       "Bash(./target/debug/forge-new transpile:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(git:*)"
     ]
   }
 }

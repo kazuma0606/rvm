@@ -26,8 +26,8 @@ where
 {
     let port = u16::try_from(port).map_err(|_| format!("invalid port: {}", port))?;
     let handler = Arc::new(handler);
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|err| format!("tokio runtime failed: {}", err))?;
+    let rt =
+        tokio::runtime::Runtime::new().map_err(|err| format!("tokio runtime failed: {}", err))?;
     rt.block_on(async_tcp_listen(port, handler))
 }
 
@@ -43,8 +43,8 @@ where
 {
     let port = u16::try_from(port).map_err(|_| format!("invalid port: {}", port))?;
     let handler = Arc::new(handler);
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|err| format!("tokio runtime failed: {}", err))?;
+    let rt =
+        tokio::runtime::Runtime::new().map_err(|err| format!("tokio runtime failed: {}", err))?;
     rt.block_on(async_tcp_listen_fut(port, handler))
 }
 
@@ -141,7 +141,13 @@ async fn read_request_async(stream: &mut tokio::net::TcpStream) -> Result<RawReq
     let body = String::from_utf8(body_bytes)
         .map_err(|err| format!("request body is not utf-8: {}", err))?;
 
-    Ok(RawRequest { method, path, query, headers, body })
+    Ok(RawRequest {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    })
 }
 
 async fn async_tcp_listen<F>(port: u16, handler: Arc<F>) -> Result<(), String>
