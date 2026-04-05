@@ -1,0 +1,12 @@
+data UserProfile {
+    name: string
+    age: number
+}
+
+fn main() {
+    let user = UserProfile { name: "{{name}}", age: 1 }
+    println(user.name)
+    println(user.age)
+}
+
+main()

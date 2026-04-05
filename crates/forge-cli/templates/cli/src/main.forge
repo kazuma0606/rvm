@@ -1,0 +1,11 @@
+fn greet(name: string) -> string {
+    "Hello, {name}!"
+}
+
+fn main() {
+    let command_name = "{{name}}"
+    println(greet(command_name))
+    println("TODO: parse command line arguments here")
+}
+
+main()

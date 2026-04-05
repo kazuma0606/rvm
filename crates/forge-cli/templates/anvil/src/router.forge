@@ -1,0 +1,3 @@
+pub fn route_count() -> number {
+    1
+}

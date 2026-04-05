@@ -1,0 +1,8 @@
+data Request {
+    method: string
+    path: string
+}
+
+pub fn new_request(method: string, path: string) -> Request {
+    Request { method: method, path: path }
+}

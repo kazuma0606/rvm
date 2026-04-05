@@ -1,5 +1,9 @@
-// forge-cli: ForgeScript CLI
+﻿// forge-cli: ForgeScript CLI
 // Phase 2-D 実装
+
+mod forge_toml;
+mod new;
+mod templates;
 
 use std::env;
 use std::fs;
@@ -7,6 +11,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::forge_toml::{DependencyValue, ForgeToml};
 use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
@@ -21,14 +26,36 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("run") => {
-            if let Some(path) = args.get(2) {
-                run_file(path);
-            } else {
-                eprintln!("エラー: ファイルパスを指定してください");
-                eprintln!("使用方法: forge run <file.forge>");
+        Some("new") => {
+            if args
+                .iter()
+                .skip(2)
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                print_new_help();
+                return;
+            }
+
+            let name = args
+                .iter()
+                .skip(2)
+                .find(|arg| !arg.starts_with('-'))
+                .map(|s| s.as_str());
+            let template = args
+                .iter()
+                .position(|a| a == "--template")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("script");
+            let git = args.iter().skip(2).any(|arg| arg == "--git");
+
+            if let Err(e) = new::run_with_options(name, template, git) {
+                eprintln!("エラー: {}", e);
                 std::process::exit(1);
             }
+        }
+        Some("run") => {
+            run_entry(args.get(2).map(|s| s.as_str()));
         }
         Some("check") => {
             if let Some(path) = args.get(2) {
@@ -53,32 +80,19 @@ fn main() {
             }
         }
         Some("build") => {
-            if let Some(path) = args.get(2) {
-                let output = args
-                    .iter()
-                    .position(|s| s == "-o")
-                    .and_then(|i| args.get(i + 1));
-                build_file(path, output.map(|s| s.as_str()));
-            } else {
-                eprintln!("エラー: ファイルパスを指定してください");
-                eprintln!("使用方法: forge build <file.forge> [-o binary]");
-                std::process::exit(1);
-            }
+            let output = args
+                .iter()
+                .position(|s| s == "-o")
+                .and_then(|i| args.get(i + 1));
+            build_entry(args.get(2).map(|s| s.as_str()), output.map(|s| s.as_str()));
         }
         Some("test") => {
-            if let Some(path) = args.get(2) {
-                // --filter オプションを手動でパース
-                let filter = args
-                    .iter()
-                    .position(|s| s == "--filter")
-                    .and_then(|i| args.get(i + 1))
-                    .map(|s| s.as_str());
-                test_file(path, filter);
-            } else {
-                eprintln!("エラー: ファイルパスを指定してください");
-                eprintln!("使用方法: forge test <file.forge> [--filter <pattern>]");
-                std::process::exit(1);
-            }
+            let filter = args
+                .iter()
+                .position(|s| s == "--filter")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            test_entry(args.get(2).map(|s| s.as_str()), filter);
         }
         Some("repl") => {
             run_repl();
@@ -119,6 +133,20 @@ fn run_file(path: &str) {
     if let Err(e) = interp.eval(&module) {
         eprintln!("実行エラー: {}", e);
         std::process::exit(1);
+    }
+}
+
+fn run_entry(path: Option<&str>) {
+    match resolve_project_request(path) {
+        Ok(ProjectRequest::File(file_path)) => run_file(&file_path.to_string_lossy()),
+        Ok(ProjectRequest::Project { project_dir, forge_toml }) => {
+            let entry = project_dir.join(forge_toml.package.entry);
+            run_file(&entry.to_string_lossy());
+        }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -413,19 +441,95 @@ fn transpile_file(path: &str, output: Option<&str>) {
     }
 }
 
-fn build_file(path: &str, output: Option<&str>) {
+fn build_entry(path: Option<&str>, output: Option<&str>) {
+    match resolve_build_request(path) {
+        Ok(BuildRequest::File(file_path)) => build_file(&file_path, output),
+        Ok(BuildRequest::Project { project_dir, forge_toml }) => {
+            build_project_with_forge_toml(&project_dir, &forge_toml, output)
+        }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn test_entry(path: Option<&str>, filter: Option<&str>) {
+    match resolve_project_request(path) {
+        Ok(ProjectRequest::File(file_path)) => test_file(&file_path.to_string_lossy(), filter),
+        Ok(ProjectRequest::Project { project_dir, .. }) => {
+            let tests_dir = project_dir.join("tests");
+            let test_files = collect_project_test_files(&tests_dir);
+            if test_files.is_empty() {
+                eprintln!("エラー: tests/*.test.forge が見つかりません");
+                std::process::exit(1);
+            }
+
+            for test_file_path in test_files {
+                test_file(&test_file_path.to_string_lossy(), filter);
+            }
+        }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn build_file(path: &Path, output: Option<&str>) {
+    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("エラー: ファイル名を解決できませんでした: {}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let output_path = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/forge").join(&stem));
+
+    build_generated_project(path, &stem, "0.1.0", "2021", output_path, None);
+}
+
+fn build_project_with_forge_toml(project_dir: &Path, forge_toml: &ForgeToml, output: Option<&str>) {
+    let entry_path = project_dir.join(&forge_toml.package.entry);
+    let edition = forge_toml
+        .build
+        .as_ref()
+        .map(|build| build.edition.as_str())
+        .unwrap_or("2021");
+    let output_path = match output {
+        Some(path) => PathBuf::from(path),
+        None => forge_toml
+            .build
+            .as_ref()
+            .and_then(|build| build.output.as_ref())
+            .map(|p| project_dir.join(p))
+            .unwrap_or_else(|| project_dir.join("target").join(&forge_toml.package.name)),
+    };
+
+    build_generated_project(
+        &entry_path,
+        &forge_toml.package.name,
+        &forge_toml.package.version,
+        edition,
+        output_path,
+        Some(forge_toml),
+    );
+}
+
+fn build_generated_project(
+    entry_path: &Path,
+    package_name: &str,
+    package_version: &str,
+    edition: &str,
+    output_path: PathBuf,
+    forge_toml: Option<&ForgeToml>,
+) {
     use std::process::Command;
 
-    let entry_path = Path::new(path);
-
-    let stem = entry_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("forge_out");
-
-    // 一時 Cargo プロジェクトを作成する
     let mut proj_dir = std::env::temp_dir();
-    proj_dir.push(format!("forge_build_{}_{}", stem, unique_suffix()));
+    proj_dir.push(format!("forge_build_{}_{}", package_name, unique_suffix()));
 
     if let Err(e) = fs::create_dir_all(proj_dir.join("src")) {
         eprintln!(
@@ -435,9 +539,11 @@ fn build_file(path: &str, output: Option<&str>) {
         std::process::exit(1);
     }
 
-    // Cargo.toml を生成
-    let cargo_toml = format!(
-        "[package]\nname = \"{stem}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nanyhow = \"1\"\n"
+    let cargo_toml = build_generated_cargo_toml(
+        package_name,
+        package_version,
+        edition,
+        forge_toml.map(|toml| &toml.dependencies),
     );
     if let Err(e) = fs::write(proj_dir.join("Cargo.toml"), cargo_toml) {
         eprintln!("エラー: Cargo.toml の書き込みに失敗しました: {}", e);
@@ -454,51 +560,63 @@ fn build_file(path: &str, output: Option<&str>) {
 
     format_generated_project(&proj_dir);
 
-    // 出力先バイナリパスを決定
-    let binary_name = output.unwrap_or(stem);
-    let out_dir = std::path::PathBuf::from("target/forge");
-    if let Err(e) = fs::create_dir_all(&out_dir) {
-        eprintln!("エラー: 出力ディレクトリを作成できませんでした: {}", e);
-        std::process::exit(1);
+    if let Some(parent) = output_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("エラー: 出力ディレクトリを作成できませんでした: {}", e);
+            std::process::exit(1);
+        }
     }
-    // 絶対パスにする
-    let out_dir_abs = match out_dir.canonicalize() {
-        Ok(p) => p,
-        Err(_) => out_dir.clone(),
+    let output_abs = if output_path.is_absolute() {
+        output_path
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(output_path),
+            Err(e) => {
+                eprintln!("エラー: カレントディレクトリを取得できませんでした: {}", e);
+                let _ = fs::remove_dir_all(&proj_dir);
+                std::process::exit(1);
+            }
+        }
     };
-    let binary_path = out_dir_abs.join(binary_name);
 
-    // cargo build --release を呼び出す
+    let manifest_path = match proj_dir.join("Cargo.toml").to_str() {
+        Some(p) => p.to_string(),
+        None => {
+            eprintln!("エラー: 一時ディレクトリのパスが UTF-8 ではありません");
+            let _ = fs::remove_dir_all(&proj_dir);
+            std::process::exit(1);
+        }
+    };
+
     let status = Command::new("cargo")
         .args([
             "build",
             "--offline",
             "--release",
             "--manifest-path",
-            proj_dir.join("Cargo.toml").to_str().unwrap_or(""),
+            &manifest_path,
         ])
         .status();
 
     match status {
         Ok(s) if s.success() => {
-            // バイナリを出力先にコピー
-            let built_bin = proj_dir.join(format!("target/release/{}", stem));
-            let built_bin_exe = proj_dir.join(format!("target/release/{}.exe", stem));
+            let built_bin = proj_dir.join(format!("target/release/{}", package_name));
+            let built_bin_exe = proj_dir.join(format!("target/release/{}.exe", package_name));
             let src_bin = if built_bin_exe.exists() {
                 built_bin_exe
             } else {
                 built_bin
             };
 
-            if let Err(e) = fs::copy(&src_bin, &binary_path) {
+            if let Err(e) = fs::copy(&src_bin, &output_abs) {
                 eprintln!("エラー: バイナリのコピーに失敗しました: {}", e);
                 eprintln!("  コピー元: {}", src_bin.display());
-                eprintln!("  コピー先: {}", binary_path.display());
+                eprintln!("  コピー先: {}", output_abs.display());
                 let _ = fs::remove_dir_all(&proj_dir);
                 std::process::exit(1);
             }
             let _ = fs::remove_dir_all(&proj_dir);
-            println!("ビルド成功: {}", binary_path.display());
+            println!("ビルド成功: {}", output_abs.display());
         }
         Ok(s) => {
             let _ = fs::remove_dir_all(&proj_dir);
@@ -515,6 +633,126 @@ fn build_file(path: &str, output: Option<&str>) {
             std::process::exit(1);
         }
     }
+}
+
+enum BuildRequest {
+    File(PathBuf),
+    Project { project_dir: PathBuf, forge_toml: ForgeToml },
+}
+
+enum ProjectRequest {
+    File(PathBuf),
+    Project { project_dir: PathBuf, forge_toml: ForgeToml },
+}
+
+fn resolve_project_request(path: Option<&str>) -> Result<ProjectRequest, String> {
+    let target = match path {
+        Some(path) => PathBuf::from(path),
+        None => env::current_dir().map_err(|e| e.to_string())?,
+    };
+
+    if target.is_file() {
+        return Ok(ProjectRequest::File(target));
+    }
+
+    let start = if target.exists() {
+        target
+    } else {
+        env::current_dir().map_err(|e| e.to_string())?.join(target)
+    };
+
+    let forge_toml_path = ForgeToml::find(&start)
+        .ok_or_else(|| format!("forge.toml が見つかりません: {}", start.display()))?;
+    let project_dir = forge_toml_path
+        .parent()
+        .ok_or_else(|| "forge.toml の親ディレクトリを解決できません".to_string())?
+        .to_path_buf();
+    let forge_toml = ForgeToml::load(&project_dir)?;
+
+    Ok(ProjectRequest::Project {
+        project_dir,
+        forge_toml,
+    })
+}
+
+fn resolve_build_request(path: Option<&str>) -> Result<BuildRequest, String> {
+    match resolve_project_request(path)? {
+        ProjectRequest::File(file_path) => Ok(BuildRequest::File(file_path)),
+        ProjectRequest::Project { project_dir, forge_toml } => Ok(BuildRequest::Project {
+            project_dir,
+            forge_toml,
+        }),
+    }
+}
+
+fn collect_project_test_files(tests_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if !tests_dir.is_dir() {
+        return files;
+    }
+
+    if let Ok(entries) = fs::read_dir(tests_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(".test.forge"))
+                    .unwrap_or(false)
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort();
+    files
+}
+
+fn build_generated_cargo_toml(
+    package_name: &str,
+    package_version: &str,
+    edition: &str,
+    manifest_deps: Option<&std::collections::BTreeMap<String, DependencyValue>>,
+) -> String {
+    let mut cargo_toml = format!(
+        "[package]\nname = \"{package_name}\"\nversion = \"{package_version}\"\nedition = \"{edition}\"\n\n[dependencies]\n"
+    );
+
+    let has_anyhow = manifest_deps
+        .map(|deps| deps.contains_key("anyhow"))
+        .unwrap_or(false);
+    if !has_anyhow {
+        cargo_toml.push_str("anyhow = \"1\"\n");
+    }
+
+    if let Some(deps) = manifest_deps {
+        for (name, dep) in deps {
+            let line = match dep {
+                DependencyValue::Version(version) => format!("{name} = \"{version}\""),
+                DependencyValue::Detailed { version, features } => {
+                    if features.is_empty() {
+                        format!("{name} = {{ version = \"{version}\" }}")
+                    } else {
+                        let features = features
+                            .iter()
+                            .map(|feature| format!("\"{}\"", feature))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "{name} = {{ version = \"{version}\", features = [{}] }}",
+                            features
+                        )
+                    }
+                }
+            };
+            cargo_toml.push_str(&line);
+            cargo_toml.push('\n');
+        }
+    }
+
+    cargo_toml
 }
 
 #[derive(Debug, Clone)]
@@ -567,13 +805,11 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
 
     write_synthesized_mod_files(out_src_dir, &module_index, &files)?;
 
-    update_generated_cargo_toml(
-        &out_src_dir
-            .parent()
-            .unwrap_or(out_src_dir)
-            .join("Cargo.toml"),
-        &deps,
-    )?;
+    let cargo_toml_path = out_src_dir
+        .parent()
+        .ok_or_else(|| format!("src ディレクトリの親を解決できません: {}", out_src_dir.display()))?
+        .join("Cargo.toml");
+    update_generated_cargo_toml(&cargo_toml_path, &deps)?;
 
     Ok(())
 }
@@ -586,11 +822,7 @@ fn detect_source_root(entry_path: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    if parent.file_name().and_then(|s| s.to_str()) == Some("src") {
-        Ok(parent.to_path_buf())
-    } else {
-        Ok(parent.to_path_buf())
-    }
+    Ok(parent.to_path_buf())
 }
 
 fn collect_forge_files(
@@ -788,7 +1020,10 @@ fn collect_external_deps(
                     .map(Path::to_path_buf)
                     .unwrap_or_default(),
             );
-            let first_segment = crate_name.split('/').next().unwrap_or(&crate_name);
+            let first_segment = match crate_name.split('/').next() {
+                Some(s) => s,
+                None => &crate_name,
+            };
             let local_file = current_dir.join(format!("{}.forge", first_segment));
             let local_dir = current_dir.join(first_segment);
             if local_file.exists() || local_dir.exists() {
@@ -859,13 +1094,16 @@ fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Re
 fn format_generated_project(proj_dir: &Path) {
     use std::process::Command;
 
+    let manifest_path = match proj_dir.join("Cargo.toml").to_str() {
+        Some(p) => p.to_string(),
+        None => {
+            eprintln!("警告: 一時ディレクトリのパスが UTF-8 ではないため整形をスキップします");
+            return;
+        }
+    };
+
     let status = Command::new("cargo")
-        .args([
-            "fmt",
-            "--all",
-            "--manifest-path",
-            proj_dir.join("Cargo.toml").to_str().unwrap_or(""),
-        ])
+        .args(["fmt", "--all", "--manifest-path", &manifest_path])
         .status();
 
     match status {
@@ -880,28 +1118,63 @@ fn format_generated_project(proj_dir: &Path) {
 }
 
 fn unique_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     let seq = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}_{}_{}", std::process::id(), ts, seq)
+    format!("{}_{}", std::process::id(), seq)
 }
 
 fn print_help() {
     println!("ForgeScript CLI");
     println!();
     println!("使用方法:");
+    println!("  forge new [name] [--template <name>]  新しいプロジェクトを作成");
     println!("  forge run <file.forge>              ファイルを読み込んで実行");
     println!("  forge test <file.forge>             インラインテストを実行");
     println!("  forge test <file.forge> --filter <pattern>  テスト名で絞り込み");
     println!("  forge check <file.forge>            型チェックのみ（実行しない）");
     println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
     println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");
-    println!("  forge build <file.forge>            ネイティブバイナリを生成");
+    println!("  forge build                         forge.toml からバイナリを生成");
+    println!("  forge build <dir/>                  指定ディレクトリの forge.toml を使用");
+    println!("  forge build <file.forge>            単一ファイルからバイナリを生成");
     println!("  forge build <file.forge> -o myapp   出力バイナリ名を指定");
     println!("  forge repl                          対話型 REPL を起動");
     println!("  forge help                          このヘルプを表示");
+}
+
+fn print_new_help() {
+    println!("forge new");
+    println!();
+    println!("使用方法:");
+    println!("  forge new [name] [--template <name>]");
+    println!();
+    println!("オプション:");
+    println!("  --template <name>   使用するテンプレート名（デフォルト: script）");
+    println!("  --git               生成後に git init を実行");
+    println!("  -h, --help          このヘルプを表示");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn build_generated_cargo_toml_includes_manifest_dependencies() {
+        let mut deps = BTreeMap::new();
+        deps.insert("serde".to_string(), DependencyValue::Version("1".to_string()));
+        deps.insert(
+            "tokio".to_string(),
+            DependencyValue::Detailed {
+                version: "1".to_string(),
+                features: vec!["full".to_string()],
+            },
+        );
+
+        let cargo_toml = build_generated_cargo_toml("demo", "0.2.0", "2024", Some(&deps));
+        assert!(cargo_toml.contains("name = \"demo\""));
+        assert!(cargo_toml.contains("version = \"0.2.0\""));
+        assert!(cargo_toml.contains("edition = \"2024\""));
+        assert!(cargo_toml.contains("serde = \"1\""));
+        assert!(cargo_toml.contains("tokio = { version = \"1\", features = [\"full\"] }"));
+    }
 }

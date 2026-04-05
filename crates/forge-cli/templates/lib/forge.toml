@@ -1,0 +1,5 @@
+[package]
+name = "{{name}}"
+version = "{{version}}"
+forge = "{{forge_version}}"
+entry = "src/lib.forge"

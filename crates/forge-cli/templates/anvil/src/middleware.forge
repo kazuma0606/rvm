@@ -1,0 +1,3 @@
+pub fn logger(method: string, path: string) {
+    println("[log] {method} {path}")
+}
