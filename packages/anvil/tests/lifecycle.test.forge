@@ -1,0 +1,9 @@
+use ./lifecycle.*
+
+test "lifecycle: parse authorize handle" {
+    assert_eq(request_lifecycle_demo()?, "/lifecycle demo 1")
+}
+
+test "lifecycle: skip auth keeps public provider" {
+    assert_eq(request_lifecycle_skip_auth_demo()?, "/public public 1")
+}

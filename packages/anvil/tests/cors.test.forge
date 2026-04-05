@@ -1,0 +1,40 @@
+use forge/std/net.{ RawRequest }
+use ./anvil.*
+use ./cors.*
+use ./request.*
+use ./response.*
+use ./router.*
+
+fn ok_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("ok"))
+}
+
+test "cors: preflight に Access-Control-Allow-Origin が付く" {
+    let app = Anvil::new().use(cors(CorsOptions::any())).get("/users", ok_handler)
+    let raw = RawRequest {
+        method: "OPTIONS",
+        path: "/users",
+        query: {},
+        headers: {"Origin": "https://example.com"},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.headers.get("Access-Control-Allow-Origin"), some("*"))
+    assert_eq(response.headers.get("Access-Control-Allow-Methods"), some("GET, POST, PUT, DELETE, PATCH, OPTIONS"))
+}
+
+test "cors: CorsOptions::origin() で特定オリジンのみ許可される" {
+    let app = Anvil::new().use(cors(CorsOptions::origin("https://app.example.com"))).get("/users", ok_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/users",
+        query: {},
+        headers: {"Origin": "https://app.example.com"},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.headers.get("Access-Control-Allow-Origin"), some("https://app.example.com"))
+    assert_eq(response.headers.get("Access-Control-Allow-Credentials"), some("true"))
+}

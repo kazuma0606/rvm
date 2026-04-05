@@ -1,0 +1,29 @@
+use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
+use ./anvil.*
+use ./request.*
+use ./response.*
+
+// モジュールレベルのアプリケーションインスタンス
+let APP = Anvil::new().get("/", hello_handler)
+
+fn hello_handler(req: Request<string>) -> Response<string>! {
+    // ここで .await? を使うと async fn に自動昇格する（Forge transpiler が処理）
+    let response: Response<string> = Response::text("Hello, Anvil! {req.method} {req.path}")
+    ok(response)
+}
+
+// 名前付き dispatch 関数 — クロージャではないため .await? が使える
+// APP.dispatch_async が .await? を含むので、この関数も async fn に自動昇格する
+fn dispatch(raw: RawRequest) -> RawResponse! {
+    APP.dispatch_async(raw).await?
+}
+
+fn main() -> number! {
+    println("Listening on http://localhost:3000")
+    // tcp_listen_async は内部で tokio ランタイムを起動するブロッキング関数。
+    // async fn ではないので .await は不要（? のみで OK）
+    tcp_listen_async(3000, dispatch)?
+    ok(0)
+}
+
+main()?

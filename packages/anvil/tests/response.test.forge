@@ -1,0 +1,28 @@
+use ./response.{ Response }
+
+test "response: text" {
+    let res = Response::text("hello")
+    assert_eq(res.status, 200)
+    assert_eq(res.body, some("hello"))
+    assert_eq(res.headers.len(), 0)
+}
+
+test "response: json" {
+    let res = Response::json("hello")
+    assert_eq(res.status, 200)
+    assert_eq(res.body, some("hello"))
+    assert_eq(res.headers.get("Content-Type"), some("application/json"))
+}
+
+test "response: status chain" {
+    let res = Response::text("hello").status(201)
+    assert_eq(res.status, 201)
+    assert_eq(res.body, some("hello"))
+}
+
+test "response: header chain" {
+    let res = Response::text("hello").header("X-Test", "1")
+    assert_eq(res.status, 200)
+    assert_eq(res.headers.get("X-Test"), some("1"))
+    assert_eq(res.body, some("hello"))
+}

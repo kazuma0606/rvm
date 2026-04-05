@@ -1,0 +1,225 @@
+use ./auth.*
+use ./request.*
+use ./response.*
+
+pub data Middleware {
+    run: fn(Request<string>, fn(Request<string>) -> Response<string>!) -> Response<string>!
+    kind: string
+    value: string?
+    items: list<string>
+    extra_items: list<string>
+    flag: bool
+    max_age: number?
+}
+
+pub fn middleware_passthrough(
+    req: Request<string>,
+    next: fn(Request<string>) -> Response<string>!,
+) -> Response<string>! {
+    next(req)
+}
+
+pub fn logger() -> Middleware {
+    let items: list<string> = []
+    let extra_items: list<string> = []
+    Middleware {
+        run: middleware_passthrough,
+        kind: "logger",
+        value: none(),
+        items: items,
+        extra_items: extra_items,
+        flag: false,
+        max_age: none(),
+    }
+}
+
+pub fn json_parser() -> Middleware {
+    let items: list<string> = []
+    let extra_items: list<string> = []
+    Middleware {
+        run: middleware_passthrough,
+        kind: "json_parser",
+        value: none(),
+        items: items,
+        extra_items: extra_items,
+        flag: false,
+        max_age: none(),
+    }
+}
+
+pub fn static_files(dir: string) -> Middleware {
+    let items: list<string> = []
+    let extra_items: list<string> = []
+    Middleware {
+        run: middleware_passthrough,
+        kind: "static_files",
+        value: some(dir),
+        items: items,
+        extra_items: extra_items,
+        flag: false,
+        max_age: none(),
+    }
+}
+
+pub fn encode_auth_tokens(tokens: map<string, AuthContext>) -> list<string> {
+    state out: list<string> = []
+    for token in tokens.keys() {
+        let key = string(token)
+        let ctx = tokens.get(key).unwrap_or(AuthContext {
+            user_id: "",
+            roles: [],
+        })
+        out.push("{key}|{auth_context_to_header(ctx)}")
+    }
+    out
+}
+
+pub fn decode_auth_tokens(items: list<string>) -> map<string, AuthContext> {
+    state out: map<string, AuthContext> = {}
+    for item in items {
+        let parts = item.split("|")
+        if len(parts) >= 3 {
+            let token = parts[0].clone()
+            let user_id = parts[1].clone()
+            let roles = split_roles(parts[2].clone())
+            out.insert(token, AuthContext {
+                user_id: user_id,
+                roles: roles,
+            })
+        }
+    }
+    out
+}
+
+pub fn handle_auth_error(message: string) -> Response<ErrorBody>! {
+    let code = if message.contains("forbidden") { 403 } else { 401 }
+    ok(Response::json(ErrorBody {
+        message: message,
+        code: code,
+    }).status(code))
+}
+
+pub fn auth_middleware(provider: BearerAuthProvider) -> Middleware {
+    let items = encode_auth_tokens(provider.tokens)
+    let extra_items: list<string> = []
+    Middleware {
+        run: middleware_passthrough,
+        kind: "auth",
+        value: none(),
+        items: items,
+        extra_items: extra_items,
+        flag: false,
+        max_age: none(),
+    }
+}
+
+pub fn settings_auth_middleware(provider: SettingsAuthProvider) -> Middleware {
+    auth_middleware(provider.inner)
+}
+
+pub fn require_role(role: string) -> Middleware {
+    let items: list<string> = []
+    let extra_items: list<string> = []
+    Middleware {
+        run: middleware_passthrough,
+        kind: "require_role",
+        value: some(role),
+        items: items,
+        extra_items: extra_items,
+        flag: false,
+        max_age: none(),
+    }
+}
+
+pub fn append_middleware_trace(req: Request<string>, label: string) -> Request<string> {
+    let current = match req.clone().header("X-Forge-Middleware-Trace") {
+        some(value) => value,
+        none        => "",
+    }
+    let next = if current == "" {
+        label
+    } else {
+        "{current},{label}"
+    }
+    state headers = req.headers
+    headers.insert("X-Forge-Middleware-Trace", next)
+    request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+}
+
+pub fn apply_request_middleware(req: Request<string>, middleware: Middleware) -> Request<string> {
+    if middleware.kind == "logger" {
+        append_middleware_trace(req, "logger")
+    } else if middleware.kind == "json_parser" {
+        let traced = append_middleware_trace(req, "json_parser")
+        let content_type = match traced.clone().header("Content-Type") {
+            some(value) => value,
+            none        => "",
+        }
+        if content_type.contains("application/json") {
+            state headers = traced.headers
+            headers.insert("X-Forge-Json-Parsed", "1")
+            request_from_parts(traced.method, traced.path, headers, traced.params, traced.query, traced.raw_body)
+        } else {
+            traced
+        }
+    } else if middleware.kind == "static_files" {
+        let label = match middleware.value {
+            some(value) => "static_files:{value}",
+            none        => "static_files",
+        }
+        append_middleware_trace(req, label)
+    } else if middleware.kind == "auth" {
+        let provider = BearerAuthProvider {
+            tokens: decode_auth_tokens(middleware.items),
+        }
+        match provider.authenticate(req.clone()) {
+            ok(ctx) => {
+                state headers = req.headers
+                headers.insert("X-Auth-Context", auth_context_to_header(ctx))
+                request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+            }
+            err(message) => {
+                state headers = req.headers
+                headers.insert("X-Forge-Auth-Error", string(message))
+                request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+            }
+        }
+    } else if middleware.kind == "require_role" {
+        let required_role = middleware.value.unwrap_or("")
+        let encoded = req.clone().header("X-Auth-Context")
+        match encoded {
+            some(value) => match auth_context_from_header(value) {
+                ok(ctx) => {
+                    if roles_include(ctx.roles, required_role.clone()) {
+                        req
+                    } else {
+                        state headers = req.headers
+                        headers.insert("X-Forge-Auth-Error", "forbidden: role '{required_role}' required")
+                        request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+                    }
+                }
+                err(message) => {
+                    state headers = req.headers
+                    headers.insert("X-Forge-Auth-Error", string(message))
+                    request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+                }
+            }
+            none => {
+                state headers = req.headers
+                headers.insert("X-Forge-Auth-Error", "forbidden: role '{required_role}' required")
+                request_from_parts(req.method, req.path, headers, req.params, req.query, req.raw_body)
+            }
+        }
+    } else {
+        req
+    }
+}
+
+pub fn apply_response_middleware(req: Request<string>, middleware: Middleware, response: Response<string>) -> Response<string> {
+    if middleware.kind == "logger" {
+        println("{req.method} {req.path} -> {response.status}")
+        response
+    } else {
+        response
+    }
+}

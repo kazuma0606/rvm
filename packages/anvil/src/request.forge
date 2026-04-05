@@ -1,0 +1,51 @@
+pub data Request<T> {
+    method: string
+    path: string
+    headers: map<string, string>
+    params: map<string, string>
+    query: map<string, string>
+    raw_body: string
+}
+
+pub fn new_request(method: string, path: string, raw_body: string) -> Request<string> {
+    let headers: map<string, string> = {}
+    let params: map<string, string> = {}
+    let query: map<string, string> = {}
+    Request {
+        method: method,
+        path: path,
+        headers: headers,
+        params: params,
+        query: query,
+        raw_body: raw_body,
+    }
+}
+
+pub fn request_from_parts(
+    method: string,
+    path: string,
+    headers: map<string, string>,
+    params: map<string, string>,
+    query: map<string, string>,
+    raw_body: string,
+) -> Request<string> {
+    Request {
+        method: method,
+        path: path,
+        headers: headers,
+        params: params,
+        query: query,
+        raw_body: raw_body,
+    }
+}
+
+impl<T> Request<T> {
+    fn header(state self, name: string) -> string? {
+        let headers: map<string, string> = self.headers
+        headers.get(name)
+    }
+
+    fn body(state self) -> T! {
+        err(self.raw_body)
+    }
+}

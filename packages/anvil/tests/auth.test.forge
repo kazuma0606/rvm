@@ -1,0 +1,174 @@
+use forge/std/net.{ RawRequest }
+use ./anvil.*
+use ./auth.*
+use ./middleware.*
+use ./request.*
+use ./response.*
+use ./router.*
+
+fn secure_handler(req: Request<string>) -> Response<string>! {
+    let ctx = match req.header("X-Auth-Context") {
+        some(value) => value,
+        none        => err("missing auth header")?,
+    }
+    ok(Response::text(ctx))
+}
+
+fn admin_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("admin:{req.path}"))
+}
+
+fn make_bearer_provider() -> BearerAuthProvider {
+    BearerAuthProvider {
+        tokens: {
+            "valid-token": AuthContext { user_id: "user1", roles: ["user"] },
+            "admin-token": AuthContext { user_id: "admin1", roles: ["admin", "user"] },
+        },
+    }
+}
+
+test "BearerAuthProvider: 有効なトークンで認証成功" {
+    let provider = make_bearer_provider()
+    let req = request_from_parts(
+        "GET",
+        "/",
+        {"Authorization": "Bearer valid-token"},
+        {},
+        {},
+        "",
+    )
+    let result = provider.authenticate(req)
+    match result {
+        ok(ctx) => {
+            assert_eq(ctx.user_id, "user1")
+            assert_eq(roles_include(ctx.roles, "user"), true)
+        }
+        err(_) => assert(false),
+    }
+}
+
+test "BearerAuthProvider: 無効なトークンで認証失敗" {
+    let provider = BearerAuthProvider { tokens: {} }
+    let req = request_from_parts(
+        "GET",
+        "/",
+        {"Authorization": "Bearer invalid"},
+        {},
+        {},
+        "",
+    )
+    assert_err(provider.authenticate(req))
+}
+
+test "BearerAuthProvider: Authorization ヘッダなしで認証失敗" {
+    let provider = make_bearer_provider()
+    let req = new_request("GET", "/", "")
+    let result = provider.authenticate(req)
+    match result {
+        ok(_) => assert(false),
+        err(_) => assert(true),
+    }
+}
+
+test "BearerAuthProvider: Bearer プレフィックスなしで認証失敗" {
+    let provider = make_bearer_provider()
+    let req = request_from_parts(
+        "GET",
+        "/",
+        {"Authorization": "Token valid-token"},
+        {},
+        {},
+        "",
+    )
+    let result = provider.authenticate(req)
+    match result {
+        ok(_) => assert(false),
+        err(_) => assert(true),
+    }
+}
+
+test "SettingsAuthProvider: load" {
+    let provider = SettingsAuthProvider::load()?
+    let req = request_from_parts(
+        "GET",
+        "/",
+        {"Authorization": "Bearer dev-token-abc123"},
+        {},
+        {},
+        "",
+    )
+    let result = provider.authenticate(req)?
+    assert_eq(result.user_id, "dev-user")
+    assert_eq(roles_include(result.roles, "admin"), true)
+}
+
+test "auth_middleware: success" {
+    let app = Anvil::new()
+        .use(auth_middleware(make_bearer_provider()))
+        .get("/secure", secure_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/secure",
+        query: {},
+        headers: {"Authorization": "Bearer valid-token"},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert(response.body.contains("user1|user"))
+}
+
+test "auth_middleware: failure" {
+    let app = Anvil::new()
+        .use(auth_middleware(make_bearer_provider()))
+        .get("/secure", secure_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/secure",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 401)
+    assert(response.body.contains("unauthorized"))
+}
+
+test "handle_auth_error: forbidden は 403" {
+    let response = handle_auth_error("forbidden: role 'admin' required")?
+    assert_eq(response.status, 403)
+}
+
+test "require_role: 必要ロールなしで 403" {
+    let app = Anvil::new()
+        .use(auth_middleware(make_bearer_provider()))
+        .use(require_role("admin"))
+        .get("/admin", admin_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/admin",
+        query: {},
+        headers: {"Authorization": "Bearer valid-token"},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 403)
+    assert(response.body.contains("forbidden"))
+}
+
+test "require_role: ロールありで成功" {
+    let app = Anvil::new()
+        .use(auth_middleware(make_bearer_provider()))
+        .use(require_role("admin"))
+        .get("/admin", admin_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/admin",
+        query: {},
+        headers: {"Authorization": "Bearer admin-token"},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "admin:/admin")
+}

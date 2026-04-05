@@ -26,3 +26,4 @@ Cargo.lock
 # Misc
 .env
 .env.local
+packages/*/settings.json

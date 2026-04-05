@@ -1,0 +1,57 @@
+use ./request.*
+use ./response.*
+use ./router.*
+
+pub data LifecycleAuthProvider {
+    name: string
+}
+
+impl LifecycleAuthProvider {
+    fn public() -> LifecycleAuthProvider {
+        LifecycleAuthProvider { name: "public" }
+    }
+}
+
+typestate RequestLifecycle {
+    req: Request<string>
+    provider: LifecycleAuthProvider
+    router: Router
+    states: [Raw, Parsed, Authorized, Handled]
+
+    Raw {
+        fn parse() -> Parsed
+    }
+
+    Parsed {
+        fn authorize(provider: LifecycleAuthProvider) -> Authorized!
+        fn skip_auth() -> Authorized
+    }
+
+    Authorized {
+        fn handle(router: Router) -> Handled!
+    }
+}
+
+fn lifecycle_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("handled:{req.path}"))
+}
+
+pub fn request_lifecycle_demo() -> string! {
+    let req = new_request("GET", "/lifecycle", "")
+    let lifecycle = RequestLifecycle::new<Raw>(req, LifecycleAuthProvider::public(), Router::new())
+    let parsed = lifecycle.parse()
+    let authorized = parsed.authorize(LifecycleAuthProvider { name: "demo" })?
+    let router = Router::new().get("/lifecycle", lifecycle_handler)
+    let handled = authorized.handle(router)?
+    ok("{handled.req.path} {handled.provider.name} {len(handled.router.routes)}")
+}
+
+pub fn request_lifecycle_skip_auth_demo() -> string! {
+    let req = new_request("GET", "/public", "")
+    let lifecycle = RequestLifecycle::new<Raw>(req, LifecycleAuthProvider::public(), Router::new())
+    let parsed = lifecycle.parse()
+    let authorized = parsed.skip_auth()
+    let router = Router::new().get("/public", lifecycle_handler)
+    let handled = authorized.handle(router)?
+    ok("{handled.req.path} {handled.provider.name} {len(handled.router.routes)}")
+}
