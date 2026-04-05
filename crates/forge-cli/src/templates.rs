@@ -19,17 +19,26 @@ const SCRIPT_FILES: &[(&str, &str)] = &[
 
 const CLI_FILES: &[(&str, &str)] = &[
     ("forge.toml", include_str!("../templates/cli/forge.toml")),
-    ("src/main.forge", include_str!("../templates/cli/src/main.forge")),
+    (
+        "src/main.forge",
+        include_str!("../templates/cli/src/main.forge"),
+    ),
 ];
 
 const LIB_FILES: &[(&str, &str)] = &[
     ("forge.toml", include_str!("../templates/lib/forge.toml")),
-    ("src/lib.forge", include_str!("../templates/lib/src/lib.forge")),
+    (
+        "src/lib.forge",
+        include_str!("../templates/lib/src/lib.forge"),
+    ),
 ];
 
 const DATA_FILES: &[(&str, &str)] = &[
     ("forge.toml", include_str!("../templates/data/forge.toml")),
-    ("src/main.forge", include_str!("../templates/data/src/main.forge")),
+    (
+        "src/main.forge",
+        include_str!("../templates/data/src/main.forge"),
+    ),
 ];
 
 const ANVIL_FILES: &[(&str, &str)] = &[
@@ -140,7 +149,10 @@ pub fn write_template(
 }
 
 pub fn get_template(name: &str) -> Option<&'static Template> {
-    TEMPLATES.iter().find(|template| template.name == name).copied()
+    TEMPLATES
+        .iter()
+        .find(|template| template.name == name)
+        .copied()
 }
 
 pub fn available_template_names() -> Vec<&'static str> {

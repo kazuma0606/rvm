@@ -51,7 +51,10 @@ fn e2e_run_directory_uses_forge_toml_entry() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "run via forge toml\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "run via forge toml\n"
+    );
 
     let _ = std::fs::remove_dir_all(project_dir);
 }

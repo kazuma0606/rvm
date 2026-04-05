@@ -58,7 +58,10 @@ fn e2e_build_directory_uses_forge_toml() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(project_dir.join("dist/demo-app.exe").exists() || project_dir.join("dist/demo-app").exists());
+    assert!(
+        project_dir.join("dist/demo-app.exe").exists()
+            || project_dir.join("dist/demo-app").exists()
+    );
 
     let _ = std::fs::remove_dir_all(project_dir);
 }
@@ -79,7 +82,10 @@ fn e2e_build_uses_current_directory_forge_toml() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(project_dir.join("target/demo-app.exe").exists() || project_dir.join("target/demo-app").exists());
+    assert!(
+        project_dir.join("target/demo-app.exe").exists()
+            || project_dir.join("target/demo-app").exists()
+    );
 
     let _ = std::fs::remove_dir_all(project_dir);
 }

@@ -26,7 +26,7 @@ pub fn try_builtin_call(name: &str, args: &[String]) -> Option<String> {
         }
         "len" => {
             let arg = args.first().map(|s| s.as_str()).unwrap_or("\"\"");
-            Some(format!("{}.len()", arg))
+            Some(format!("{}.len() as i64", arg))
         }
         "type_of" => {
             let arg = args.first().map(|s| s.as_str()).unwrap_or("\"\"");

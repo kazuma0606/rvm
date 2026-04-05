@@ -157,6 +157,7 @@ impl Parser {
             TokenKind::Ok => "ok".to_string(),
             TokenKind::Err => "err".to_string(),
             TokenKind::SelfVal => "self".to_string(),
+            TokenKind::Use => "use".to_string(),
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "identifier".to_string(),
@@ -248,6 +249,7 @@ impl Parser {
     fn parse_pub_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.expect_token(&TokenKind::Pub)?;
         match self.peek_kind().clone() {
+            TokenKind::At => self.parse_annotated_stmt_with_pub(true),
             TokenKind::Use => self.parse_use_decl(true),
             TokenKind::Fn => self.parse_fn_with_pub(true),
             TokenKind::Let => self.parse_let_with_pub(true),
@@ -265,6 +267,50 @@ impl Parser {
                 Err(ParseError::UnexpectedToken {
                     expected: "use, fn, let, const, struct, enum, data, trait, または mixin"
                         .to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    fn parse_annotated_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
+        let mut derives = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::At) {
+            self.advance();
+            let (ann_name, ann_span) = self.expect_ident()?;
+            if ann_name != "derive" {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "@derive".to_string(),
+                    found: TokenKind::Ident(ann_name),
+                    span: ann_span,
+                });
+            }
+            self.expect_token(&TokenKind::LParen)?;
+            loop {
+                let (name, _) = self.expect_ident()?;
+                derives.push(name);
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            self.expect_token(&TokenKind::RParen)?;
+            self.skip_sep();
+        }
+
+        match self.peek_kind().clone() {
+            TokenKind::Struct => self.parse_struct_def_with_pub(derives, is_pub),
+            TokenKind::Ident(ref name) if name == "enum" => {
+                self.advance();
+                self.parse_enum_def_body_with_pub(derives, is_pub)
+            }
+            TokenKind::Typestate => self.parse_typestate_def_with_meta(derives),
+            _ => {
+                let tok = self.peek().clone();
+                Err(ParseError::UnexpectedToken {
+                    expected: "struct or enum or typestate after annotation".to_string(),
                     found: tok.kind,
                     span: tok.span,
                 })
@@ -645,7 +691,7 @@ impl Parser {
     fn parse_fn_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Fn)?;
-        let (name, _) = self.expect_ident()?;
+        let (name, _) = self.expect_name()?;
         let type_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LParen)?;
 
@@ -710,6 +756,26 @@ impl Parser {
                 self.advance();
                 self.expect_token(&TokenKind::RParen)?;
                 TypeAnn::Unit
+            }
+            TokenKind::Fn => {
+                self.advance();
+                self.expect_token(&TokenKind::LParen)?;
+                let mut params = Vec::new();
+                while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                    params.push(self.parse_type_ann()?);
+                    if matches!(self.peek_kind(), TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect_token(&TokenKind::RParen)?;
+                self.expect_token(&TokenKind::ThinArrow)?;
+                let return_type = self.parse_type_ann()?;
+                TypeAnn::Fn {
+                    params,
+                    return_type: Box::new(return_type),
+                }
             }
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
@@ -1547,6 +1613,7 @@ impl Parser {
         self.expect_token(&TokenKind::LParen)?;
 
         let mut params = Vec::new();
+        let mut has_self = false;
         let mut has_state_self = false;
 
         // 最初のパラメータが `state self` または `self` の場合を処理
@@ -1554,6 +1621,7 @@ impl Parser {
             self.advance(); // consume 'state'
             if matches!(self.peek_kind(), TokenKind::SelfVal) {
                 self.advance(); // consume 'self'
+                has_self = true;
                 has_state_self = true;
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
@@ -1561,6 +1629,7 @@ impl Parser {
             }
         } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
             self.advance(); // consume 'self'
+            has_self = true;
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.advance();
             }
@@ -1600,6 +1669,7 @@ impl Parser {
                 params,
                 return_type,
                 body: Box::new(body),
+                has_self,
                 has_state_self,
                 span,
             })
@@ -1612,6 +1682,7 @@ impl Parser {
                 name,
                 params,
                 return_type,
+                has_self,
                 span,
             })
         }
@@ -1650,7 +1721,6 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Impl)?;
         let type_params = self.parse_type_params()?;
-
         let first_name = self.expect_ident()?.0;
         let first_type_args = self.parse_type_args()?;
 
@@ -1799,27 +1869,29 @@ impl Parser {
     fn parse_impl_block(&mut self) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Impl)?;
+        let type_params = self.parse_type_params()?;
 
-        // impl Name { ... }  または  impl Trait for Name { ... }
         let first_name = self.expect_ident()?.0;
+        let first_type_args = self.parse_type_args()?;
 
-        let (target, trait_name) = if matches!(self.peek_kind(), TokenKind::Ident(_)) {
-            // impl Trait for Name
-            let tok = self.peek().clone();
-            if let TokenKind::Ident(ref s) = tok.kind {
-                if s == "for" {
-                    self.advance(); // consume 'for'
-                    let (target, _) = self.expect_ident()?;
-                    (target, Some(first_name))
+        let (target, target_type_args, trait_name) =
+            if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                let tok = self.peek().clone();
+                if let TokenKind::Ident(ref s) = tok.kind {
+                    if s == "for" {
+                        self.advance();
+                        let (target, _) = self.expect_ident()?;
+                        let target_type_args = self.parse_type_args()?;
+                        (target, target_type_args, Some(first_name))
+                    } else {
+                        (first_name, first_type_args, None)
+                    }
                 } else {
-                    (first_name, None)
+                    (first_name, first_type_args, None)
                 }
             } else {
-                (first_name, None)
-            }
-        } else {
-            (first_name, None)
-        };
+                (first_name, first_type_args, None)
+            };
 
         self.expect_token(&TokenKind::LBrace)?;
 
@@ -1835,23 +1907,23 @@ impl Parser {
         self.expect_token(&TokenKind::RBrace)?;
         Ok(Stmt::ImplBlock {
             target,
-            type_params: vec![],
-            target_type_args: vec![],
+            type_params,
+            target_type_args,
             trait_name,
             methods,
             span,
         })
     }
-
     /// impl ブロック内の fn 定義をパース
     fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Fn)?;
-        let (name, _) = self.expect_ident()?;
+        let (name, _) = self.expect_name()?;
         let type_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LParen)?;
 
         let mut params = Vec::new();
+        let mut has_self = false;
         let mut has_state_self = false;
 
         // 最初のパラメータが `state self` または `self` の場合を処理
@@ -1859,6 +1931,7 @@ impl Parser {
             self.advance(); // consume 'state'
             if matches!(self.peek_kind(), TokenKind::SelfVal) {
                 self.advance(); // consume 'self'
+                has_self = true;
                 has_state_self = true;
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
@@ -1866,6 +1939,7 @@ impl Parser {
             }
         } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
             self.advance(); // consume 'self'
+            has_self = true;
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.advance();
             }
@@ -1904,6 +1978,7 @@ impl Parser {
             params,
             return_type,
             body: Box::new(body),
+            has_self,
             has_state_self,
             span,
         })
@@ -2240,6 +2315,7 @@ impl Parser {
         let span = self.current_span();
         self.expect_token(&TokenKind::Data)?;
         let (name, _) = self.expect_ident()?;
+        let generic_params = self.parse_type_params()?;
         self.expect_token(&TokenKind::LBrace)?;
 
         let mut fields: Vec<(String, TypeAnn)> = Vec::new();
@@ -2269,6 +2345,7 @@ impl Parser {
 
         Ok(Stmt::DataDef {
             name,
+            generic_params,
             fields,
             validate_rules,
             is_pub,
@@ -2487,12 +2564,14 @@ impl Parser {
         self.expect_token(&TokenKind::LParen)?;
 
         let mut params = Vec::new();
+        let mut has_self = false;
         let mut has_state_self = false;
 
         if matches!(self.peek_kind(), TokenKind::State) {
             self.advance();
             if matches!(self.peek_kind(), TokenKind::SelfVal) {
                 self.advance();
+                has_self = true;
                 has_state_self = true;
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
@@ -2500,6 +2579,7 @@ impl Parser {
             }
         } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
             self.advance();
+            has_self = true;
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.advance();
             }
@@ -2549,6 +2629,7 @@ impl Parser {
             params,
             return_type,
             body: Box::new(body),
+            has_self,
             has_state_self,
             span,
         })
@@ -3153,6 +3234,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_use_method_call() {
+        match first_stmt("app.use(logger())") {
+            Stmt::Expr(Expr::MethodCall { method, .. }) => {
+                assert_eq!(method, "use");
+            }
+            other => panic!("expected MethodCall, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_question_op() {
         match first_stmt("parse(s)?") {
             Stmt::Expr(Expr::Question(inner, _)) => {
@@ -3246,7 +3337,10 @@ mod tests {
                 assert_eq!(*key, TypeAnn::String);
                 assert_eq!(*value, TypeAnn::Number);
             }
-            other => panic!("expected Let with Map(String, Number) type, got {:?}", other),
+            other => panic!(
+                "expected Let with Map(String, Number) type, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3314,7 +3408,10 @@ mod tests {
                 assert_eq!(name, "Response");
                 assert_eq!(args, vec![TypeAnn::String]);
             }
-            other => panic!("expected Let with Generic(Response<String>) type, got {:?}", other),
+            other => panic!(
+                "expected Let with Generic(Response<String>) type, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3356,16 +3453,38 @@ mod tests {
     fn test_parse_type_ann_fn() {
         match first_stmt("let f: string => bool = none") {
             Stmt::Let {
-                type_ann: Some(TypeAnn::Fn {
-                    params,
-                    return_type,
-                }),
+                type_ann:
+                    Some(TypeAnn::Fn {
+                        params,
+                        return_type,
+                    }),
                 ..
             } => {
                 assert_eq!(params, vec![TypeAnn::String]);
                 assert_eq!(*return_type, TypeAnn::Bool);
             }
             other => panic!("expected Let with Fn(String => Bool) type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ann_fn_multi_param() {
+        match first_stmt("let f: fn(string, number) -> bool = none") {
+            Stmt::Let {
+                type_ann:
+                    Some(TypeAnn::Fn {
+                        params,
+                        return_type,
+                    }),
+                ..
+            } => {
+                assert_eq!(params, vec![TypeAnn::String, TypeAnn::Number]);
+                assert_eq!(*return_type, TypeAnn::Bool);
+            }
+            other => panic!(
+                "expected Let with fn(String, Number) -> Bool type, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3505,6 +3624,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_pub_struct_derive() {
+        match first_stmt("pub @derive(Clone) struct Route { method: string }") {
+            Stmt::StructDef {
+                name,
+                derives,
+                is_pub,
+                ..
+            } => {
+                assert_eq!(name, "Route");
+                assert_eq!(derives, vec!["Clone".to_string()]);
+                assert!(is_pub);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_generic_struct_single() {
         match first_stmt("struct Response<T> { status: number, body: T }") {
             Stmt::StructDef {
@@ -3574,7 +3710,11 @@ mod tests {
                 name,
                 type_params,
                 params,
-                return_type: Some(TypeAnn::Generic { name: ret_name, args }),
+                return_type:
+                    Some(TypeAnn::Generic {
+                        name: ret_name,
+                        args,
+                    }),
                 ..
             } => {
                 assert_eq!(name, "wrap");

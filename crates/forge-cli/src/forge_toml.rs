@@ -86,7 +86,8 @@ fn parse_package(value: Option<&toml::Value>) -> Result<PackageSection, String> 
     let name = get_required_string(table, "name", "[package]")?;
     let version = get_required_string(table, "version", "[package]")?;
     let forge = get_optional_string(table, "forge")?;
-    let entry = get_optional_string(table, "entry")?.unwrap_or_else(|| "src/main.forge".to_string());
+    let entry =
+        get_optional_string(table, "entry")?.unwrap_or_else(|| "src/main.forge".to_string());
 
     Ok(PackageSection {
         name,

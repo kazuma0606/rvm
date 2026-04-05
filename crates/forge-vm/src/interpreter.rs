@@ -77,6 +77,7 @@ struct TypestateMethodInfo {
 /// typestate 型の定義情報
 #[derive(Debug, Clone)]
 struct TypestateInfo {
+    fields: Vec<(String, TypeAnn)>,
     states: Vec<String>,
     /// 状態名 → その状態のメソッド情報
     state_infos: HashMap<String, TypestateStateInfo>,
@@ -677,16 +678,23 @@ impl Interpreter {
             } => self.eval_impl_trait(trait_name.clone(), target.clone(), methods.clone()),
             Stmt::DataDef {
                 name,
+                generic_params: _,
                 fields,
                 validate_rules,
                 ..
             } => self.eval_data_def(name.clone(), fields.clone(), validate_rules.clone()),
             Stmt::TypestateDef {
                 name,
+                fields,
                 states,
                 state_methods,
                 ..
-            } => self.eval_typestate_def(name.clone(), states.clone(), state_methods.clone()),
+            } => self.eval_typestate_def(
+                name.clone(),
+                fields.clone(),
+                states.clone(),
+                state_methods.clone(),
+            ),
             Stmt::UseDecl { path, symbols, .. } => self.eval_use_decl(path, symbols),
             Stmt::UseRaw { .. } => {
                 // `forge run` では use raw ブロックをスキップして警告を出す（M-6-C）
@@ -1644,6 +1652,11 @@ impl Interpreter {
     }
 
     fn eval_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Value, RuntimeError> {
+        if let Expr::Ident(name, _) = callee {
+            if name == "none" && args.is_empty() {
+                return Ok(Value::Option(None));
+            }
+        }
         let callee_val = self.eval_expr(callee)?;
         let arg_vals: Vec<Value> = args
             .iter()
@@ -1770,10 +1783,38 @@ impl Interpreter {
             .map(|a| self.eval_expr(a))
             .collect::<Result<_, _>>()?;
 
+        if method == "clone" && arg_vals.is_empty() {
+            return Ok(obj.clone());
+        }
+
         match obj {
+            Value::Option(opt) => match method {
+                "is_some" => Ok(Value::Bool(opt.is_some())),
+                "is_none" => Ok(Value::Bool(opt.is_none())),
+                "unwrap_or" => {
+                    let fallback = arg_vals.into_iter().next().unwrap_or(Value::Unit);
+                    Ok(match opt {
+                        Some(inner) => *inner,
+                        None => fallback,
+                    })
+                }
+                other => Err(RuntimeError::Custom(format!(
+                    "メソッド '{}' は option に対して未実装です",
+                    other
+                ))),
+            },
+            Value::Result(result) => match method {
+                "is_ok" => Ok(Value::Bool(result.is_ok())),
+                "is_err" => Ok(Value::Bool(result.is_err())),
+                other => Err(RuntimeError::Custom(format!(
+                    "メソッド '{}' は result に対して未実装です",
+                    other
+                ))),
+            },
             Value::List(items) => self.eval_list_method(items, method, arg_vals),
             Value::Map(entries) => self.eval_map_method(object, entries, method, arg_vals),
             Value::Set(items) => self.eval_set_method(object, items, method, arg_vals),
+            Value::String(text) => self.eval_string_method(text, method, arg_vals),
             Value::Struct { ref type_name, .. } => {
                 let type_name_cloned = type_name.clone();
                 self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
@@ -1811,9 +1852,8 @@ impl Interpreter {
         &mut self,
         type_name: &str,
         method: &str,
-        _args: Vec<Value>,
+        args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
-        // instance() は特別処理
         if method == "instance" {
             let is_singleton = self
                 .type_registry
@@ -1847,7 +1887,6 @@ impl Interpreter {
             }
         }
 
-        // default() / new() は @derive(Default) で有効化
         if method == "default" || method == "new" {
             let has_default = self
                 .type_registry
@@ -1874,12 +1913,38 @@ impl Interpreter {
             }
         }
 
-        Err(RuntimeError::Custom(format!(
-            "型 '{}' に静的メソッド '{}' は存在しません",
-            type_name, method
-        )))
-    }
+        let method_impl = self
+            .type_registry
+            .structs
+            .get(type_name)
+            .and_then(|info| info.methods.get(method))
+            .cloned();
 
+        match method_impl {
+            Some(MethodImpl::Native(NativeFn(f))) => f(args).map_err(RuntimeError::Custom),
+            Some(MethodImpl::Forge(fn_def)) => {
+                let saved = std::mem::take(&mut self.scopes);
+                let mut initial: HashMap<String, Binding> = HashMap::new();
+                if let Some(global) = saved.first() {
+                    for (k, v) in global {
+                        initial.insert(k.clone(), v.clone());
+                    }
+                }
+                for (i, param) in fn_def.params.iter().enumerate() {
+                    let value = args.get(i).cloned().unwrap_or(Value::Unit);
+                    initial.insert(param.name.clone(), (value, false));
+                }
+                self.scopes = vec![initial];
+                let result = self.eval_expr(&fn_def.body);
+                self.scopes = saved;
+                result
+            }
+            None => Err(RuntimeError::Custom(format!(
+                "型 '{}' に静的メソッド '{}' は存在しません",
+                type_name, method
+            ))),
+        }
+    }
     fn eval_utility_static_method(
         &mut self,
         type_name: &str,
@@ -2080,7 +2145,7 @@ impl Interpreter {
                     Value::Int(int_sum)
                 })
             }
-            "count" => Ok(Value::Int(items.borrow().len() as i64)),
+            "count" | "len" => Ok(Value::Int(items.borrow().len() as i64)),
             "fold" => {
                 if args.len() < 2 {
                     return Err(RuntimeError::Custom("fold() は引数が2つ必要です".into()));
@@ -2251,10 +2316,59 @@ impl Interpreter {
                 }
                 Ok(mk_list(out))
             }
+            "push" => {
+                let value = one_value_arg(method, args)?;
+                items.borrow_mut().push(value);
+                Ok(Value::Unit)
+            }
             "collect" => Ok(mk_list(items.borrow().clone())),
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は list に対して未実装です",
                 other
+            ))),
+        }
+    }
+
+    fn eval_string_method(
+        &mut self,
+        text: String,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "len" => Ok(Value::Int(text.chars().count() as i64)),
+            "split" => {
+                let sep = one_string_arg(method, args)?;
+                let items = if sep.is_empty() {
+                    text.chars()
+                        .map(|ch| Value::String(ch.to_string()))
+                        .collect::<Vec<_>>()
+                } else {
+                    text.split(sep.as_str())
+                        .filter(|part: &&str| !part.is_empty())
+                        .map(|part: &str| Value::String(part.to_string()))
+                        .collect::<Vec<_>>()
+                };
+                Ok(mk_list(items))
+            }
+            "starts_with" => {
+                let prefix = one_string_arg(method, args)?;
+                Ok(Value::Bool(text.starts_with(prefix.as_str())))
+            }
+            "strip_prefix" => {
+                let prefix = one_string_arg(method, args)?;
+                Ok(Value::Option(
+                    text.strip_prefix(prefix.as_str())
+                        .map(|part| Box::new(Value::String(part.to_string()))),
+                ))
+            }
+            "contains" => {
+                let pattern = one_string_arg(method, args)?;
+                Ok(Value::Bool(text.contains(pattern.as_str())))
+            }
+            _ => Err(RuntimeError::Custom(format!(
+                "メソッド '{}' は string に対して未実装です",
+                method
             ))),
         }
     }
@@ -2389,7 +2503,8 @@ impl Interpreter {
         let obj = self.eval_expr(object)?;
         match obj {
             Value::Map(mut entries) => {
-                if let Some((_, existing)) = entries.iter_mut().find(|(entry_key, _)| *entry_key == key)
+                if let Some((_, existing)) =
+                    entries.iter_mut().find(|(entry_key, _)| *entry_key == key)
                 {
                     *existing = new_value;
                 } else {
@@ -2456,6 +2571,7 @@ impl Interpreter {
     fn eval_typestate_def(
         &mut self,
         name: String,
+        fields: Vec<(String, TypeAnn)>,
         states: Vec<forge_compiler::ast::TypestateMarker>,
         state_methods: Vec<forge_compiler::ast::TypestateState>,
     ) -> Result<Value, RuntimeError> {
@@ -2484,6 +2600,7 @@ impl Interpreter {
         self.type_registry.typestates.insert(
             name,
             TypestateInfo {
+                fields,
                 states: state_names,
                 state_infos,
             },
@@ -2532,10 +2649,30 @@ impl Interpreter {
                 )));
             }
 
+            let declared_fields = self
+                .type_registry
+                .typestates
+                .get(type_name)
+                .map(|info| info.fields.clone())
+                .unwrap_or_default();
+            let field_args = &args[1..];
+            if field_args.len() != declared_fields.len() {
+                return Err(RuntimeError::Custom(format!(
+                    "{}::new<State>() は {} 個のフィールド引数を期待しましたが {} 個渡されました",
+                    type_name,
+                    declared_fields.len(),
+                    field_args.len()
+                )));
+            }
+            let mut field_map = HashMap::new();
+            for ((field_name, _), arg) in declared_fields.iter().zip(field_args.iter()) {
+                field_map.insert(field_name.clone(), arg.clone());
+            }
+
             return Ok(Value::Typestate {
                 type_name: type_name.to_string(),
                 current_state: initial_state,
-                fields: Rc::new(RefCell::new(HashMap::new())),
+                fields: Rc::new(RefCell::new(field_map)),
             });
         }
 
@@ -3106,6 +3243,7 @@ impl Interpreter {
                     params,
                     return_type,
                     body,
+                    has_self,
                     has_state_self,
                     span,
                 } => {
@@ -3115,6 +3253,7 @@ impl Interpreter {
                         params,
                         return_type,
                         body,
+                        has_self,
                         has_state_self,
                         span,
                     };
@@ -3243,14 +3382,14 @@ impl Interpreter {
     fn eval_field_access(&mut self, object: &Expr, field: &str) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object)?;
         match obj {
-            Value::Struct { ref fields, .. } => {
+            Value::Struct { ref fields, .. } | Value::Typestate { ref fields, .. } => {
                 fields.borrow().get(field).cloned().ok_or_else(|| {
                     RuntimeError::Custom(format!("フィールド '{}' が存在しません", field))
                 })
             }
             // Option(Some(struct)) → 中身の struct に対してフィールドアクセスを透過させる
             Value::Option(Some(ref inner)) => match inner.as_ref() {
-                Value::Struct { ref fields, .. } => {
+                Value::Struct { ref fields, .. } | Value::Typestate { ref fields, .. } => {
                     fields.borrow().get(field).cloned().ok_or_else(|| {
                         RuntimeError::Custom(format!("フィールド '{}' が存在しません", field))
                     })
@@ -3314,7 +3453,8 @@ impl Interpreter {
             }
             "insert" => {
                 let (key, value) = two_value_args(method, args)?;
-                if let Some((_, existing)) = entries.iter_mut().find(|(entry_key, _)| *entry_key == key)
+                if let Some((_, existing)) =
+                    entries.iter_mut().find(|(entry_key, _)| *entry_key == key)
                 {
                     *existing = value;
                 } else {
@@ -3325,10 +3465,14 @@ impl Interpreter {
             }
             "contains_key" => {
                 let key = one_value_arg(method, args)?;
-                Ok(Value::Bool(entries.iter().any(|(entry_key, _)| *entry_key == key)))
+                Ok(Value::Bool(
+                    entries.iter().any(|(entry_key, _)| *entry_key == key),
+                ))
             }
             "keys" => Ok(mk_list(entries.into_iter().map(|(key, _)| key).collect())),
-            "values" => Ok(mk_list(entries.into_iter().map(|(_, value)| value).collect())),
+            "values" => Ok(mk_list(
+                entries.into_iter().map(|(_, value)| value).collect(),
+            )),
             "entries" => Ok(mk_list(
                 entries
                     .into_iter()
@@ -3385,13 +3529,19 @@ impl Interpreter {
             "intersect" => {
                 let other = one_set_arg(method, args)?;
                 Ok(Value::Set(
-                    items.into_iter().filter(|item| other.contains(item)).collect(),
+                    items
+                        .into_iter()
+                        .filter(|item| other.contains(item))
+                        .collect(),
                 ))
             }
             "difference" => {
                 let other = one_set_arg(method, args)?;
                 Ok(Value::Set(
-                    items.into_iter().filter(|item| !other.contains(item)).collect(),
+                    items
+                        .into_iter()
+                        .filter(|item| !other.contains(item))
+                        .collect(),
                 ))
             }
             "len" => Ok(Value::Int(items.len() as i64)),
@@ -3530,12 +3680,7 @@ impl Interpreter {
                 let mapped = fields
                     .borrow()
                     .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            Value::Option(Some(Box::new(v.deep_clone()))),
-                        )
-                    })
+                    .map(|(k, v)| (k.clone(), Value::Option(Some(Box::new(v.deep_clone())))))
                     .collect();
                 Ok(Value::Struct {
                     type_name: format!("Partial<{}>", type_name),
@@ -3718,6 +3863,17 @@ fn one_int_arg(method: &str, args: Vec<Value>) -> Result<i64, RuntimeError> {
     match args.into_iter().next() {
         Some(Value::Int(n)) => Ok(n),
         Some(v) => Err(type_err("number", v.type_name())),
+        None => Err(RuntimeError::Custom(format!(
+            "{}() は引数が1つ必要です",
+            method
+        ))),
+    }
+}
+
+fn one_string_arg(method: &str, args: Vec<Value>) -> Result<String, RuntimeError> {
+    match args.into_iter().next() {
+        Some(Value::String(text)) => Ok(text),
+        Some(v) => Err(type_err("string", v.type_name())),
         None => Err(RuntimeError::Custom(format!(
             "{}() は引数が1つ必要です",
             method
@@ -4393,7 +4549,10 @@ mod tests {
 
     #[test]
     fn test_map_literal_empty() {
-        assert_eq!(run("let m: map<string, number> = {}; m"), Ok(Value::Map(vec![])));
+        assert_eq!(
+            run("let m: map<string, number> = {}; m"),
+            Ok(Value::Map(vec![]))
+        );
     }
 
     #[test]
@@ -4455,7 +4614,10 @@ mod tests {
 
     #[test]
     fn test_map_len() {
-        assert_eq!(run(r#"let m = {"a": 1, "b": 2}; m.len()"#), Ok(Value::Int(2)));
+        assert_eq!(
+            run(r#"let m = {"a": 1, "b": 2}; m.len()"#),
+            Ok(Value::Int(2))
+        );
     }
 
     #[test]
@@ -4469,7 +4631,10 @@ mod tests {
 
     #[test]
     fn test_map_index_access() {
-        assert_eq!(run(r#"let m = {"a": 1, "b": 2}; m["a"]"#), Ok(Value::Int(1)));
+        assert_eq!(
+            run(r#"let m = {"a": 1, "b": 2}; m["a"]"#),
+            Ok(Value::Int(1))
+        );
     }
 
     #[test]
@@ -4481,6 +4646,11 @@ mod tests {
                 (Value::String("c".to_string()), Value::Int(3)),
             ]))
         );
+    }
+
+    #[test]
+    fn test_none_constructor_call() {
+        assert_eq!(run("none()"), Ok(Value::Option(None)));
     }
 
     #[test]
@@ -4500,6 +4670,105 @@ mod tests {
             run(r#"let s = {"rust", "forge"}; s.contains("rust")"#),
             Ok(Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn test_method_named_use() {
+        let src = r#"
+data App {
+    middlewares: list<string>
+}
+
+impl App {
+    fn new() -> App {
+        App { middlewares: [] }
+    }
+
+    fn use(state self, name: string) -> App {
+        state items = self.middlewares
+        items.push(name)
+        App { middlewares: items }
+    }
+}
+
+let app = App::new().use("logger")
+app.middlewares[0]
+"#;
+        assert_eq!(run(src), Ok(Value::String("logger".to_string())));
+    }
+
+    #[test]
+    fn test_method_named_use_with_data_arg() {
+        let src = r#"
+data Middleware {
+    kind: string
+}
+
+fn logger() -> Middleware {
+    Middleware { kind: "logger" }
+}
+
+data App {
+    middlewares: list<Middleware>
+}
+
+impl App {
+    fn new() -> App {
+        App { middlewares: [] }
+    }
+
+    fn use(state self, middleware: Middleware) -> App {
+        state items = self.middlewares
+        items.push(middleware)
+        App { middlewares: items }
+    }
+}
+
+let app = App::new().use(logger())
+app.middlewares[0].kind
+"#;
+        assert_eq!(run(src), Ok(Value::String("logger".to_string())));
+    }
+
+    #[test]
+    fn test_method_named_use_with_option_field_arg() {
+        let src = r#"
+data Middleware {
+    kind: string
+    value: string?
+}
+
+fn logger() -> Middleware {
+    Middleware { kind: "logger", value: none() }
+}
+
+fn static_files(dir: string) -> Middleware {
+    Middleware { kind: "static_files", value: some(dir) }
+}
+
+data App {
+    middlewares: list<Middleware>
+}
+
+impl App {
+    fn new() -> App {
+        App { middlewares: [] }
+    }
+
+    fn use(state self, middleware: Middleware) -> App {
+        state items = self.middlewares
+        items.push(middleware)
+        App { middlewares: items }
+    }
+}
+
+let app = App::new().use(logger()).use(static_files("./public"))
+match app.middlewares[1].value {
+    some(value) => value,
+    none        => "missing",
+}
+"#;
+        assert_eq!(run(src), Ok(Value::String("./public".to_string())));
     }
 
     #[test]
@@ -4545,7 +4814,10 @@ mod tests {
 
     #[test]
     fn test_set_len() {
-        assert_eq!(run(r#"let s = {"rust", "forge"}; s.len()"#), Ok(Value::Int(2)));
+        assert_eq!(
+            run(r#"let s = {"rust", "forge"}; s.len()"#),
+            Ok(Value::Int(2))
+        );
     }
 
     #[test]
@@ -4636,7 +4908,9 @@ partial.name
 "#;
         assert_eq!(
             run(src),
-            Ok(Value::Option(Some(Box::new(Value::String("alice".to_string())))))
+            Ok(Value::Option(Some(Box::new(Value::String(
+                "alice".to_string()
+            )))))
         );
     }
 
@@ -4650,10 +4924,7 @@ struct User {
 let user = User { id: 1, name: "alice" }
 Partial::from(user).id
 "#;
-        assert_eq!(
-            run(src),
-            Ok(Value::Option(Some(Box::new(Value::Int(1)))))
-        );
+        assert_eq!(run(src), Ok(Value::Option(Some(Box::new(Value::Int(1))))));
     }
 
     #[test]

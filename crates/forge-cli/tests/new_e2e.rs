@@ -51,7 +51,11 @@ fn e2e_new_generates_script_template() {
         std::fs::read_to_string(project_dir.join("src/main.forge")).expect("src/main.forge");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(forge_toml.contains("name = \"my-test-app\""), "{}", forge_toml);
+    assert!(
+        forge_toml.contains("name = \"my-test-app\""),
+        "{}",
+        forge_toml
+    );
     assert!(main_forge.contains("Hello, my-test-app!"), "{}", main_forge);
     assert!(stdout.contains("Created my-test-app/"), "{}", stdout);
     assert!(

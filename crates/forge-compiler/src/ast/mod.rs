@@ -138,6 +138,7 @@ pub enum Stmt {
     /// data Name { field: Type, ... } validate { ... }
     DataDef {
         name: String,
+        generic_params: Vec<String>,
         fields: Vec<(String, TypeAnn)>,
         validate_rules: Vec<ValidateRule>,
         is_pub: bool,
@@ -339,10 +340,7 @@ pub enum Expr {
         span: Span,
     },
     /// セットリテラル { value1, value2, ... }
-    SetLiteral {
-        items: Vec<Expr>,
-        span: Span,
-    },
+    SetLiteral { items: Vec<Expr>, span: Span },
     /// ? 演算子
     Question(Box<Expr>, Span),
     /// .await
@@ -483,13 +481,19 @@ pub enum TypeAnn {
     List(Box<TypeAnn>),                     // list<T>
     Named(String),                          // ユーザー定義型（Phase 5 以降）
     // G-1-A: ジェネリクス拡張
-    Generic { name: String, args: Vec<TypeAnn> }, // Response<T>, Pair<A, B>
-    Map(Box<TypeAnn>, Box<TypeAnn>),              // map<K, V>
-    Set(Box<TypeAnn>),                            // set<T>
-    OrderedMap(Box<TypeAnn>, Box<TypeAnn>),       // ordered_map<K, V>
-    OrderedSet(Box<TypeAnn>),                     // ordered_set<T>
-    Unit,                                         // ()
-    Fn { params: Vec<TypeAnn>, return_type: Box<TypeAnn> }, // T => U
+    Generic {
+        name: String,
+        args: Vec<TypeAnn>,
+    }, // Response<T>, Pair<A, B>
+    Map(Box<TypeAnn>, Box<TypeAnn>),        // map<K, V>
+    Set(Box<TypeAnn>),                      // set<T>
+    OrderedMap(Box<TypeAnn>, Box<TypeAnn>), // ordered_map<K, V>
+    OrderedSet(Box<TypeAnn>),               // ordered_set<T>
+    Unit,                                   // ()
+    Fn {
+        params: Vec<TypeAnn>,
+        return_type: Box<TypeAnn>,
+    }, // T => U
     /// Pick/Omit の Keys 引数: "id" | "name" | "email" 形式
     StringLiteralUnion(Vec<String>),
 }
@@ -510,6 +514,7 @@ pub enum TraitMethod {
         name: String,
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
+        has_self: bool,
         span: Span,
     },
     /// デフォルト実装: fn name(params) -> T { body }
@@ -518,6 +523,7 @@ pub enum TraitMethod {
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
         body: Box<Expr>,
+        has_self: bool,
         has_state_self: bool,
         span: Span,
     },
@@ -531,6 +537,7 @@ pub struct FnDef {
     pub params: Vec<Param>,
     pub return_type: Option<TypeAnn>,
     pub body: Box<Expr>,
+    pub has_self: bool,       // `self` または `state self` で宣言されたか
     pub has_state_self: bool, // `state self` で宣言されたか
     pub span: Span,
 }

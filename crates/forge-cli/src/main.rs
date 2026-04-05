@@ -1,4 +1,4 @@
-﻿// forge-cli: ForgeScript CLI
+// forge-cli: ForgeScript CLI
 // Phase 2-D 実装
 
 mod forge_toml;
@@ -139,7 +139,10 @@ fn run_file(path: &str) {
 fn run_entry(path: Option<&str>) {
     match resolve_project_request(path) {
         Ok(ProjectRequest::File(file_path)) => run_file(&file_path.to_string_lossy()),
-        Ok(ProjectRequest::Project { project_dir, forge_toml }) => {
+        Ok(ProjectRequest::Project {
+            project_dir,
+            forge_toml,
+        }) => {
             let entry = project_dir.join(forge_toml.package.entry);
             run_file(&entry.to_string_lossy());
         }
@@ -150,7 +153,7 @@ fn run_entry(path: Option<&str>) {
     }
 }
 
-fn test_file(path: &str, filter: Option<&str>) {
+fn test_file(path: &str, filter: Option<&str>, project_root: Option<&Path>) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -168,7 +171,10 @@ fn test_file(path: &str, filter: Option<&str>) {
     };
 
     let file_path = std::path::Path::new(path);
-    let mut interp = Interpreter::with_file_path(file_path);
+    let mut interp = match project_root {
+        Some(root) => Interpreter::with_project_root(root.to_path_buf()),
+        None => Interpreter::with_file_path(file_path),
+    };
     interp.is_test_mode = true;
 
     let results = interp.run_tests(&module.stmts, filter);
@@ -444,9 +450,10 @@ fn transpile_file(path: &str, output: Option<&str>) {
 fn build_entry(path: Option<&str>, output: Option<&str>) {
     match resolve_build_request(path) {
         Ok(BuildRequest::File(file_path)) => build_file(&file_path, output),
-        Ok(BuildRequest::Project { project_dir, forge_toml }) => {
-            build_project_with_forge_toml(&project_dir, &forge_toml, output)
-        }
+        Ok(BuildRequest::Project {
+            project_dir,
+            forge_toml,
+        }) => build_project_with_forge_toml(&project_dir, &forge_toml, output),
         Err(e) => {
             eprintln!("エラー: {}", e);
             std::process::exit(1);
@@ -456,7 +463,9 @@ fn build_entry(path: Option<&str>, output: Option<&str>) {
 
 fn test_entry(path: Option<&str>, filter: Option<&str>) {
     match resolve_project_request(path) {
-        Ok(ProjectRequest::File(file_path)) => test_file(&file_path.to_string_lossy(), filter),
+        Ok(ProjectRequest::File(file_path)) => {
+            test_file(&file_path.to_string_lossy(), filter, None)
+        }
         Ok(ProjectRequest::Project { project_dir, .. }) => {
             let tests_dir = project_dir.join("tests");
             let test_files = collect_project_test_files(&tests_dir);
@@ -466,7 +475,11 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
             }
 
             for test_file_path in test_files {
-                test_file(&test_file_path.to_string_lossy(), filter);
+                test_file(
+                    &test_file_path.to_string_lossy(),
+                    filter,
+                    Some(&project_dir),
+                );
             }
         }
         Err(e) => {
@@ -480,7 +493,10 @@ fn build_file(path: &Path, output: Option<&str>) {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s.to_string(),
         None => {
-            eprintln!("エラー: ファイル名を解決できませんでした: {}", path.display());
+            eprintln!(
+                "エラー: ファイル名を解決できませんでした: {}",
+                path.display()
+            );
             std::process::exit(1);
         }
     };
@@ -607,6 +623,7 @@ fn build_generated_project(
             } else {
                 built_bin
             };
+            let output_abs = normalized_binary_output_path(output_abs, &src_bin);
 
             if let Err(e) = fs::copy(&src_bin, &output_abs) {
                 eprintln!("エラー: バイナリのコピーに失敗しました: {}", e);
@@ -635,14 +652,35 @@ fn build_generated_project(
     }
 }
 
+fn normalized_binary_output_path(mut output_path: PathBuf, src_bin: &Path) -> PathBuf {
+    let src_is_windows_exe = src_bin
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("exe"))
+        .unwrap_or(false);
+    let has_extension = output_path.extension().is_some();
+
+    if src_is_windows_exe && !has_extension {
+        output_path.set_extension("exe");
+    }
+
+    output_path
+}
+
 enum BuildRequest {
     File(PathBuf),
-    Project { project_dir: PathBuf, forge_toml: ForgeToml },
+    Project {
+        project_dir: PathBuf,
+        forge_toml: ForgeToml,
+    },
 }
 
 enum ProjectRequest {
     File(PathBuf),
-    Project { project_dir: PathBuf, forge_toml: ForgeToml },
+    Project {
+        project_dir: PathBuf,
+        forge_toml: ForgeToml,
+    },
 }
 
 fn resolve_project_request(path: Option<&str>) -> Result<ProjectRequest, String> {
@@ -678,7 +716,10 @@ fn resolve_project_request(path: Option<&str>) -> Result<ProjectRequest, String>
 fn resolve_build_request(path: Option<&str>) -> Result<BuildRequest, String> {
     match resolve_project_request(path)? {
         ProjectRequest::File(file_path) => Ok(BuildRequest::File(file_path)),
-        ProjectRequest::Project { project_dir, forge_toml } => Ok(BuildRequest::Project {
+        ProjectRequest::Project {
+            project_dir,
+            forge_toml,
+        } => Ok(BuildRequest::Project {
             project_dir,
             forge_toml,
         }),
@@ -727,6 +768,13 @@ fn build_generated_cargo_toml(
         cargo_toml.push_str("anyhow = \"1\"\n");
     }
 
+    let has_forge_std = manifest_deps
+        .map(|deps| deps.contains_key("forge_std"))
+        .unwrap_or(false);
+    if !has_forge_std {
+        cargo_toml.push_str(&format!("{}\n", forge_std_dependency_line()));
+    }
+
     if let Some(deps) = manifest_deps {
         for (name, dep) in deps {
             let line = match dep {
@@ -753,6 +801,17 @@ fn build_generated_cargo_toml(
     }
 
     cargo_toml
+}
+
+fn forge_std_dependency_line() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("forge-stdlib");
+    let path = path.to_string_lossy().replace('\\', "/");
+    format!(
+        "forge_std = {{ package = \"forge-stdlib\", path = \"{}\" }}",
+        path
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -807,7 +866,12 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
 
     let cargo_toml_path = out_src_dir
         .parent()
-        .ok_or_else(|| format!("src ディレクトリの親を解決できません: {}", out_src_dir.display()))?
+        .ok_or_else(|| {
+            format!(
+                "src ディレクトリの親を解決できません: {}",
+                out_src_dir.display()
+            )
+        })?
         .join("Cargo.toml");
     update_generated_cargo_toml(&cargo_toml_path, &deps)?;
 
@@ -1161,7 +1225,10 @@ mod tests {
     #[test]
     fn build_generated_cargo_toml_includes_manifest_dependencies() {
         let mut deps = BTreeMap::new();
-        deps.insert("serde".to_string(), DependencyValue::Version("1".to_string()));
+        deps.insert(
+            "serde".to_string(),
+            DependencyValue::Version("1".to_string()),
+        );
         deps.insert(
             "tokio".to_string(),
             DependencyValue::Detailed {
@@ -1176,5 +1243,46 @@ mod tests {
         assert!(cargo_toml.contains("edition = \"2024\""));
         assert!(cargo_toml.contains("serde = \"1\""));
         assert!(cargo_toml.contains("tokio = { version = \"1\", features = [\"full\"] }"));
+        assert!(cargo_toml.contains("forge_std = { package = \"forge-stdlib\", path = "));
+    }
+
+    #[test]
+    fn build_generated_cargo_toml_does_not_duplicate_forge_std() {
+        let mut deps = BTreeMap::new();
+        deps.insert(
+            "forge_std".to_string(),
+            DependencyValue::Detailed {
+                version: "0.1".to_string(),
+                features: vec!["custom".to_string()],
+            },
+        );
+
+        let cargo_toml = build_generated_cargo_toml("demo", "0.2.0", "2024", Some(&deps));
+        assert_eq!(cargo_toml.matches("forge_std =").count(), 1);
+        assert!(cargo_toml.contains("forge_std = { version = \"0.1\", features = [\"custom\"] }"));
+    }
+
+    #[test]
+    fn normalized_binary_output_path_adds_exe_for_windows_binary() {
+        let output = PathBuf::from("packages/anvil/target/anvil");
+        let src = PathBuf::from("tmp/target/release/anvil.exe");
+        assert_eq!(
+            normalized_binary_output_path(output, &src),
+            PathBuf::from("packages/anvil/target/anvil.exe")
+        );
+    }
+
+    #[test]
+    fn normalized_binary_output_path_preserves_existing_extension() {
+        let output = PathBuf::from("packages/anvil/target/anvil.bin");
+        let src = PathBuf::from("tmp/target/release/anvil.exe");
+        assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
+    }
+
+    #[test]
+    fn normalized_binary_output_path_keeps_unix_binary_name() {
+        let output = PathBuf::from("target/demo");
+        let src = PathBuf::from("tmp/target/release/demo");
+        assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
     }
 }
