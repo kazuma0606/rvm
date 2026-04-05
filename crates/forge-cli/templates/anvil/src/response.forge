@@ -1,0 +1,7 @@
+data ErrorBody {
+    message: string
+}
+
+pub fn ok(body: string) -> string {
+    "200 {body}"
+}

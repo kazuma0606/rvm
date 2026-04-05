@@ -1,0 +1,18 @@
+use ./request.new_request
+use ./response.ok
+use ./router.route_count
+use ./middleware.logger
+use ./cors.default_cors
+use ./auth.default_role
+
+fn main() {
+    let req = new_request("GET", "/")
+    let cors = default_cors()
+    logger(req.method, req.path)
+    println(ok("{{name}} api"))
+    println(route_count())
+    println(cors.origin)
+    println(default_role())
+}
+
+main()

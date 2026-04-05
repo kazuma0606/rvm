@@ -1,0 +1,14 @@
+{
+  "auth": {
+    "tokens": {
+      "dev-token-abc123": {
+        "user_id": "dev-user",
+        "roles": ["admin", "user"]
+      },
+      "readonly-token-xyz": {
+        "user_id": "guest",
+        "roles": ["user"]
+      }
+    }
+  }
+}

@@ -19,6 +19,27 @@ fn run_forge_file(path: &str) -> Result<String, String> {
     }
 }
 
+fn run_forge_new(args: &[&str], cwd: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .arg("new")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run forge-new new")
+}
+
+fn make_temp_dir(label: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge_new_{}_{}_{}",
+        label,
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&path).expect("create temp dir");
+    path
+}
+
 /// ForgeScript ソースを `forge-new run` で実行し、stdout を返す
 fn run_forge(source: &str) -> Result<String, String> {
     let mut path = std::env::temp_dir();

@@ -1,0 +1,7 @@
+data CorsOptions {
+    origin: string
+}
+
+pub fn default_cors() -> CorsOptions {
+    CorsOptions { origin: "*" }
+}
