@@ -10,6 +10,7 @@ pub struct Template {
 }
 
 const SCRIPT_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/script/.gitignore")),
     ("forge.toml", include_str!("../templates/script/forge.toml")),
     (
         "src/main.forge",
@@ -18,6 +19,7 @@ const SCRIPT_FILES: &[(&str, &str)] = &[
 ];
 
 const CLI_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/cli/.gitignore")),
     ("forge.toml", include_str!("../templates/cli/forge.toml")),
     (
         "src/main.forge",
@@ -26,6 +28,7 @@ const CLI_FILES: &[(&str, &str)] = &[
 ];
 
 const LIB_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/lib/.gitignore")),
     ("forge.toml", include_str!("../templates/lib/forge.toml")),
     (
         "src/lib.forge",
@@ -34,6 +37,7 @@ const LIB_FILES: &[(&str, &str)] = &[
 ];
 
 const DATA_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/data/.gitignore")),
     ("forge.toml", include_str!("../templates/data/forge.toml")),
     (
         "src/main.forge",
@@ -42,6 +46,7 @@ const DATA_FILES: &[(&str, &str)] = &[
 ];
 
 const ANVIL_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/anvil/.gitignore")),
     ("forge.toml", include_str!("../templates/anvil/forge.toml")),
     (
         "src/main.forge",
