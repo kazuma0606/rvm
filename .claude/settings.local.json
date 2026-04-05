@@ -17,7 +17,10 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git mv:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(head -5 grep -rn \"tcp_listen_async\\\\|\"\"tcp_listen\"\"\" crates/forge-vm/)",
+      "Bash(head -20 grep -n \"forge-stdlib\\\\|forge_stdlib\" crates/forge-vm/Cargo.toml)",
+      "Bash(head -10 grep -rn \"json\\\\|parse\" crates/forge-cli/src/main.rs)"
     ]
   }
 }

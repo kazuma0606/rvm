@@ -8,8 +8,8 @@
 // リクエスト例:
 //   curl http://localhost:8080/health
 //
-//   curl -X POST http://localhost:8080/echo \
-//        -H "Content-Type: application/json" \
+//   curl -X POST http://localhost:8080/echo
+//        -H "Content-Type: application/json"
 //        -d '{"message":"hello","repeat":3,"metadata":{"client":"curl","tag":"demo"}}'
 //
 //   curl http://localhost:8080/users/42
@@ -26,7 +26,7 @@ use anvil/cors.*
 // GET /health
 // ----------------------------------------------------------------
 fn health_handler(req: Request<string>) -> Response<string>! {
-    ok(Response::text("{\"status\":\"healthy\",\"version\":\"1.0.0\"}")
+    ok(Response::text("\{\"status\":\"healthy\",\"version\":\"1.0.0\"}")
         .header("Content-Type", "application/json"))
 }
 
@@ -42,10 +42,10 @@ fn health_handler(req: Request<string>) -> Response<string>! {
 // }
 // ----------------------------------------------------------------
 fn echo_handler(req: Request<string>) -> Response<string>! {
-    let data    = parse(req.raw_body)?
-    let message = string(data["message"])
-    let repeat  = number(data["repeat"])
-    let meta    = data["metadata"]
+    let body    = parse(req.raw_body)?
+    let message = string(body["message"])
+    let repeat  = number(body["repeat"])?
+    let meta    = body["metadata"]
     let client  = string(meta["client"])
     let tag     = string(meta["tag"])
 
@@ -58,7 +58,7 @@ fn echo_handler(req: Request<string>) -> Response<string>! {
     }
 
     let from = "{client}/{tag}"
-    ok(Response::text("{\"echoed\":\"{result}\",\"count\":{repeat},\"from\":\"{from}\"}")
+    ok(Response::text("\{\"echoed\":\"{result}\",\"count\":{repeat},\"from\":\"{from}\"}")
         .header("Content-Type", "application/json"))
 }
 
@@ -70,7 +70,7 @@ fn user_handler(req: Request<string>) -> Response<string>! {
         some(v) => v,
         none    => "unknown",
     }
-    ok(Response::text("{\"id\":\"{id}\",\"name\":\"User {id}\",\"role\":\"member\"}")
+    ok(Response::text("\{\"id\":\"{id}\",\"name\":\"User {id}\",\"role\":\"member\"}")
         .header("Content-Type", "application/json"))
 }
 

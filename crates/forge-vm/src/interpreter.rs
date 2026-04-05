@@ -14,8 +14,8 @@ use forge_compiler::loader::{ModForgeExport, ModuleLoader};
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
 #[derive(Clone)]
 enum MethodImpl {
-    /// Forge スクリプトで定義されたメソッド
-    Forge(FnDef),
+    /// Forge スクリプトで定義されたメソッド（定義時の環境をキャプチャ）
+    Forge(FnDef, CapturedEnv),
     /// Rust ネイティブ関数（引数の第1要素が self）
     Native(NativeFn),
 }
@@ -23,7 +23,7 @@ enum MethodImpl {
 impl std::fmt::Debug for MethodImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MethodImpl::Forge(def) => write!(f, "Forge({})", def.name),
+            MethodImpl::Forge(def, _) => write!(f, "Forge({})", def.name),
             MethodImpl::Native(_) => write!(f, "Native"),
         }
     }
@@ -613,6 +613,22 @@ impl Interpreter {
             }),
             false,
         );
+
+        // forge/std/json — parse(json_string) -> Value!
+        self.define(
+            "parse",
+            native!(|args: Vec<Value>| {
+                let s = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => return Err(format!("parse() expects string, got {}", v.type_name())),
+                    None => return Err("parse() requires 1 argument".to_string()),
+                };
+                let jv: serde_json::Value = serde_json::from_str(&s)
+                    .map_err(|e| format!("JSON parse error: {}", e))?;
+                Ok(Value::Result(Ok(Box::new(json_to_value(jv)))))
+            }),
+            false,
+        );
     }
 
     // ── パブリック評価 ────────────────────────────────────────────────────
@@ -843,6 +859,7 @@ impl Interpreter {
 
     // ── UseDecl の評価 ────────────────────────────────────────────────────
 
+
     fn eval_use_decl(
         &mut self,
         path: &UsePath,
@@ -897,10 +914,12 @@ impl Interpreter {
             }
             UsePath::External(crate_name) => {
                 // dep_paths に登録されているローカル依存なら Local と同様に解決する
+                // "anvil/anvil" のような場合は先頭セグメント "anvil" でチェック
+                let first_seg = crate_name.split('/').next().unwrap_or(crate_name.as_str());
                 let has_dep = self
                     .module_loader
                     .as_ref()
-                    .map(|l| l.dep_paths.contains_key(crate_name.as_str()))
+                    .map(|l| l.dep_paths.contains_key(first_seg))
                     .unwrap_or(false);
 
                 if has_dep {
@@ -1012,6 +1031,27 @@ impl Interpreter {
         let stmts = loader
             .load(use_path)
             .map_err(|e| RuntimeError::Custom(format!("モジュール読み込みエラー: {}", e)))?;
+
+        // dep パッケージ内のファイルの場合、内部の `use ./foo` を `use depname/foo` に変換する
+        // （dep パッケージ内の相対インポートを正しく解決するため）
+        let dep_prefix = {
+            let first_seg = use_path.split('/').next().unwrap_or(use_path);
+            if self
+                .module_loader
+                .as_ref()
+                .map(|l| l.dep_paths.contains_key(first_seg))
+                .unwrap_or(false)
+            {
+                Some(first_seg.to_string())
+            } else {
+                None
+            }
+        };
+        let stmts = if let Some(ref dep_name) = dep_prefix {
+            rewrite_local_use_paths(&stmts, dep_name)
+        } else {
+            stmts
+        };
 
         // モジュールを別スコープで評価して、エクスポートを取得する
         let (all_symbols, pub_names) = self.eval_module_stmts(&stmts)?;
@@ -1723,6 +1763,14 @@ impl Interpreter {
             if name == "none" && args.is_empty() {
                 return Ok(Value::Option(None));
             }
+            // tcp_listen / tcp_listen_async — forge run モードのシンプルな同期 HTTP サーバ
+            if name == "tcp_listen" || name == "tcp_listen_async" {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return self.eval_tcp_listen(arg_vals);
+            }
         }
         let callee_val = self.eval_expr(callee)?;
         let arg_vals: Vec<Value> = args
@@ -1989,9 +2037,11 @@ impl Interpreter {
 
         match method_impl {
             Some(MethodImpl::Native(NativeFn(f))) => f(args).map_err(RuntimeError::Custom),
-            Some(MethodImpl::Forge(fn_def)) => {
+            Some(MethodImpl::Forge(fn_def, captured)) => {
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> = HashMap::new();
+                let mut initial: HashMap<String, Binding> =
+                    captured.borrow().clone();
+                // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
                     for (k, v) in global {
                         initial.insert(k.clone(), v.clone());
@@ -3207,9 +3257,11 @@ impl Interpreter {
                 all_args.extend(args);
                 f(all_args).map_err(RuntimeError::Custom)
             }
-            Some(MethodImpl::Forge(fn_def)) => {
+            Some(MethodImpl::Forge(fn_def, captured)) => {
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> = HashMap::new();
+                let mut initial: HashMap<String, Binding> =
+                    captured.borrow().clone();
+                // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
                     for (k, v) in global {
                         initial.insert(k.clone(), v.clone());
@@ -3284,10 +3336,11 @@ impl Interpreter {
                 },
             );
         }
+        let captured = self.capture_env();
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in methods {
                 info.methods
-                    .insert(method.name.clone(), MethodImpl::Forge(method));
+                    .insert(method.name.clone(), MethodImpl::Forge(method, Rc::clone(&captured)));
             }
         }
         Ok(Value::Unit)
@@ -3366,10 +3419,11 @@ impl Interpreter {
 
         // 明示的に実装されたメソッドを型に登録（優先度: 直接 impl）
         let explicit_method_names: Vec<String> = methods.iter().map(|m| m.name.clone()).collect();
+        let captured = self.capture_env();
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in &methods {
                 info.methods
-                    .insert(method.name.clone(), MethodImpl::Forge(method.clone()));
+                    .insert(method.name.clone(), MethodImpl::Forge(method.clone(), Rc::clone(&captured)));
             }
         }
 
@@ -3384,11 +3438,10 @@ impl Interpreter {
             if let Some(struct_info) = self.type_registry.structs.get_mut(&target) {
                 for (method_name, fn_def) in defaults {
                     if !explicit_method_names.contains(&method_name) {
-                        // デフォルト実装を登録（明示的 impl がない場合のみ）
                         struct_info
                             .methods
                             .entry(method_name)
-                            .or_insert(MethodImpl::Forge(fn_def));
+                            .or_insert(MethodImpl::Forge(fn_def, Rc::clone(&captured)));
                     }
                 }
             }
@@ -3402,15 +3455,9 @@ impl Interpreter {
             .map(|mi| mi.methods.clone());
 
         if let Some(mixin_map) = mixin_methods {
-            // 既に他の mixin から同名メソッドが登録されているか確認
-            // mixin に由来するメソッドを識別するためにマーキングが必要だが
-            // ここではシンプルに: 既存メソッドがある場合にエラーを発生させる
-            // ただし、同一の trait/impl で登録したものは除外する
             for method_name in mixin_map.keys() {
                 if let Some(struct_info) = self.type_registry.structs.get(&target) {
                     if struct_info.methods.contains_key(method_name) {
-                        // 既存メソッドが存在する場合: 明示的 impl か他の mixin か？
-                        // mixin 衝突として扱う（実行時エラー）
                         return Err(RuntimeError::Custom(format!(
                             "mixin '{}' のメソッド '{}' は型 '{}' で既に定義されています（名前衝突）",
                             trait_name, method_name, target
@@ -3422,7 +3469,7 @@ impl Interpreter {
                 for (method_name, fn_def) in mixin_map {
                     struct_info
                         .methods
-                        .insert(method_name, MethodImpl::Forge(fn_def));
+                        .insert(method_name, MethodImpl::Forge(fn_def, Rc::clone(&captured)));
                 }
             }
         }
@@ -3701,12 +3748,13 @@ impl Interpreter {
                 all_args.extend(args);
                 f(all_args).map_err(RuntimeError::Custom)
             }
-            Some(MethodImpl::Forge(fn_def)) => {
+            Some(MethodImpl::Forge(fn_def, captured)) => {
                 // self を暗黙引数として束縛してメソッドを呼び出す
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> = HashMap::new();
+                let mut initial: HashMap<String, Binding> =
+                    captured.borrow().clone();
 
-                // グローバルスコープをベースにする
+                // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
                     for (k, v) in global {
                         initial.insert(k.clone(), v.clone());
@@ -4383,6 +4431,299 @@ fn zero_value_for_type(ann: &TypeAnn) -> Value {
         TypeAnn::Option(_) => Value::Option(None),
         _ => Value::Unit,
     }
+}
+
+// ── tcp_listen / tcp_listen_async — forge run モードの同期 HTTP サーバ ────
+
+/// forge run モードで `tcp_listen(port, handler)` / `tcp_listen_async(port, handler)` を実行する。
+///
+/// tokio 不要のシンプルな std::net::TcpListener ベースの実装。
+/// 1 接続ずつ同期処理する（開発・テスト用）。
+impl Interpreter {
+    fn eval_tcp_listen(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::collections::HashMap as StdMap;
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        if args.len() != 2 {
+            return Err(RuntimeError::Custom(
+                "tcp_listen takes 2 arguments: (port, handler)".to_string(),
+            ));
+        }
+        let port = match &args[0] {
+            Value::Int(n) => *n as u16,
+            Value::Float(n) => *n as u16,
+            v => {
+                return Err(RuntimeError::Custom(format!(
+                    "tcp_listen: port must be a number, got {}",
+                    v.type_name()
+                )))
+            }
+        };
+        let handler = args[1].clone();
+
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+            .map_err(|e| RuntimeError::Custom(format!("tcp bind failed: {}", e)))?;
+
+        loop {
+            let (stream, _addr) = listener
+                .accept()
+                .map_err(|e| RuntimeError::Custom(format!("tcp accept failed: {}", e)))?;
+
+            // HTTP リクエストをパース
+            let raw_req = match http_parse_request(&stream) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // ForgeScript の RawRequest 値を構築
+            let mut fields: StdMap<String, Value> = StdMap::new();
+            fields.insert("method".to_string(), Value::String(raw_req.method.clone()));
+            fields.insert("path".to_string(), Value::String(raw_req.path.clone()));
+            fields.insert("body".to_string(), Value::String(raw_req.body.clone()));
+            // headers → Value::Map (Vec<(Value, Value)>)
+            let headers_map: Vec<(Value, Value)> = raw_req
+                .headers
+                .iter()
+                .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                .collect();
+            fields.insert("headers".to_string(), Value::Map(headers_map));
+            // query → Value::Map
+            let query_map: Vec<(Value, Value)> = raw_req
+                .query
+                .iter()
+                .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                .collect();
+            fields.insert("query".to_string(), Value::Map(query_map));
+            let raw_req_val = Value::Struct {
+                type_name: "RawRequest".to_string(),
+                fields: Rc::new(RefCell::new(fields)),
+            };
+
+            // ハンドラ呼び出し → Value::Result(Ok(Value::Struct { "RawResponse" }))
+            let response = match self.call_value(handler.clone(), vec![raw_req_val]) {
+                Ok(v) => v,
+                Err(e) => {
+                    // エラー時は 500 レスポンス
+                    let _ = write_http_response(
+                        &stream,
+                        500,
+                        &StdMap::new(),
+                        &format!("Internal Server Error: {}", e),
+                    );
+                    continue;
+                }
+            };
+
+            // Result を unwrap して RawResponse の各フィールドを取得
+            let resp_struct = match response {
+                Value::Result(Ok(v)) => *v,
+                Value::Result(Err(msg)) => {
+                    let _ = write_http_response(&stream, 500, &StdMap::new(), &msg);
+                    continue;
+                }
+                other => other,
+            };
+
+            let (status, headers, body) = extract_raw_response(resp_struct);
+            let _ = write_http_response(&stream, status, &headers, &body);
+        }
+    }
+}
+
+/// HTTP リクエストを std::net::TcpStream からパースする（同期版）
+fn http_parse_request(
+    stream: &std::net::TcpStream,
+) -> Result<HttpRawRequest, String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut reader = BufReader::new(stream);
+    let mut first_line = String::new();
+    reader
+        .read_line(&mut first_line)
+        .map_err(|e| e.to_string())?;
+    let parts: Vec<&str> = first_line.trim().splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        return Err("invalid request line".to_string());
+    }
+    let method = parts[0].to_string();
+    let full_path = parts[1].to_string();
+    let (path, query) = parse_path_query(&full_path);
+
+    // ヘッダ読み込み
+    let mut headers = std::collections::HashMap::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_lowercase();
+            let val = v.trim().to_string();
+            if key == "content-length" {
+                content_length = val.parse().unwrap_or(0);
+            }
+            headers.insert(key, val);
+        }
+    }
+
+    // ボディ読み込み
+    let mut body = String::new();
+    if content_length > 0 {
+        use std::io::Read;
+        let mut buf = vec![0u8; content_length];
+        reader.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        body = String::from_utf8_lossy(&buf).to_string();
+    }
+
+    Ok(HttpRawRequest { method, path, query, headers, body })
+}
+
+struct HttpRawRequest {
+    method: String,
+    path: String,
+    query: std::collections::HashMap<String, String>,
+    headers: std::collections::HashMap<String, String>,
+    body: String,
+}
+
+fn parse_path_query(
+    full_path: &str,
+) -> (String, std::collections::HashMap<String, String>) {
+    let mut query = std::collections::HashMap::new();
+    if let Some((path, qs)) = full_path.split_once('?') {
+        for pair in qs.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                query.insert(k.to_string(), v.to_string());
+            } else if !pair.is_empty() {
+                query.insert(pair.to_string(), String::new());
+            }
+        }
+        (path.to_string(), query)
+    } else {
+        (full_path.to_string(), query)
+    }
+}
+
+fn extract_raw_response(
+    val: Value,
+) -> (i64, std::collections::HashMap<String, String>, String) {
+    let fields = match val {
+        Value::Struct { fields, .. } => fields,
+        _ => {
+            return (500, std::collections::HashMap::new(), "invalid response".to_string())
+        }
+    };
+    let f = fields.borrow();
+    let status = match f.get("status") {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Float(n)) => *n as i64,
+        _ => 200,
+    };
+    let body = match f.get("body") {
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(Value::Map(hmap)) = f.get("headers") {
+        for (k, v) in hmap.iter() {
+            if let (Value::String(key), Value::String(val)) = (k, v) {
+                headers.insert(key.clone(), val.clone());
+            }
+        }
+    }
+    (status, headers, body)
+}
+
+fn write_http_response(
+    mut stream: &std::net::TcpStream,
+    status: i64,
+    headers: &std::collections::HashMap<String, String>,
+    body: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let reason = match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        _ => "Unknown",
+    };
+    write!(stream, "HTTP/1.1 {} {}\r\n", status, reason)?;
+    write!(stream, "Content-Length: {}\r\n", body.len())?;
+    for (k, v) in headers {
+        write!(stream, "{}: {}\r\n", k, v)?;
+    }
+    write!(stream, "\r\n")?;
+    write!(stream, "{}", body)?;
+    stream.flush()
+}
+
+// ── JSON ↔ Value 変換 ────────────────────────────────────────────────────
+
+fn json_to_value(jv: serde_json::Value) -> Value {
+    match jv {
+        serde_json::Value::Null => Value::Option(None),
+        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else {
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<Value> = arr.into_iter().map(json_to_value).collect();
+            Value::List(Rc::new(RefCell::new(items)))
+        }
+        serde_json::Value::Object(obj) => {
+            let pairs: Vec<(Value, Value)> = obj
+                .into_iter()
+                .map(|(k, v)| (Value::String(k), json_to_value(v)))
+                .collect();
+            Value::Map(pairs)
+        }
+    }
+}
+
+// ── dep パッケージ内の相対インポート変換 ──────────────────────────────────
+
+/// dep パッケージから読み込んだファイルの `use ./foo.*` を `use depname/foo.*` に変換する。
+///
+/// dep パッケージ内のファイルは `use ./cors.*` のような相対インポートを持つが、
+/// インタープリタは project_root 基準で解決するため、dep パッケージ名を
+/// プレフィックスとした `UsePath::External("depname/cors")` に書き換える必要がある。
+fn rewrite_local_use_paths(stmts: &[Stmt], dep_name: &str) -> Vec<Stmt> {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::UseDecl {
+                path: UsePath::Local(local_path),
+                symbols,
+                is_pub,
+                span,
+            } => {
+                // `./middleware` → `anvil/middleware`
+                let new_path = format!("{}/{}", dep_name, local_path.trim_start_matches("./"));
+                Stmt::UseDecl {
+                    path: UsePath::External(new_path),
+                    symbols: symbols.clone(),
+                    is_pub: *is_pub,
+                    span: span.clone(),
+                }
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 // ── テスト ────────────────────────────────────────────────────────────────
