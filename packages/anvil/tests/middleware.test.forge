@@ -1,0 +1,84 @@
+use forge/std/net.{ RawRequest }
+use ./anvil.*
+use ./middleware.*
+use ./request.*
+use ./response.*
+use ./router.*
+
+fn trace_handler(req: Request<string>) -> Response<string>! {
+    let trace = match req.header("X-Forge-Middleware-Trace") {
+        some(value) => value,
+        none        => "",
+    }
+    ok(Response::text(trace))
+}
+
+fn json_handler(req: Request<string>) -> Response<string>! {
+    let parsed = match req.header("X-Forge-Json-Parsed") {
+        some(value) => value,
+        none        => "0",
+    }
+    ok(Response::text(parsed))
+}
+
+fn hello_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("ok"))
+}
+
+fn middleware_next(req: Request<string>) -> Response<string>! {
+    ok(Response::text("next:{req.path}"))
+}
+
+test "middleware: chain order" {
+    let app = Anvil::new()
+        .use(logger())
+        .use(json_parser())
+        .use(static_files("./public"))
+        .get("/trace", trace_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/trace",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "logger,json_parser,static_files:./public")
+}
+
+test "middleware: json_parser" {
+    let app = Anvil::new().use(json_parser()).post("/json", json_handler)
+    let raw = RawRequest {
+        method: "POST",
+        path: "/json",
+        query: {},
+        headers: {"Content-Type": "application/json"},
+        body: "json-body",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "1")
+}
+
+test "middleware: logger" {
+    let app = Anvil::new().use(logger()).get("/", hello_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "ok")
+}
+
+test "middleware: function shape" {
+    let middleware = logger()
+    let run = middleware.run
+    let response = run(new_request("GET", "/shape", ""), middleware_next)?
+    assert_eq(response.status, 200)
+    assert_eq(response.body, some("next:/shape"))
+}

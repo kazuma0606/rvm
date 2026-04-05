@@ -1,0 +1,87 @@
+use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
+use ./anvil.*
+use ./request.*
+use ./response.*
+
+// -----------------------------------------------------------------
+// async ハンドラのテスト
+//
+// Forge transpiler の B-7 ルール:
+//   fn 内で .await? を使うと async fn に自動昇格する。
+//   名前付き関数として定義することでクロージャ制約を回避する。
+// -----------------------------------------------------------------
+
+// async ハンドラ — .await? を含むため async fn に自動昇格する
+fn async_greet_handler(req: Request<string>) -> Response<string>! {
+    // 将来の DB アクセス等はここで .await? を使う
+    // 現時点では同期的な値を返す（forge run では .await は no-op）
+    let name = match req.params.get("name") {
+        some(v) => v,
+        none    => "world",
+    }
+    ok(Response::text("Hello, {name}!"))
+}
+
+// dispatch_async をラップする名前付き関数（テスト用アプリを参照）
+let TEST_APP = Anvil::new().get("/greet/:name", async_greet_handler)
+
+fn test_dispatch(raw: RawRequest) -> RawResponse! {
+    // dispatch_async は .await? を含むため async fn に自動昇格する
+    // test_dispatch もそれを .await? で呼ぶため同様に昇格する
+    // forge run では .await は no-op として同期評価される
+    TEST_APP.dispatch_async(raw).await?
+}
+
+// -----------------------------------------------------------------
+// テスト
+// -----------------------------------------------------------------
+
+test "async handler: named dispatch function が dispatch_async を呼べる" {
+    let raw = RawRequest {
+        method: "GET",
+        path: "/greet/Alice",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let result = test_dispatch(raw).await?
+    assert_eq(result.status, 200)
+    assert_eq(result.body, "Hello, Alice!")
+}
+
+test "async handler: パスパラメータなしで world を返す" {
+    let raw = RawRequest {
+        method: "GET",
+        path: "/greet/",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    // /greet/ は /greet/:name にマッチしないので 404
+    let result = test_dispatch(raw).await?
+    assert_eq(result.status, 404)
+}
+
+test "async handler: dispatch_async がマッチしないルートで 404 を返す" {
+    let raw = RawRequest {
+        method: "GET",
+        path: "/not-found",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let result = test_dispatch(raw).await?
+    assert_eq(result.status, 404)
+}
+
+test "async handler: POST メソッドが GET ルートにマッチしない" {
+    let raw = RawRequest {
+        method: "POST",
+        path: "/greet/Bob",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let result = test_dispatch(raw).await?
+    assert_eq(result.status, 404)
+}

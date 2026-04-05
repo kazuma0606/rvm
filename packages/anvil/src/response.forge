@@ -1,0 +1,57 @@
+pub data Response<T> {
+    status: number
+    headers: map<string, string>
+    body: T?
+}
+
+pub data ErrorBody {
+    message: string
+    code: number
+}
+
+impl<T> Response<T> {
+    fn text(body: string) -> Response<string> {
+        let headers: map<string, string> = {}
+        Response {
+            status: 200,
+            headers: headers,
+            body: some(body),
+        }
+    }
+
+    fn json(body: T) -> Response<T> {
+        let headers: map<string, string> = {"Content-Type": "application/json"}
+        Response {
+            status: 200,
+            headers: headers,
+            body: some(body),
+        }
+    }
+
+    fn empty(code: number) -> Response<()> {
+        let headers: map<string, string> = {}
+        Response {
+            status: code,
+            headers: headers,
+            body: none(),
+        }
+    }
+
+    fn status(state self, code: number) -> Response<T> {
+        Response {
+            status: code,
+            headers: self.headers,
+            body: self.body,
+        }
+    }
+
+    fn header(state self, key: string, value: string) -> Response<T> {
+        state headers = self.headers
+        headers.insert(key, value)
+        Response {
+            status: self.status,
+            headers: headers,
+            body: self.body,
+        }
+    }
+}

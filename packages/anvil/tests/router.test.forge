@@ -1,0 +1,143 @@
+use forge/std/net.{ RawRequest }
+use ./anvil.*
+use ./request.*
+use ./response.*
+use ./router.{ match_route_pattern }
+use ./router.*
+
+fn users_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("users"))
+}
+
+fn user_id_handler(req: Request<string>) -> Response<string>! {
+    let id = match req.params.get("id") {
+        some(value) => value,
+        none        => "missing",
+    }
+    ok(Response::text("user:{id}"))
+}
+
+fn wildcard_handler(req: Request<string>) -> Response<string>! {
+    let path = match req.params.get("path") {
+        some(value) => value,
+        none        => "missing",
+    }
+    ok(Response::text("file:{path}"))
+}
+
+fn query_handler(req: Request<string>) -> Response<string>! {
+    let role = match req.query.get("role") {
+        some(value) => value,
+        none        => "none",
+    }
+    ok(Response::text("role:{role}"))
+}
+
+fn broken_handler(req: Request<string>) -> Response<string>! {
+    err("boom: {req.path}")
+}
+
+fn custom_on_error(message: string, req: Request<string>) -> Response<ErrorBody>! {
+    ok(Response::json(ErrorBody {
+        message: "Handled {message} {req.path}",
+        code: 500,
+    }).status(500))
+}
+
+fn custom_not_found(req: Request<string>) -> Response<ErrorBody>! {
+    ok(Response::json(ErrorBody {
+        message: "Missing {req.path}",
+        code: 404,
+    }).status(404))
+}
+
+test "router: fixed path match" {
+    assert_eq(match_route_pattern("/users", "/users"), some({}))
+}
+
+test "router: :id param extraction" {
+    let matched = match_route_pattern("/users/:id", "/users/42")
+    match matched {
+        some(params) => assert_eq(params.get("id"), some("42")),
+        none         => assert(false),
+    }
+}
+
+test "router: wildcard extraction" {
+    let matched = match_route_pattern("/files/*path", "/files/docs/guide.txt")
+    match matched {
+        some(params) => assert_eq(params.get("path"), some("docs/guide.txt")),
+        none         => assert(false),
+    }
+}
+
+test "router: 404 response" {
+    let app = Anvil::new()
+    let raw = RawRequest {
+        method: "GET",
+        path: "/missing",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 404)
+    assert(response.body.contains("Not Found"))
+}
+
+test "router: query params" {
+    let app = Anvil::new().get("/users", query_handler)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/users",
+        query: {"role": "admin"},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "role:admin")
+}
+
+test "router: nested router mount" {
+    let user_router = Router::new().get("/:id", user_id_handler)
+    let app = Anvil::new().mount("/users", user_router)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/users/7",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 200)
+    assert_eq(response.body, "user:7")
+}
+
+test "router: custom 404 handler" {
+    let app = Anvil::new().not_found(custom_not_found)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/missing",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 404)
+    assert(response.body.contains("Missing /missing"))
+}
+
+test "router: custom error handler" {
+    let app = Anvil::new().get("/boom", broken_handler).on_error(custom_on_error)
+    let raw = RawRequest {
+        method: "GET",
+        path: "/boom",
+        query: {},
+        headers: {},
+        body: "",
+    }
+    let response = app.dispatch(raw)
+    assert_eq(response.status, 500)
+    assert(response.body.contains("Handled boom: /boom /boom"))
+}

@@ -1,0 +1,132 @@
+use ./middleware.*
+use ./request.*
+use ./response.*
+
+pub data CorsOptions {
+    allow_origins: list<string>
+    allow_methods: list<string>
+    allow_headers: list<string>
+    allow_credentials: bool
+    max_age: number?
+}
+
+impl CorsOptions {
+    fn any() -> CorsOptions {
+        CorsOptions {
+            allow_origins: ["*"],
+            allow_methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+            allow_headers: ["Content-Type", "Authorization"],
+            allow_credentials: false,
+            max_age: some(86400),
+        }
+    }
+
+    fn origin(origin: string) -> CorsOptions {
+        CorsOptions {
+            allow_origins: [origin],
+            allow_methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+            allow_headers: ["Content-Type", "Authorization"],
+            allow_credentials: true,
+            max_age: some(3600),
+        }
+    }
+}
+
+pub fn join_csv(items: list<string>) -> string {
+    state out = ""
+    for item in items {
+        if out == "" {
+            out = item.clone()
+        } else {
+            out = "{out}, {item}"
+        }
+    }
+    out
+}
+
+pub fn cors(opts: CorsOptions) -> Middleware {
+    let origin = if len(opts.allow_origins) == 0 {
+        none()
+    } else {
+        some(opts.allow_origins[0].clone())
+    }
+    Middleware {
+        run: middleware_passthrough,
+        kind: "cors",
+        value: origin,
+        items: opts.allow_methods,
+        extra_items: opts.allow_headers,
+        flag: opts.allow_credentials,
+        max_age: opts.max_age,
+    }
+}
+
+pub fn cors_allowed_origin(req: Request<string>, middleware: Middleware) -> string? {
+    let request_origin = req.clone().header("Origin")
+    match request_origin {
+        some(origin) => match middleware.value {
+            some(value) => {
+                if value == "*" || value == origin {
+                    some(value)
+                } else {
+                    none()
+                }
+            }
+            none => none(),
+        }
+        none => none(),
+    }
+}
+
+pub fn apply_cors(opts: CorsOptions, method: string, origin: string) -> Response<string> {
+    let middleware = cors(opts)
+    let headers: map<string, string> = {"Origin": origin}
+    let req = request_from_parts(method, "/", headers, {}, {}, "")
+    match cors_preflight_response(req, middleware) {
+        some(response) => response,
+        none => Response::text("").status(200).header("Access-Control-Allow-Origin", "missing")
+    }
+}
+
+pub fn cors_preflight_response(req: Request<string>, middleware: Middleware) -> Response<string>? {
+    if middleware.kind != "cors" {
+        return none()
+    }
+    if req.method != "OPTIONS" {
+        return none()
+    }
+    let allowed_origin = cors_allowed_origin(req.clone(), middleware.clone())
+    match allowed_origin {
+        some(origin) => {
+            state response = Response::text("").status(200)
+            response = response.header("Access-Control-Allow-Origin", origin)
+            response = response.header("Access-Control-Allow-Methods", join_csv(middleware.items))
+            response = response.header("Access-Control-Allow-Headers", join_csv(middleware.extra_items))
+            if middleware.flag {
+                response = response.header("Access-Control-Allow-Credentials", "true")
+            }
+            if middleware.max_age.is_some() {
+                let value = middleware.max_age.unwrap_or(0)
+                response = response.header("Access-Control-Max-Age", string(value))
+            }
+            some(response)
+        }
+        none => none(),
+    }
+}
+
+pub fn apply_cors_response(req: Request<string>, middleware: Middleware, response: Response<string>) -> Response<string> {
+    if middleware.kind != "cors" {
+        return response
+    }
+    match cors_allowed_origin(req, middleware.clone()) {
+        some(origin) => {
+            state current = response.header("Access-Control-Allow-Origin", origin)
+            if middleware.flag {
+                current = current.header("Access-Control-Allow-Credentials", "true")
+            }
+            current
+        }
+        none => response,
+    }
+}

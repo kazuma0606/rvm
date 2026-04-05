@@ -1,0 +1,474 @@
+use forge/std/net.{ tcp_listen, tcp_listen_async, RawRequest, RawResponse }
+use ./cors.*
+use ./middleware.*
+use ./request.*
+use ./response.*
+use ./router.{ match_route_pattern }
+use ./router.*
+
+pub struct Anvil {
+    routes: list<Route>
+    middlewares: list<Middleware>
+    error_handler: fn(string, Request<string>) -> Response<ErrorBody>!
+    not_found_handler: fn(Request<string>) -> Response<ErrorBody>!
+}
+
+pub fn internal_error_response(message: string, req: Request<string>) -> Response<ErrorBody> {
+    Response::json(ErrorBody {
+        message: "Internal Server Error: {string(message)} {req.method} {req.path}",
+        code: 500,
+    }).status(500)
+}
+
+pub fn default_error_handler(message: string, req: Request<string>) -> Response<ErrorBody>! {
+    ok(internal_error_response(message, req))
+}
+
+pub fn default_not_found_handler(req: Request<string>) -> Response<ErrorBody>! {
+    ok(Response::json(ErrorBody {
+        message: "Not Found: {req.method} {req.path}",
+        code: 404,
+    }).status(404))
+}
+
+pub fn request_from_raw(raw: RawRequest) -> Request<string> {
+    let params: map<string, string> = {}
+    request_from_parts(raw.method, raw.path, raw.headers, params, raw.query, raw.body)
+}
+
+pub fn string_body_text(body: string?) -> string {
+    match body {
+        some(value) => "{value}",
+        none        => "",
+    }
+}
+
+pub fn string_response_to_raw(response: Response<string>) -> RawResponse {
+    RawResponse {
+        status: response.status,
+        headers: response.headers,
+        body: string_body_text(response.body),
+    }
+}
+
+pub fn error_response_to_raw(response: Response<ErrorBody>) -> RawResponse {
+    RawResponse {
+        status: response.status,
+        headers: response.headers,
+        body: match response.body {
+            some(value) => "{value.message}",
+            none        => "",
+        },
+    }
+}
+
+pub fn apply_request_middlewares(req: Request<string>, middlewares: list<Middleware>) -> Request<string> {
+    state current = req
+    for middleware in middlewares {
+        current = apply_request_middleware(current, middleware.clone())
+    }
+    current
+}
+
+pub fn find_cors_preflight_response(req: Request<string>, middlewares: list<Middleware>) -> Response<string>? {
+    for middleware in middlewares {
+        let response = cors_preflight_response(req.clone(), middleware.clone())
+        if response.is_some() {
+            return response
+        }
+    }
+    none()
+}
+
+pub fn apply_response_middlewares(req: Request<string>, middlewares: list<Middleware>, response: Response<string>) -> Response<string> {
+    state current = response
+    state i = len(middlewares) - 1
+    while i >= 0 {
+        current = apply_response_middleware(req.clone(), middlewares[i].clone(), current)
+        current = apply_cors_response(req.clone(), middlewares[i].clone(), current)
+        i = i - 1
+    }
+    current
+}
+
+impl Anvil {
+    fn new() -> Anvil {
+        let routes: list<Route> = []
+        let middlewares: list<Middleware> = []
+        Anvil {
+            routes: routes,
+            middlewares: middlewares,
+            error_handler: default_error_handler,
+            not_found_handler: default_not_found_handler,
+        }
+    }
+
+    fn get(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.get(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn use(state self, middleware: Middleware) -> Anvil {
+        state middlewares = self.middlewares
+        middlewares.push(middleware)
+        Anvil {
+            routes: self.routes,
+            middlewares: middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn post(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.post(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn put(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.put(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn delete(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.delete(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn patch(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.patch(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn any(state self, path: string, handler: Request<string> => Response<string>!) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.any(path, handler)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn mount(state self, prefix: string, router_to_mount: Router) -> Anvil {
+        let router = Router {
+            routes: self.routes.clone(),
+            prefix: "",
+        }
+        let next = router.mount(prefix, router_to_mount)
+        Anvil {
+            routes: next.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn on_error(state self, handler: fn(string, Request<string>) -> Response<ErrorBody>!) -> Anvil {
+        Anvil {
+            routes: self.routes,
+            middlewares: self.middlewares,
+            error_handler: handler,
+            not_found_handler: self.not_found_handler,
+        }
+    }
+
+    fn not_found(state self, handler: fn(Request<string>) -> Response<ErrorBody>!) -> Anvil {
+        Anvil {
+            routes: self.routes,
+            middlewares: self.middlewares,
+            error_handler: self.error_handler,
+            not_found_handler: handler,
+        }
+    }
+
+    fn dispatch(self, raw: RawRequest) -> RawResponse {
+        let req = request_from_raw(raw)
+        let method = req.method.clone()
+        let path = req.path.clone()
+
+        state i = 0
+        while i < len(self.routes) {
+            let route = self.routes[i].clone()
+            let maybe_params = match_route_pattern(route.pattern, path.clone())
+            if method == "OPTIONS" {
+                if maybe_params.is_some() {
+                    let preflight_req = request_from_parts(
+                        req.method.clone(),
+                        req.path.clone(),
+                        req.headers.clone(),
+                        maybe_params.clone().unwrap_or({}),
+                        req.query.clone(),
+                        req.raw_body.clone(),
+                    )
+                    let preflight = find_cors_preflight_response(preflight_req, self.middlewares.clone())
+                    if preflight.is_some() {
+                        return string_response_to_raw(preflight.unwrap_or(Response::text("").status(200)))
+                    }
+                }
+            }
+            if route.method == "ANY" || route.method == method {
+                if maybe_params.is_some() {
+                    let params = maybe_params.unwrap_or({})
+                    let matched_req = request_from_parts(
+                        req.method.clone(),
+                        req.path.clone(),
+                        req.headers.clone(),
+                        params,
+                        req.query.clone(),
+                        req.raw_body.clone(),
+                    )
+                    let next_req = apply_request_middlewares(matched_req, self.middlewares.clone())
+                    let middleware_error = next_req.clone().header("X-Forge-Auth-Error")
+                    if middleware_error.is_some() {
+                        let message = middleware_error.unwrap_or("unauthorized")
+                        match handle_auth_error(message) {
+                            ok(response) => {
+                                return error_response_to_raw(response)
+                            }
+                            err(handler_err) => {
+                                let fallback_req = request_from_parts(
+                                    method.clone(),
+                                    path.clone(),
+                                    req.headers.clone(),
+                                    {},
+                                    req.query.clone(),
+                                    req.raw_body.clone(),
+                                )
+                                return error_response_to_raw(internal_error_response(string(handler_err), fallback_req))
+                            }
+                        }
+                    }
+                    let preflight = find_cors_preflight_response(next_req.clone(), self.middlewares.clone())
+                    if preflight.is_some() {
+                        return string_response_to_raw(preflight.unwrap_or(Response::text("").status(200)))
+                    }
+                    match (route.handler)(next_req.clone()) {
+                        ok(response) => {
+                            let final_response = apply_response_middlewares(next_req, self.middlewares.clone(), response)
+                            return string_response_to_raw(final_response)
+                        }
+                        err(msg) => {
+                            let error_req = request_from_parts(
+                                method.clone(),
+                                path.clone(),
+                                req.headers.clone(),
+                                {},
+                                req.query.clone(),
+                                req.raw_body.clone(),
+                            )
+                            match (self.error_handler)(string(msg), error_req) {
+                                ok(response) => {
+                                    return error_response_to_raw(response)
+                                }
+                                err(handler_err) => {
+                                    let fallback_req = request_from_parts(
+                                        method.clone(),
+                                        path.clone(),
+                                        req.headers.clone(),
+                                        {},
+                                        req.query.clone(),
+                                        req.raw_body.clone(),
+                                    )
+                                    return error_response_to_raw(internal_error_response(string(handler_err), fallback_req))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        let not_found_req = request_from_parts(
+            method.clone(),
+            path.clone(),
+            req.headers.clone(),
+            {},
+            req.query.clone(),
+            req.raw_body.clone(),
+        )
+        match (self.not_found_handler)(not_found_req) {
+            ok(response) => error_response_to_raw(response),
+            err(msg) => {
+                let fallback_req = request_from_parts(
+                    method,
+                    path,
+                    req.headers,
+                    {},
+                    req.query,
+                    req.raw_body,
+                )
+                error_response_to_raw(internal_error_response(string(msg), fallback_req))
+            }
+        }
+    }
+
+    /// async ハンドラ対応版 dispatch。
+    /// ルートハンドラが `.await?` を使う場合（= async fn に昇格する場合）はこちらを使う。
+    /// Forge transpiler が `.await?` を検出して自動的に `async fn` に昇格させる。
+    fn dispatch_async(self, raw: RawRequest) -> RawResponse! {
+        let req = request_from_raw(raw)
+        let method = req.method.clone()
+        let path = req.path.clone()
+
+        state i = 0
+        while i < len(self.routes) {
+            let route = self.routes[i].clone()
+            let maybe_params = match_route_pattern(route.pattern, path.clone())
+            if method == "OPTIONS" {
+                if maybe_params.is_some() {
+                    let preflight_req = request_from_parts(
+                        req.method.clone(),
+                        req.path.clone(),
+                        req.headers.clone(),
+                        maybe_params.clone().unwrap_or({}),
+                        req.query.clone(),
+                        req.raw_body.clone(),
+                    )
+                    let preflight = find_cors_preflight_response(preflight_req, self.middlewares.clone())
+                    if preflight.is_some() {
+                        return ok(string_response_to_raw(preflight.unwrap_or(Response::text("").status(200))))
+                    }
+                }
+            }
+            if route.method == "ANY" || route.method == method {
+                if maybe_params.is_some() {
+                    let params = maybe_params.unwrap_or({})
+                    let matched_req = request_from_parts(
+                        req.method.clone(),
+                        req.path.clone(),
+                        req.headers.clone(),
+                        params,
+                        req.query.clone(),
+                        req.raw_body.clone(),
+                    )
+                    let next_req = apply_request_middlewares(matched_req, self.middlewares.clone())
+                    let middleware_error = next_req.clone().header("X-Forge-Auth-Error")
+                    if middleware_error.is_some() {
+                        let message = middleware_error.unwrap_or("unauthorized")
+                        let auth_err_resp = handle_auth_error(message)?
+                        return ok(error_response_to_raw(auth_err_resp))
+                    }
+                    let preflight = find_cors_preflight_response(next_req.clone(), self.middlewares.clone())
+                    if preflight.is_some() {
+                        return ok(string_response_to_raw(preflight.unwrap_or(Response::text("").status(200))))
+                    }
+                    let handler_call = (route.handler)(next_req.clone()).await
+                    match handler_call {
+                        ok(response) => {
+                            let final_response = apply_response_middlewares(next_req, self.middlewares.clone(), response)
+                            return ok(string_response_to_raw(final_response))
+                        }
+                        err(msg) => {
+                            let error_req = request_from_parts(
+                                method.clone(),
+                                path.clone(),
+                                req.headers.clone(),
+                                {},
+                                req.query.clone(),
+                                req.raw_body.clone(),
+                            )
+                            match (self.error_handler)(string(msg), error_req) {
+                                ok(response) => {
+                                    return ok(error_response_to_raw(response))
+                                }
+                                err(handler_err) => {
+                                    let fallback_req = request_from_parts(
+                                        method.clone(),
+                                        path.clone(),
+                                        req.headers.clone(),
+                                        {},
+                                        req.query.clone(),
+                                        req.raw_body.clone(),
+                                    )
+                                    return ok(error_response_to_raw(internal_error_response(string(handler_err), fallback_req)))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        let not_found_req = request_from_parts(
+            method.clone(),
+            path.clone(),
+            req.headers.clone(),
+            {},
+            req.query.clone(),
+            req.raw_body.clone(),
+        )
+        match (self.not_found_handler)(not_found_req) {
+            ok(response) => ok(error_response_to_raw(response)),
+            err(msg) => {
+                let fallback_req = request_from_parts(
+                    method,
+                    path,
+                    req.headers,
+                    {},
+                    req.query,
+                    req.raw_body,
+                )
+                ok(error_response_to_raw(internal_error_response(string(msg), fallback_req)))
+            }
+        }
+    }
+
+    fn listen(state self, port: number) -> number! {
+        println("Listening on http://localhost:{port}")
+        match tcp_listen(port, raw => self.dispatch(raw)) {
+            ok(_)    => ok(0),
+            err(msg) => err(msg),
+        }
+    }
+}

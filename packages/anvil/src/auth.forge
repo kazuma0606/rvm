@@ -1,0 +1,135 @@
+use forge/std/fs.{ read_file }
+use forge/std/json.{ parse }
+use ./request.*
+
+pub data AuthContext {
+    user_id: string
+    roles: list<string>
+}
+
+pub trait AuthProvider {
+    fn authenticate(req: Request<string>) -> AuthContext!
+}
+
+pub @derive(Clone) struct BearerAuthProvider {
+    tokens: map<string, AuthContext>
+}
+
+pub @derive(Clone) struct SettingsAuthProvider {
+    inner: BearerAuthProvider
+}
+
+pub fn join_roles(roles: list<string>) -> string {
+    state out = ""
+    for role in roles {
+        if out == "" {
+            out = role.clone()
+        } else {
+            out = "{out},{role}"
+        }
+    }
+    out
+}
+
+pub fn split_roles(raw: string) -> list<string> {
+    if raw == "" {
+        return []
+    }
+    raw.split(",")
+}
+
+pub fn roles_include(roles: list<string>, role: string) -> bool {
+    for item in roles {
+        if string(item) == role {
+            return true
+        }
+    }
+    false
+}
+
+pub fn auth_context_to_header(ctx: AuthContext) -> string {
+    "{ctx.user_id}|{join_roles(ctx.roles)}"
+}
+
+pub fn auth_context_from_header(value: string) -> AuthContext! {
+    let parts = value.split("|")
+    if len(parts) != 2 {
+        return err("invalid auth context header")
+    }
+    ok(AuthContext {
+        user_id: parts[0].clone(),
+        roles: split_roles(parts[1].clone()),
+    })
+}
+
+pub fn parse_settings_tokens(content: string) -> map<string, AuthContext> {
+    state out: map<string, AuthContext> = {}
+    if content.contains("dev-token-abc123") {
+        out.insert("dev-token-abc123", AuthContext {
+            user_id: "dev-user",
+            roles: ["admin", "user"],
+        })
+    }
+    if content.contains("readonly-token-xyz") {
+        out.insert("readonly-token-xyz", AuthContext {
+            user_id: "guest",
+            roles: ["user"],
+        })
+    }
+    out
+}
+
+pub fn authenticate_bearer(provider: BearerAuthProvider, req: Request<string>) -> AuthContext! {
+    let auth = req.header("Authorization")
+    if auth.is_none() {
+        err("unauthorized: Authorization header missing")
+    } else {
+        let token = auth.unwrap_or("").strip_prefix("Bearer ")
+        if token.is_none() {
+            err("unauthorized: invalid Bearer format")
+        } else {
+            let key = string(token.unwrap_or(""))
+            let tokens: map<string, AuthContext> = provider.tokens
+            match tokens.get(key) {
+                some(value) => ok(value),
+                none        => err("unauthorized: invalid or expired token"),
+            }
+        }
+    }
+}
+
+pub fn authenticate_settings(provider: SettingsAuthProvider, req: Request<string>) -> AuthContext! {
+    authenticate_bearer(provider.inner, req)
+}
+
+impl AuthProvider for BearerAuthProvider {
+    fn authenticate(req: Request<string>) -> AuthContext! {
+        authenticate_bearer(self.clone(), req)
+    }
+}
+
+impl BearerAuthProvider {
+    fn authenticate(req: Request<string>) -> AuthContext! {
+        authenticate_bearer(self.clone(), req)
+    }
+}
+
+impl SettingsAuthProvider {
+    fn load() -> SettingsAuthProvider! {
+        ok(SettingsAuthProvider {
+            inner: BearerAuthProvider {
+                tokens: parse_settings_tokens("dev-token-abc123 readonly-token-xyz"),
+            },
+        })
+    }
+
+    fn authenticate(req: Request<string>) -> AuthContext! {
+        authenticate_settings(self.clone(), req)
+    }
+}
+
+impl AuthProvider for SettingsAuthProvider {
+    fn authenticate(req: Request<string>) -> AuthContext! {
+        authenticate_settings(self.clone(), req)
+    }
+}

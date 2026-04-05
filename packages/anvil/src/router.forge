@@ -1,0 +1,152 @@
+use ./request.*
+use ./response.*
+
+pub @derive(Clone)
+struct Route {
+    method: string
+    pattern: string
+    handler: Request<string> => Response<string>!
+}
+
+pub struct Router {
+    routes: list<Route>
+    prefix: string
+}
+
+pub fn join_paths(prefix: string, path: string) -> string {
+    if prefix == "" {
+        path
+    } else if path == "" {
+        prefix
+    } else if prefix == "/" {
+        path
+    } else if path == "/" {
+        prefix
+    } else {
+        "{prefix}{path}"
+    }
+}
+
+pub fn join_tail(parts: list<string>, start: number) -> string {
+    state buf = ""
+    state i: number = start
+    while i < len(parts) {
+        if buf == "" {
+            buf = parts[i].clone()
+        } else {
+            buf = "{buf}/{parts[i]}"
+        }
+        i = i + 1
+    }
+    buf
+}
+
+pub fn match_route_pattern(pattern: string, path: string) -> map<string, string>? {
+    let pattern_parts = pattern.split("/")
+    let path_parts = path.split("/")
+
+    state params: map<string, string> = {}
+    state i: number = 0
+
+    while i < len(pattern_parts) {
+        let pattern_part = pattern_parts[i].clone()
+
+        if pattern_part.starts_with(":") {
+            if i >= len(path_parts) {
+                return none()
+            }
+            let name = match pattern_part.strip_prefix(":") {
+                some(value) => value,
+                none        => pattern_part,
+            }
+            params[name] = path_parts[i].clone()
+        } else if pattern_part.starts_with("*") {
+            let name = match pattern_part.strip_prefix("*") {
+                some(value) => value,
+                none        => pattern_part,
+            }
+            params[name] = join_tail(path_parts, i)
+            return some(params)
+        } else {
+            if i >= len(path_parts) {
+                return none()
+            }
+            if pattern_part != path_parts[i] {
+                return none()
+            }
+        }
+
+        i = i + 1
+    }
+
+    if i != len(path_parts) {
+        return none()
+    }
+
+    some(params)
+}
+
+impl Router {
+    fn new() -> Router {
+        let routes: list<Route> = []
+        Router {
+            routes: routes,
+            prefix: "",
+        }
+    }
+
+    fn add(state self, method: string, path: string, handler: Request<string> => Response<string>!) -> Router {
+        let prefix = self.prefix.clone()
+        let pattern = join_paths(prefix, path)
+        state routes = self.routes
+        routes.push(Route {
+            method: method,
+            pattern: pattern,
+            handler: handler,
+        })
+        Router {
+            routes: routes,
+            prefix: self.prefix,
+        }
+    }
+
+    fn get(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("GET", path, handler)
+    }
+
+    fn post(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("POST", path, handler)
+    }
+
+    fn put(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("PUT", path, handler)
+    }
+
+    fn delete(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("DELETE", path, handler)
+    }
+
+    fn patch(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("PATCH", path, handler)
+    }
+
+    fn any(state self, path: string, handler: Request<string> => Response<string>!) -> Router {
+        self.add("ANY", path, handler)
+    }
+
+    fn mount(state self, prefix: string, router: Router) -> Router {
+        state routes = self.routes
+        let child_prefix = join_paths(prefix, router.prefix)
+        for route in router.routes {
+            routes.push(Route {
+                method: route.method.clone(),
+                pattern: join_paths(child_prefix.clone(), route.pattern.clone()),
+                handler: route.handler,
+            })
+        }
+        Router {
+            routes: routes,
+            prefix: self.prefix,
+        }
+    }
+}

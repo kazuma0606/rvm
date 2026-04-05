@@ -6,63 +6,144 @@
 
 ## 設計方針
 
-- anvil は **ForgeScript で書かれた**パッケージ（.forge ソースが正）
-- `forge build packages/anvil/` で Rust コードが生成され `cargo build` でコンパイルされる
-- A-1〜A-4 は `std` のみ（外部クレート依存なし）
-- A-5 で `tokio` を導入して非同期対応
+- anvil は **100% ForgeScript** で書かれたパッケージ
+- TCP・ファイル I/O・JSON は `forge/std` の標準ライブラリプリミティブとして提供する
+- anvil は `forge/std/net` / `forge/std/fs` / `forge/std/json` を `use` するだけ
+- Rust を書くのは Forge ツールチェーン側（`crates/forge-stdlib`）のみ
+
+### 責務の分担
+
+```
+packages/anvil/src/*.forge       ← Anvil（100% ForgeScript）
+  use forge/std/net.tcp_listen
+  use forge/std/fs.read_file
+  use forge/std/json.parse
+         │
+         ▼
+crates/forge-stdlib/src/         ← Forge 標準ライブラリ（Rust 実装・ツールチェーン側）
+  net.rs   : tcp_listen / tcp_connect
+  fs.rs    : read_file / write_file / file_exists
+  json.rs  : parse / stringify
+```
+
+Anvil ユーザーは Rust を一切書かない。
 
 ---
 
 ## 変更ファイル一覧
 
 ```
+crates/forge-stdlib/src/         ← AS-0: 標準ライブラリ拡張（Rust）
+  net.rs       (新規)            ← tcp_listen / tcp_connect
+  fs.rs        (新規)            ← read_file / write_file / file_exists
+  json.rs      (新規)            ← parse / stringify
+
 packages/anvil/
-├── forge.toml                  ← A-0: パッケージマニフェスト
-├── settings.json               ← A-4: 開発用認証トークン（.gitignore 対象）
+├── forge.toml                   ← A-0: 依存クレートなし（stdlib のみ）
+├── settings.json                ← A-4: 開発用認証トークン（.gitignore 対象）
 ├── src/
-│   ├── main.forge              ← A-1: エントリポイント・Anvil struct・listen()
-│   ├── request.forge           ← A-1: Request<T> data + impl
-│   ├── response.forge          ← A-1: Response<T> data + impl + ErrorBody
-│   ├── router.forge            ← A-2: Router struct・ルート登録・パスマッチング
-│   ├── middleware.forge        ← A-3: MiddlewareChain・logger・json_parser・require_role
-│   ├── cors.forge              ← A-3: CorsOptions data + impl・cors() ミドルウェア
-│   └── auth.forge              ← A-4: AuthProvider trait・BearerAuthProvider・SettingsAuthProvider
+│   ├── main.forge               ← A-1: Anvil struct・listen()
+│   ├── request.forge            ← A-1: Request<T> data + impl
+│   ├── response.forge           ← A-1: Response<T> data + impl + ErrorBody
+│   ├── router.forge             ← A-2: Router struct・ルート登録・パスマッチング
+│   ├── middleware.forge         ← A-3: MiddlewareChain・logger・json_parser・require_role
+│   ├── cors.forge               ← A-3: CorsOptions data + impl・cors() ミドルウェア
+│   └── auth.forge               ← A-4: AuthProvider trait・BearerAuthProvider・SettingsAuthProvider
 ├── tests/
-│   ├── request.test.forge      ← A-1: Request パースのテスト
-│   ├── response.test.forge     ← A-1: Response ビルダーのテスト
-│   ├── router.test.forge       ← A-2: ルーティングのテスト
-│   ├── middleware.test.forge   ← A-3: ミドルウェアチェーンのテスト
-│   ├── cors.test.forge         ← A-3: CORS preflight のテスト
-│   └── auth.test.forge         ← A-4: AuthProvider 契約テスト
-└── .gitignore                  ← A-4: settings.json を除外
+│   ├── request.test.forge       ← A-1
+│   ├── response.test.forge      ← A-1
+│   ├── router.test.forge        ← A-2
+│   ├── middleware.test.forge    ← A-3
+│   ├── cors.test.forge          ← A-3
+│   └── auth.test.forge          ← A-4
+└── .gitignore                   ← A-4: settings.json を除外
 ```
 
-### Forge コンパイラ側で必要な機能
+### Forge コンパイラ・標準ライブラリの確認済み機能
 
 | 機能 | 必要ステージ | 対応状況 |
 |------|------------|---------|
 | `data<T>` ジェネリック型 | A-1 | **実装済み** |
 | `impl<T>` ジェネリック impl | A-1 | **実装済み** |
-| 高階関数 / fn 型 | A-2 | **実装済み** (`TypeAnn::Fn`, Closure 実行まで完全) |
-| クロージャ (`x => expr`) | A-2 | **実装済み** (多引数・環境キャプチャも完全) |
+| 高階関数 / fn 型 | A-2 | **実装済み** |
+| クロージャ (`x => expr`) | A-2 | **実装済み** |
 | `map<K,V>` / `list<T>` | A-1 | **実装済み** |
-| `trait` / `impl Trait for` | A-4 | **実装済み** (AST + Parser 完全実装) |
-| `typestate` | A-3 | **実装済み** (AST + Parser 完全。実行ロジックは部分的) |
-| `use` モジュールインポート | A-1 | **実装済み** (Local/External/Stdlib) |
-| `forge.toml` パース・ビルド | A-0 | **未実装** (Cargo.toml 管理のみ) |
-| `async fn` / `.await` | A-5 | **部分実装** (`.await` 式のみ、`async` キーワードなし) |
-
-> **注意**: `forge.toml` のパースは未実装のため、A-0 が Forge ランタイム側のタスクになる。
-> `trait` は実装済みのため、A-4 の `AuthProvider` は最初から `trait` 構文で書ける。
-> `typestate` の実行ロジックが部分的なため、A-3 で動作確認しながら進める。
+| `trait` / `impl Trait for` | A-4 | **実装済み** |
+| `typestate` | A-3 | **実装済み**（実行ロジックは動作確認必要） |
+| `use forge/std/net` | A-1 | **未実装** → AS-0 で追加 |
+| `use forge/std/fs` | A-4 | **未実装** → AS-0 で追加 |
+| `use forge/std/json` | A-4 | **未実装** → AS-0 で追加 |
+| `async fn` / `.await` | A-5 | 部分実装（`async` キーワードなし） |
 
 ---
 
 ## Stage ごとの実装詳細
 
-### Stage A-0: forge.toml + ビルドパイプライン
+### Stage AS-0: forge/std 標準ライブラリ拡張
 
-**目標**: `forge build packages/anvil/` が通る
+**目標**: Forge コードから TCP・ファイル I/O・JSON が使えるようになる
+
+#### `forge/std/net` — TCP ネットワーク
+
+```forge
+// ForgeScript から見える API
+use forge/std/net.{ tcp_listen, RawRequest, RawResponse }
+
+// tcp_listen: ポートをバインドし、接続ごとに handler を呼ぶ（blocking）
+fn tcp_listen(port: number, handler: fn(RawRequest) -> RawResponse)
+
+data RawRequest {
+    method:  string,
+    path:    string,   // クエリを除いたパス
+    query:   string,   // "key=val&key2=val2"
+    headers: map<string, string>,
+    body:    string,
+}
+
+data RawResponse {
+    status:  number,
+    headers: map<string, string>,
+    body:    string,
+}
+```
+
+Rust 実装: `crates/forge-stdlib/src/net.rs`
+- `std::net::TcpListener::bind()`
+- HTTP/1.1 リクエストライン・ヘッダ・ボディのパース
+- レスポンスのシリアライズ
+- `std::thread::spawn` で並列処理（A-5 まで）
+
+#### `forge/std/fs` — ファイル I/O
+
+```forge
+use forge/std/fs.{ read_file, write_file, file_exists }
+
+fn read_file(path: string) -> string!
+fn write_file(path: string, content: string) -> ()!
+fn file_exists(path: string) -> bool
+```
+
+Rust 実装: `crates/forge-stdlib/src/fs.rs`
+- `std::fs::read_to_string`
+- `std::fs::write`
+- `std::path::Path::exists`
+
+#### `forge/std/json` — JSON パース
+
+```forge
+use forge/std/json.{ parse, stringify }
+
+fn parse(src: string) -> map<string, string>!   // 簡易パース（v1）
+fn stringify(value: string) -> string
+```
+
+Rust 実装: `crates/forge-stdlib/src/json.rs`
+- `std` のみで簡易 JSON パース（`serde_json` を使わず）
+- または `serde_json` をオプション依存として forge-stdlib に追加
+
+---
+
+### Stage A-0: forge.toml
 
 ```toml
 # packages/anvil/forge.toml
@@ -71,246 +152,100 @@ name    = "anvil"
 version = "0.1.0"
 entry   = "src/main.forge"
 
-[dependencies]
-# A-1〜A-4: なし
+# stdlib のみ使用 — 外部クレート依存なし
 # A-5 以降:
-# tokio = "1"
+# [dependencies]
+# tokio = { version = "1", features = ["full"] }
 ```
-
-- `forge.toml` の `[package]` / `[dependencies]` パース
-- `entry` フィールドによるエントリポイント解決
-- ビルド成果物: `target/anvil/` 以下に Rust コードを生成
 
 ---
 
-### Stage A-1: TCP + HTTP/1.1 基礎
-
-**目標**: `app.listen(3000)` で起動し、固定レスポンスを返せる
-
-#### request.forge
+### Stage A-1: 型定義層（純粋 ForgeScript）
 
 ```forge
-data Request<T> {
-    method:   string,
-    path:     string,
-    headers:  map<string, string>,
-    params:   map<string, string>,
-    query:    map<string, string>,
-    raw_body: string,
-}
+// main.forge
+use forge/std/net.{ tcp_listen, RawRequest, RawResponse }
 
-impl<T> Request<T> {
-    fn body(self) -> T!        // JSON デシリアライズ（A-1 は raw_body 返しのみ）
-    fn header(self, name: string) -> string?
-}
-```
-
-#### response.forge
-
-```forge
-data Response<T> {
-    status:  number,
-    headers: map<string, string>,
-    body:    T?,
-}
-
-data ErrorBody {
-    message: string,
-    code:    number,
-}
-
-impl<T> Response<T> {
-    fn text(body: string)  -> Response<string>
-    fn json(body: T)       -> Response<T>
-    fn empty(code: number) -> Response<()>
-    fn status(self, code: number) -> Response<T>
-    fn header(self, key: string, value: string) -> Response<T>
-}
-```
-
-#### main.forge
-
-```forge
 data Anvil {
-    // ルート・ミドルウェアのリスト（内部）
+    routes:      list<Route>,
+    middlewares: list<fn(...)>,
 }
 
 impl Anvil {
     fn new() -> Anvil
-    fn listen(self, port: number)
+    fn listen(self, port: number) {
+        tcp_listen(port, fn(raw) => self.dispatch(raw))
+    }
 }
 ```
-
-**生成 Rust の要点**:
-- `std::net::TcpListener::bind()`
-- HTTP/1.1 リクエストラインの手動パース（`BufReader` + `read_line`）
-- レスポンスの手動シリアライズ（`write_all`）
 
 ---
 
-### Stage A-2: ルーティング
+### Stage A-2: ルーティング（純粋 ForgeScript）
 
-**目標**: GET/POST 等のルート登録・パスパラメータ解決が動く
-
-#### router.forge
-
-```forge
-data Route {
-    method:  string,
-    pattern: string,           // "/users/:id" など
-    handler: fn(Request<string>) -> Response<string>!,
-}
-
-data Router {
-    routes:  list<Route>,
-    prefix:  string,
-}
-
-impl Router {
-    fn new() -> Router
-    fn get(self, path: string, handler: fn(...) -> ...) -> Router
-    fn post(self, path: string, handler: fn(...) -> ...) -> Router
-    fn put(self, path: string, handler: fn(...) -> ...) -> Router
-    fn delete(self, path: string, handler: fn(...) -> ...) -> Router
-    fn patch(self, path: string, handler: fn(...) -> ...) -> Router
-    fn any(self, path: string, handler: fn(...) -> ...) -> Router
-    fn mount(self, prefix: string, router: Router) -> Router
-}
-```
-
-**パスマッチングアルゴリズム**:
-1. パターンを `/` で分割
-2. `:name` セグメントは任意文字列にマッチ → `params` に格納
-3. `*name` セグメントは残りのパスにマッチ（ワイルドカード）
-4. 登録順に評価し最初にマッチしたルートを使用
-
-**クエリパラメータ**:
-- URL の `?` 以降を `&` で分割 → `key=value` をパース
-- `req.query` に格納
+- `data Route` / `data Router` の定義
+- 固定パス・`:id` パラメータ・`*path` ワイルドカードのマッチング（純 Forge ロジック）
+- クエリ文字列の `&` 分割・`key=value` パース
+- `app.mount("/prefix", router)` によるネスト
 
 ---
 
-### Stage A-3: ミドルウェア・組み込み機能
+### Stage A-3: ミドルウェア・CORS・typestate（純粋 ForgeScript）
 
-**目標**: `app.use(middleware)` が動き、CORS preflight が通る
-
-#### middleware.forge
-
-```forge
-// ミドルウェアの型: fn(req, next) -> Response!
-fn logger() -> fn(Request<string>, fn(Request<string>) -> Response<string>!) -> Response<string>!
-fn json_parser() -> fn(Request<string>, ...) -> Response<string>!
-fn static_files(dir: string) -> fn(Request<string>, ...) -> Response<string>!
-fn require_role(role: string) -> fn(Request<string>, ...) -> Response<string>!
-```
-
-#### cors.forge
-
-```forge
-data CorsOptions {
-    allow_origins:     list<string>,
-    allow_methods:     list<string>,
-    allow_headers:     list<string>,
-    allow_credentials: bool,
-    max_age:           number?,
-}
-
-impl CorsOptions {
-    fn any()              -> CorsOptions
-    fn origin(o: string)  -> CorsOptions
-}
-
-fn cors(opts: CorsOptions) -> fn(Request<string>, ...) -> Response<string>!
-```
-
-**CORS 処理**:
-- `OPTIONS` リクエスト（preflight）: 200 + CORS ヘッダを返して終了
-- 通常リクエスト: `next(req)` を呼び、レスポンスに CORS ヘッダを追記
-
-**typestate (RequestLifecycle)** は A-3 フェーズ後半で実装。
-Forge の `typestate` キーワード対応が必要なため、先行して `data` + state フィールドで仮実装する。
+- ミドルウェアチェーン（高階関数）
+- `data CorsOptions` + preflight 対応
+- `typestate RequestLifecycle` — `typestate` キーワードで実装
 
 ---
 
-### Stage A-4: 認証・認可
-
-**目標**: `SettingsAuthProvider::load()` で settings.json を読み、Bearer トークン認証が動く
-
-#### auth.forge
+### Stage A-4: 認証・認可（ForgeScript + forge/std/fs・json）
 
 ```forge
-data AuthContext {
-    user_id: string,
-    roles:   list<string>,
+use forge/std/fs.read_file
+use forge/std/json.parse
+
+trait AuthProvider {
+    fn authenticate(self, req: Request<string>) -> AuthContext!
 }
 
-// trait が未実装の間は data + fn フィールドで代替
-data AuthProvider {
-    authenticate: fn(Request<string>) -> AuthContext!,
+impl SettingsAuthProvider {
+    fn load() -> SettingsAuthProvider! {
+        let content = read_file("settings.json")?
+        let config  = parse(content)?
+        // config から BearerAuthProvider を構築
+    }
 }
-
-data BearerAuthProvider {
-    tokens: map<string, AuthContext>,
-}
-
-data SettingsAuthProvider {
-    inner: BearerAuthProvider,
-}
-```
-
-**settings.json の読み込み**:
-- `std::fs::read_to_string("settings.json")` → 手動 JSON パース
-  （`serde_json` を使わず `std` のみで実装する）
-- または `serde_json` を `[dependencies]` に追加する（JSON パースのため許容）
-
-**auth_middleware**:
-```forge
-fn auth_middleware(provider: AuthProvider) -> fn(Request<string>, ...) -> Response<string>!
-```
-
-**.gitignore**:
-```
-packages/anvil/settings.json
-packages/*/settings.json
 ```
 
 ---
 
 ### Stage A-5: 非同期（将来）
 
-- `forge.toml` に `tokio = "1"` を追加
+- forge/std/net を tokio ベースに切り替え（Forge 側のコード変更なし）
 - `async fn` ハンドラ・ミドルウェアへの対応
-- スレッドプール（`std::thread`）から `tokio::spawn` へ移行
-- コネクションプール
 
 ---
 
 ## 依存クレートまとめ
 
-| Stage | クレート | forge.toml |
-|-------|---------|-----------|
-| A-1〜A-3 | なし | (空) |
-| A-4 | `serde_json`（JSON パース用・任意） | `serde_json = "1"` |
-| A-5 | `tokio` | `tokio = { version = "1", features = ["full"] }` |
-
----
-
-## テスト方針
-
-- テストファイルは `tests/*.test.forge` に配置
-- `forge test packages/anvil/` で実行
-- 組み込みの `assert_ok` / `assert_err` / `assert_eq` を使用
-- HTTP サーバを実際に起動するテストは Stage A-2 以降（ポート衝突に注意）
-- 純粋関数（パスマッチング・CORS ヘッダ生成・認証ロジック）は単体テストで網羅
+| Stage | 依存 | 理由 |
+|-------|------|------|
+| AS-0〜A-4 | なし（forge/std のみ） | stdlib を使用 |
+| A-5 | `tokio`（forge.toml に追加） | 非同期ランタイム |
 
 ---
 
 ## 実装順序（推奨）
 
 ```
-A-0 → A-1 (Request/Response) → A-1 (Anvil/listen) →
-A-2 (Router/routing) → A-3 (middleware chain) →
-A-3 (cors) → A-3 (logger/json_parser) →
-A-4 (BearerAuthProvider) → A-4 (SettingsAuthProvider) →
-A-4 (require_role) → A-5 (async)
+AS-0 (forge/std/net・fs・json を forge-stdlib に追加) →
+A-0 (forge.toml 作成) →
+A-1 (Request/Response 型定義) →
+A-1 (Anvil::listen — forge/std/net 使用) →
+A-2 (Router/パスマッチング) →
+A-3 (ミドルウェアチェーン・cors・typestate) →
+A-4 (BearerAuthProvider) →
+A-4 (SettingsAuthProvider — forge/std/fs・json 使用) →
+A-4 (require_role) →
+A-5 (async)
 ```

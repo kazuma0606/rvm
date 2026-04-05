@@ -1,0 +1,8 @@
+use ./lifecycle.request_lifecycle_demo
+
+fn main() -> number! {
+    println(request_lifecycle_demo()?)
+    ok(0)
+}
+
+main()?

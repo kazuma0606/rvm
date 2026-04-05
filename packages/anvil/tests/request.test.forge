@@ -1,0 +1,51 @@
+use ./request.{ Request }
+
+test "request: build" {
+    let headers: map<string, string> = {"Host": "localhost"}
+    let params: map<string, string> = {"id": "42"}
+    let query: map<string, string> = {"lang": "ja"}
+    let req: Request<string> = Request {
+        method: "GET",
+        path: "/users/42",
+        headers: headers,
+        params: params,
+        query: query,
+        raw_body: "body",
+    }
+
+    assert_eq(req.method, "GET")
+    assert_eq(req.path, "/users/42")
+    assert_eq(req.params.get("id"), some("42"))
+    assert_eq(req.query.get("lang"), some("ja"))
+}
+
+test "request: header" {
+    let headers0: map<string, string> = {}
+    let params0: map<string, string> = {}
+    let query0: map<string, string> = {}
+    let req: Request<string> = Request {
+        method: "GET",
+        path: "/",
+        headers: headers0,
+        params: params0,
+        query: query0,
+        raw_body: "",
+    }
+    assert(match req.header("Host") {
+        none    => true,
+        some(_) => false,
+    })
+
+    state headers = req.headers
+    headers.insert("Host", "localhost")
+    let req2: Request<string> = Request {
+        method: req.method,
+        path: req.path,
+        headers: headers,
+        params: req.params,
+        query: req.query,
+        raw_body: req.raw_body,
+    }
+
+    assert_eq(req2.header("Host"), some("localhost"))
+}

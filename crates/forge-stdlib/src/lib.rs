@@ -4,3 +4,14 @@
 
 pub mod builtins;
 pub mod collections;
+pub mod fs;
+pub mod json;
+pub mod net;
+
+pub mod forge {
+    pub mod std {
+        pub use crate::fs;
+        pub use crate::json;
+        pub use crate::net;
+    }
+}
