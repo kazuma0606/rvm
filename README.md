@@ -1,32 +1,33 @@
-# ForgeScript / RVM
+# ForgeScript
 
-> Rust エコシステムへの玄関口となるスクリプト言語
+> **Pythonのように書けて、Rustとして動く。**
 
-ForgeScript は「Kotlin の設計哲学 × Rust のエコシステム × ゼロ依存バイナリ」を目指した言語です。
-Python や JavaScript で書いているが速さ・安全性を求める人、Rust に興味はあるが学習コストで断念した人をターゲットにしています。
+ForgeScript は「Rust の難しさを隠蔽し、Rust の強さを届ける」スクリプト言語です。
+
+- `forge run` でインタープリタとしてすぐ動く（Pythonのような体験）
+- `forge build` でネイティブバイナリになる（Rustの性能・安全性）
+- ノートブック（`.fnb`）でインタラクティブに試せる（近日対応予定）
+- AIと一緒に書きやすい（明示的な型・シンプルな構文）
+
+Rust に興味はあるが学習コストで断念した人、Python や Go で書いているがパフォーマンスと安全性が欲しい人のための言語です。
 
 ---
 
 ## クイックスタート
 
 ```bash
-# ビルド
+# ビルド（Rust が必要）
 cargo build --release
 
-# ファイルを実行
-cargo run --bin forge-new -- run fixtures/hello.forge
+# forge コマンドとして使う
+./target/release/forge run hello.forge
+./target/release/forge repl
+./target/release/forge new my-app
+```
 
-# Rust にトランスパイルしてネイティブバイナリを生成
-cargo run --bin forge-new -- build fixtures/hello.forge
-
-# 型チェック（実行しない）
-cargo run --bin forge-new -- check myfile.forge
-
-# インラインテストを実行
-cargo run --bin forge-new -- test myfile.forge
-
-# 対話型 REPL
-cargo run --bin forge-new -- repl
+```forge
+// hello.forge
+println("Hello, ForgeScript!")
 ```
 
 ---
@@ -34,7 +35,7 @@ cargo run --bin forge-new -- repl
 ## 言語サンプル
 
 ```forge
-// 変数・ミュータブル変数
+// 変数（let: 不変 / state: 可変）
 let name = "World"
 state count = 0
 
@@ -44,41 +45,45 @@ fn fib(n: number) -> number {
 }
 println(fib(10))   // 55
 
-// コレクション API（LINQ スタイル）
-let result = [1..=10]
-    .filter(x => x % 2 == 0)
-    .map(x => x * x)
-    .sum()
+// コレクション API
+let result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    |> filter(fn(x) { x % 2 == 0 })
+    |> map(fn(x) { x * x })
+    |> fold(0, fn(acc, x) { acc + x })
 println(result)    // 220
 
-// Option / Result
+// エラーハンドリング（T! = Result、? で早期リターン）
 fn safe_div(a: number, b: number) -> number! {
     if b == 0 { err("division by zero") } else { ok(a / b) }
 }
 
 match safe_div(10, 2) {
     ok(v)  => println(v),
-    err(e) => println("エラー: {e}")
+    err(e) => println("エラー: {e}"),
 }
 
-// struct + impl
-struct Point { x: float, y: float }
+// data 型（バリデーション付き）
+data User {
+    name:  string
+    email: string
+    age:   number
 
-impl Point {
-    fn distance(self) -> float {
-        (self.x * self.x + self.y * self.y)
+    validate {
+        name.len() >= 2,
+        email.contains("@"),
+        age >= 0,
     }
 }
 
 // typestate（状態遷移をコンパイル時に保証）
 typestate Connection {
-    states: [Disconnected, Connected]
+    Disconnected -> Connected -> Disconnected
 
     Disconnected {
-        fn connect(self, host: string) -> Connected { /* ... */ }
+        fn connect(self, host: string) -> Connected! { /* ... */ }
     }
-
     Connected {
+        fn send(self, msg: string) -> Connected! { /* ... */ }
         fn disconnect(self) -> Disconnected { /* ... */ }
     }
 }
@@ -93,17 +98,37 @@ test "fib: 基本ケース" {
 
 ---
 
-## 型システム
+## HTTP マイクロサービス（Anvil）
 
-| ForgeScript | Rust 変換 | 説明 |
-|---|---|---|
-| `number` | `i64` | 整数 |
-| `float` | `f64` | 浮動小数点数 |
-| `string` | `String` | UTF-8 文字列 |
-| `bool` | `bool` | 真偽値 |
-| `list<T>` | `Vec<T>` | 可変長リスト |
-| `T?` | `Option<T>` | 値があるかもしれない |
-| `T!` | `Result<T, anyhow::Error>` | 失敗するかもしれない |
+```forge
+use anvil/anvil.*
+use anvil/request.*
+use anvil/response.*
+use anvil/middleware.*
+
+fn hello_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("Hello, {req.params.get("name") |> or("World")}"))
+}
+
+let APP = Anvil::new()
+    .use(logger())
+    .get("/hello/:name", hello_handler)
+
+fn dispatch(raw: RawRequest) -> RawResponse! {
+    APP.dispatch_async(raw).await?
+}
+
+fn main() -> number! {
+    tcp_listen_async(8080, dispatch)?
+    ok(0)
+}
+main()?
+```
+
+```bash
+forge run src/main.forge
+# → http://localhost:8080/hello/ForgeScript
+```
 
 ---
 
@@ -111,60 +136,68 @@ test "fib: 基本ケース" {
 
 | コマンド | 説明 |
 |---|---|
-| `forge run <file>` | インタープリタで実行 |
+| `forge run <file>` | インタープリタで実行（即時・Rust不要） |
 | `forge build <file>` | Rust にトランスパイルしてネイティブバイナリを生成 |
 | `forge transpile <file>` | Rust コードを出力（コンパイルしない） |
 | `forge check <file>` | 型チェックのみ（実行しない） |
-| `forge test <file>` | インラインテストブロックを収集・実行 |
+| `forge test <file>` | インラインテストを収集・実行 |
 | `forge test <file> --filter <pattern>` | テスト名でフィルタ |
 | `forge repl` | 対話型 REPL を起動 |
+| `forge new <name>` | プロジェクトを新規作成 |
 | `forge help` | ヘルプを表示 |
+
+---
+
+## Rust と ForgeScript の対応
+
+| ForgeScript | Rust | 説明 |
+|---|---|---|
+| `let` / `state` | `let` / `let mut` | 不変・可変変数 |
+| `T?` | `Option<T>` | 値があるかもしれない |
+| `T!` | `Result<T, E>` | 失敗するかもしれない |
+| `?` 演算子 | `?` 演算子 | エラーの早期リターン |
+| `data` 型 | `struct` + バリデーション手書き | バリデーション付きデータ型 |
+| `typestate` | `PhantomData` パターン手書き | 状態遷移のコンパイル時保証 |
+| `list<T>` | `Vec<T>` | 可変長リスト |
+| `number` | `i64` | 整数 |
+| `float` | `f64` | 浮動小数点数 |
+
+Rustの難しい部分（borrow checker・lifetime・`Box<dyn Trait>`・`Pin`・`Send`境界）は言語が隠蔽し、`forge build` 時に適切なRustコードとして生成されます。
 
 ---
 
 ## 実装済み機能
 
-### コア言語（forge run）
+### コア言語
+- 変数（`let` / `state` / `const`）・関数・クロージャ・再帰
+- 制御フロー（`if` / `while` / `for` / `match`）
+- 型システム（`T?` / `T!` / ジェネリクス / 型推論 / match 網羅性チェック）
+- 文字列補間（`"Hello, {name}!"`）・`?` 演算子
+- コレクション API 30種（`map` / `filter` / `fold` / `order_by` / `group_by` 等）
+- 組み込み関数（`print` / `println` / `string` / `number` / `len` / `type_of` 等）
 
-| 機能 | 詳細 |
-|---|---|
-| 変数 | `let` / `state`（ミュータブル）/ `const` |
-| 関数 | `fn` / クロージャ / 再帰 |
-| 制御フロー | `if` / `while` / `for` / `match` |
-| 型 | `T?` / `T!` / `list<T>` / 型推論 |
-| 文字列補間 | `"Hello, {name}!"` |
-| `?` 演算子 | Result の早期リターン |
-| コレクション API | 30 種（map / filter / fold / order_by 等） |
+### 型定義
+- `struct` + `impl` + `@derive`（Debug / Clone / Eq / Hash / Ord / Default 等）
+- `enum`（Unit / Tuple / Struct バリアント）
+- `trait` / `mixin`（純粋契約・デフォルト実装）
+- `data`（全 derive 自動付与・`validate` ブロック）
+- `typestate`（状態遷移のコンパイル時保証）
 
-### 型定義（forge run）
-
-| 機能 | 詳細 |
-|---|---|
-| `struct` | 定義・`impl`・`@derive` |
-| `enum` | Unit / Tuple / Struct バリアント・パターンマッチ |
-| `trait` / `mixin` | 純粋契約・デフォルト実装 |
-| `data` | 全 derive 自動付与・`validate` ブロック |
-| `typestate` | 状態遷移のコンパイル時保証（PhantomData パターン） |
-
-### モジュールシステム（forge run）
-
-`use ./path/module.symbol` / `pub` 可視性 / `mod.forge` ファサード /
-外部クレート自動検出 / 循環参照検出 / `when` 条件付きコンパイル / `use raw` 生 Rust 埋め込み
-
-### テストシステム（forge test）
-
-`test "名前" { }` インラインテスト / `assert` / `assert_eq` / `assert_ne` / `assert_ok` / `assert_err` /
-テストスコープ分離 / `--filter` オプション
+### モジュールシステム
+- `use ./path/module.symbol` / `pub` 可視性 / `mod.forge` ファサード
+- `forge.toml` でローカルパス依存（`dep = { path = "..." }`）
+- 循環参照検出 / 未使用インポート警告
 
 ### トランスパイラ（forge build）
+- 基本変換・型システム・クロージャ・コレクション（B-1〜B-4）
+- 型定義変換 struct / data / enum / impl / trait / mixin（B-5）
+- モジュール / when / use raw / test（B-6）
+- async/await 自動昇格・tokio 統合（B-7）
+- typestate → PhantomData パターン（B-8）
 
-| Phase | 内容 |
-|---|---|
-| B-1〜B-4 | 基本変換・型システム・クロージャ・コレクション |
-| B-5 | struct / data / enum / impl / trait / mixin → Rust |
-| B-6 | モジュール / when / use raw / test ブロック → Rust |
-| B-7 | async/await → async fn 自動昇格・tokio 統合 |
-| B-8 | typestate → PhantomData パターン（制約付き） |
+### パッケージ
+- **Anvil**（`packages/anvil/`）: Express スタイルの HTTP マイクロフレームワーク
+  - ルーティング・ミドルウェア・CORS・JSON パーサー・logger
 
 ---
 
@@ -174,16 +207,15 @@ test "fib: 基本ケース" {
 .forge ソース
     │
     ├─ forge run ────→ Lexer → Parser → AST → Interpreter
-    │                                         (Rc<RefCell<T>> で動的所有権)
+    │                                         （即時実行・Rust不要）
     │
     ├─ forge check ──→ Lexer → Parser → AST → TypeChecker
-    │                                         (型推論・網羅性チェック)
     │
     ├─ forge test ───→ Lexer → Parser → AST → Interpreter（テストモード）
     │
     └─ forge build ──→ Lexer → Parser → AST → TypeChecker
                                               → CodeGenerator → .rs
-                                              → rustc → ネイティブバイナリ
+                                              → cargo build → ネイティブバイナリ
 ```
 
 `forge run` と `forge build` の出力は完全に等価（ラウンドトリップテストで検証済み）。
@@ -194,27 +226,26 @@ test "fib: 基本ケース" {
 
 ```
 rvm/
-├── Cargo.toml               # workspace 定義
-│
-├── crates/                  # RVM 実装（Rust クレート群）
+├── crates/
 │   ├── forge-compiler/      # Lexer → Parser → AST → 型チェッカー
 │   ├── forge-vm/            # ツリーウォーキングインタープリタ
-│   ├── forge-stdlib/        # 標準ライブラリ（コレクション API）
+│   ├── forge-stdlib/        # 標準ライブラリ（fs / json / net）
 │   ├── forge-transpiler/    # AST → Rust コード生成器
-│   └── forge-cli/           # CLI バイナリ（forge-new）+ E2E テスト
+│   └── forge-cli/           # CLI バイナリ（forge）
 │
-├── lang/                    # ForgeScript 言語仕様・ドキュメント
-│   ├── ROADMAP.md           # 実装状況・ロードマップ
-│   ├── v0.1.0/              # 言語仕様書 (spec_v0.0.1.md)
-│   ├── typedefs/            # 型定義仕様（struct/enum/trait/data/typestate）
-│   ├── modules/             # モジュールシステム仕様
-│   ├── transpiler/          # トランスパイラ仕様・計画・タスク
-│   └── tests/               # テストシステム仕様
+├── packages/
+│   └── anvil/               # HTTP マイクロフレームワーク
+│
+├── examples/
+│   └── anvil/               # Anvil を使ったサンプルサーバ
+│
+├── lang/                    # 言語仕様・ロードマップ・設計ドキュメント
+│   ├── ROADMAP.md
+│   ├── app_ideas.md         # ForgeScript で作ると有用なアプリ素案
+│   └── extend_idea.md       # 言語拡張アイデア（?.・yield・非同期クロージャ等）
 │
 ├── ext/                     # VS Code シンタックスハイライト拡張
-├── dev/                     # 設計ドキュメント（design-v2.md / design-v3.md）
-├── fixtures/                # 動作確認用サンプル
-└── UAT/                     # ユーザー受け入れテスト
+└── dev/                     # 設計ドキュメント（design-v3.md）
 ```
 
 ---
@@ -222,30 +253,26 @@ rvm/
 ## テスト
 
 ```bash
-# ワークスペース全テスト（293 本）
+# ワークスペース全テスト
 cargo test --workspace
 
 # E2E テストのみ
 cargo test -p forge-cli --test e2e
 ```
 
-| クレート | テスト数 | 内容 |
-|---|---|---|
-| forge-compiler | 76 本 | Lexer・Parser・型チェッカー・統合テスト |
-| forge-vm | 90 本 | インタープリタ・モジュール・型定義 |
-| forge-transpiler | 40 本 | スナップショットテスト（各フェーズ） |
-| forge-stdlib | 14 本 | コレクション API |
-| forge-cli (E2E) | 73 本 | run / build / check / test / ラウンドトリップ |
-
 ---
 
-## 開発
+## ロードマップ
 
-```bash
-cargo check --workspace   # 型チェック
-cargo fmt --all           # フォーマット
-cargo clippy --workspace  # Lint
-```
+詳細は [`lang/ROADMAP.md`](lang/ROADMAP.md) を参照。
+
+**近日対応予定**:
+- `forge/std` 拡充（`env()` / `args()` / `stringify()` 等）
+- `forge-http` パッケージ（HTTP クライアント）
+- Linux バイナリ配布（`cargo install` 対応）
+- ノートブック形式（`.fnb`）+ VS Code Notebook 拡張
+
+---
 
 **言語仕様**: [`lang/v0.1.0/spec_v0.0.1.md`](lang/v0.1.0/spec_v0.0.1.md)
 **ロードマップ**: [`lang/ROADMAP.md`](lang/ROADMAP.md)
