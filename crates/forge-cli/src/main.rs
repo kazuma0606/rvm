@@ -143,13 +143,58 @@ fn run_entry(path: Option<&str>) {
             project_dir,
             forge_toml,
         }) => {
-            let entry = project_dir.join(forge_toml.package.entry);
-            run_file(&entry.to_string_lossy());
+            let entry = project_dir.join(&forge_toml.package.entry);
+            let dep_paths = forge_toml.local_dep_paths(&project_dir);
+            if dep_paths.is_empty() {
+                run_file(&entry.to_string_lossy());
+            } else {
+                run_file_with_deps(&entry, dep_paths);
+            }
         }
         Err(e) => {
             eprintln!("エラー: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+fn run_file_with_deps(entry: &Path, dep_paths: Vec<(String, PathBuf)>) {
+    let source = match fs::read_to_string(entry) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "エラー: ファイル '{}' を読み込めませんでした: {}",
+                entry.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let module = match parse_source(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("構文エラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let project_root = entry
+        .parent()
+        .and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        })
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut interp = Interpreter::with_project_root_and_deps(project_root, dep_paths);
+    if let Err(e) = interp.eval(&module) {
+        eprintln!("実行エラー: {}", e);
+        std::process::exit(1);
     }
 }
 
@@ -794,6 +839,8 @@ fn build_generated_cargo_toml(
                         )
                     }
                 }
+                // ローカルパス依存は forge build では Cargo.toml に含めない
+                DependencyValue::LocalPath(_) => continue,
             };
             cargo_toml.push_str(&line);
             cargo_toml.push('\n');

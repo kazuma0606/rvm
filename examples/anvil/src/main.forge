@@ -1,0 +1,102 @@
+// examples/anvil/src/main.forge
+//
+// Anvil を外部から利用するサンプルサーバ
+//
+// 起動:
+//   forge run examples/anvil/
+//
+// リクエスト例:
+//   curl http://localhost:8080/health
+//
+//   curl -X POST http://localhost:8080/echo \
+//        -H "Content-Type: application/json" \
+//        -d '{"message":"hello","repeat":3,"metadata":{"client":"curl","tag":"demo"}}'
+//
+//   curl http://localhost:8080/users/42
+
+use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
+use forge/std/json.{ parse }
+use anvil/anvil.*
+use anvil/request.*
+use anvil/response.*
+use anvil/middleware.*
+use anvil/cors.*
+
+// ----------------------------------------------------------------
+// GET /health
+// ----------------------------------------------------------------
+fn health_handler(req: Request<string>) -> Response<string>! {
+    ok(Response::text("{\"status\":\"healthy\",\"version\":\"1.0.0\"}")
+        .header("Content-Type", "application/json"))
+}
+
+// ----------------------------------------------------------------
+// POST /echo
+// body: {
+//   "message":  string,   // 繰り返すメッセージ
+//   "repeat":   number,   // 繰り返し回数
+//   "metadata": {
+//     "client": string,   // 送信元クライアント名
+//     "tag":    string    // 任意タグ
+//   }
+// }
+// ----------------------------------------------------------------
+fn echo_handler(req: Request<string>) -> Response<string>! {
+    let data    = parse(req.raw_body)?
+    let message = string(data["message"])
+    let repeat  = number(data["repeat"])
+    let meta    = data["metadata"]
+    let client  = string(meta["client"])
+    let tag     = string(meta["tag"])
+
+    // メッセージを repeat 回スペース結合
+    state result = message
+    state i = 1
+    while i < repeat {
+        result = "{result} {message}"
+        i = i + 1
+    }
+
+    let from = "{client}/{tag}"
+    ok(Response::text("{\"echoed\":\"{result}\",\"count\":{repeat},\"from\":\"{from}\"}")
+        .header("Content-Type", "application/json"))
+}
+
+// ----------------------------------------------------------------
+// GET /users/:id
+// ----------------------------------------------------------------
+fn user_handler(req: Request<string>) -> Response<string>! {
+    let id = match req.params.get("id") {
+        some(v) => v,
+        none    => "unknown",
+    }
+    ok(Response::text("{\"id\":\"{id}\",\"name\":\"User {id}\",\"role\":\"member\"}")
+        .header("Content-Type", "application/json"))
+}
+
+// ----------------------------------------------------------------
+// アプリ定義（メソッドチェーン）
+// ----------------------------------------------------------------
+let APP = Anvil::new()
+    .use(logger())
+    .use(cors(CorsOptions::any()))
+    .use(json_parser())
+    .get("/health",    health_handler)
+    .post("/echo",     echo_handler)
+    .get("/users/:id", user_handler)
+
+// 名前付き dispatch 関数（クロージャ制約回避）
+fn dispatch(raw: RawRequest) -> RawResponse! {
+    APP.dispatch_async(raw).await?
+}
+
+fn main() -> number! {
+    println("Anvil example server")
+    println("  GET  http://localhost:8080/health")
+    println("  POST http://localhost:8080/echo")
+    println("  GET  http://localhost:8080/users/:id")
+    tcp_listen_async(8080, dispatch)?
+    ok(0)
+}
+
+main()?

@@ -30,6 +30,8 @@ pub enum DependencyValue {
         version: String,
         features: Vec<String>,
     },
+    /// ローカルパス依存: `{ path = "../../packages/anvil" }`
+    LocalPath(PathBuf),
 }
 
 impl ForgeToml {
@@ -59,6 +61,23 @@ impl ForgeToml {
                 return None;
             }
         }
+    }
+
+    /// ローカルパス依存の `(name, absolute_path)` ペアを返す
+    ///
+    /// `project_dir` を基準に相対パスを解決する。
+    pub fn local_dep_paths(&self, project_dir: &Path) -> Vec<(String, PathBuf)> {
+        self.dependencies
+            .iter()
+            .filter_map(|(name, dep)| {
+                if let DependencyValue::LocalPath(rel) = dep {
+                    let abs = project_dir.join(rel);
+                    Some((name.clone(), abs))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn from_value(value: &toml::Value) -> Result<Self, String> {
@@ -126,30 +145,41 @@ fn parse_dependencies(
         let parsed = if let Some(version) = dep_value.as_str() {
             DependencyValue::Version(version.to_string())
         } else if let Some(dep_table) = dep_value.as_table() {
-            let version = get_required_string(dep_table, "version", "[dependencies]")?;
-            let features = match dep_table.get("features") {
-                None => Vec::new(),
-                Some(features) => {
-                    let arr = features.as_array().ok_or_else(|| {
-                        format!(
-                            "[dependencies.{}].features は配列である必要があります",
-                            name
-                        )
+            // path-only dependency: { path = "..." }
+            if dep_table.contains_key("path") && !dep_table.contains_key("version") {
+                let path_str = dep_table
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| {
+                        format!("[dependencies.{}].path は文字列である必要があります", name)
                     })?;
-                    let mut out = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        let feature = item.as_str().ok_or_else(|| {
+                DependencyValue::LocalPath(PathBuf::from(path_str))
+            } else {
+                let version = get_required_string(dep_table, "version", "[dependencies]")?;
+                let features = match dep_table.get("features") {
+                    None => Vec::new(),
+                    Some(features) => {
+                        let arr = features.as_array().ok_or_else(|| {
                             format!(
-                                "[dependencies.{}].features の要素は文字列である必要があります",
+                                "[dependencies.{}].features は配列である必要があります",
                                 name
                             )
                         })?;
-                        out.push(feature.to_string());
+                        let mut out = Vec::with_capacity(arr.len());
+                        for item in arr {
+                            let feature = item.as_str().ok_or_else(|| {
+                                format!(
+                                    "[dependencies.{}].features の要素は文字列である必要があります",
+                                    name
+                                )
+                            })?;
+                            out.push(feature.to_string());
+                        }
+                        out
                     }
-                    out
-                }
-            };
-            DependencyValue::Detailed { version, features }
+                };
+                DependencyValue::Detailed { version, features }
+            }
         } else {
             return Err(format!(
                 "[dependencies.{}] は文字列またはテーブルである必要があります",
@@ -280,6 +310,48 @@ tokio = { version = "1", features = ["rt", "macros"] }
                 features: vec!["rt".to_string(), "macros".to_string()],
             })
         );
+    }
+
+    #[test]
+    fn test_parse_local_path_dependency() {
+        let dir = write_forge_toml(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+anvil = { path = "../../packages/anvil" }
+"#,
+        );
+
+        let parsed = ForgeToml::load(&dir).expect("load forge.toml");
+        assert_eq!(
+            parsed.dependencies.get("anvil"),
+            Some(&DependencyValue::LocalPath(PathBuf::from(
+                "../../packages/anvil"
+            )))
+        );
+    }
+
+    #[test]
+    fn test_local_dep_paths_resolves_absolute() {
+        let dir = write_forge_toml(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+anvil = { path = "packages/anvil" }
+"#,
+        );
+
+        let parsed = ForgeToml::load(&dir).expect("load forge.toml");
+        let paths = parsed.local_dep_paths(&dir);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, "anvil");
+        assert_eq!(paths[0].1, dir.join("packages/anvil"));
     }
 
     #[test]

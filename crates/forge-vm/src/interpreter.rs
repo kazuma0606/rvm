@@ -240,6 +240,29 @@ impl Interpreter {
         interp
     }
 
+    /// プロジェクトルートとローカル依存パスを指定してモジュールローダーを初期化する
+    pub fn with_project_root_and_deps(
+        project_root: PathBuf,
+        dep_paths: Vec<(String, PathBuf)>,
+    ) -> Self {
+        let mut loader = ModuleLoader::new(project_root);
+        for (name, path) in dep_paths {
+            loader.add_dep_path(name, path);
+        }
+        let mut interp = Self {
+            scopes: vec![HashMap::new()],
+            type_registry: TypeRegistry::default(),
+            module_loader: Some(loader),
+            deps_manager: DepsManager::new(),
+            imported_symbols: HashMap::new(),
+            loading_stack: Vec::new(),
+            is_test_mode: false,
+            loaded_modules: HashMap::new(),
+        };
+        interp.register_builtins();
+        interp
+    }
+
     /// 未使用インポートの警告を stderr に出力する（M-4-C）
     pub fn warn_unused_imports(&self) {
         for (name, info) in &self.imported_symbols {
@@ -873,10 +896,54 @@ impl Interpreter {
                 result
             }
             UsePath::External(crate_name) => {
-                // forge run では外部クレートのインポートをスキップ（警告なし）
-                // クレート名を DepsManager に記録して forge build 連携に備える
-                self.deps_manager.add(crate_name);
-                Ok(Value::Unit)
+                // dep_paths に登録されているローカル依存なら Local と同様に解決する
+                let has_dep = self
+                    .module_loader
+                    .as_ref()
+                    .map(|l| l.dep_paths.contains_key(crate_name.as_str()))
+                    .unwrap_or(false);
+
+                if has_dep {
+                    if self.module_loader.is_none() {
+                        return Err(RuntimeError::Custom(format!(
+                            "依存パッケージ '{}' を読み込めません: モジュールローダーが初期化されていません",
+                            crate_name
+                        )));
+                    }
+
+                    let clean_path = crate_name.clone();
+                    if self.loading_stack.contains(&clean_path) {
+                        let cycle = self
+                            .loading_stack
+                            .iter()
+                            .skip_while(|p| p.as_str() != clean_path.as_str())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        return Err(RuntimeError::CircularDependency { cycle });
+                    }
+
+                    let is_dir = self
+                        .module_loader
+                        .as_ref()
+                        .map(|l| l.is_directory(&clean_path))
+                        .unwrap_or(false);
+
+                    self.loading_stack.push(clean_path.clone());
+
+                    let result = if is_dir {
+                        self.eval_directory_use_with_tracking(&clean_path, symbols, 0)
+                    } else {
+                        self.eval_file_use_with_tracking(&clean_path, symbols)
+                    };
+
+                    self.loading_stack.pop();
+                    result
+                } else {
+                    // forge run では外部クレートのインポートをスキップ（警告なし）
+                    // クレート名を DepsManager に記録して forge build 連携に備える
+                    self.deps_manager.add(crate_name);
+                    Ok(Value::Unit)
+                }
             }
             UsePath::Stdlib(_) => {
                 // forge run では標準ライブラリはスキップ（警告なし）

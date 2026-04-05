@@ -57,6 +57,8 @@ impl std::error::Error for LoadError {}
 pub struct ModuleLoader {
     /// プロジェクトルート（`src/` の親ディレクトリ、または main.forge のディレクトリ）
     project_root: PathBuf,
+    /// ローカル依存パス: パッケージ名 → 絶対パス（[dependencies] path = "..." から）
+    pub dep_paths: HashMap<String, PathBuf>,
     /// キャッシュ: use_path → パース済み AST
     cache: HashMap<String, Vec<Stmt>>,
 }
@@ -73,14 +75,57 @@ impl ModuleLoader {
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             project_root,
+            dep_paths: HashMap::new(),
             cache: HashMap::new(),
         }
+    }
+
+    /// ローカル依存パスを登録する（[dependencies] path = "..." から）
+    pub fn add_dep_path(&mut self, name: String, path: PathBuf) {
+        self.dep_paths.insert(name, path);
     }
 
     /// `use_path` からファイルの絶対パスを解決する
     ///
     /// `use_path` は `./` や `forge/std/` を除いたパス（`utils/helper` など）
+    ///
+    /// パッケージ名（スラッシュなし）が dep_paths に登録されている場合は
+    /// そのパスを起点に解決する。
     pub fn resolve_path(&self, use_path: &str) -> Result<PathBuf, LoadError> {
+        // dep_paths のチェック: "anvil/request" → dep "anvil" + "src/request.forge"
+        // または "anvil" 単体 → dep "anvil" + "src/lib.forge" or "src/anvil.forge"
+        let first_segment = use_path.split('/').next().unwrap_or(use_path);
+        if let Some(dep_root) = self.dep_paths.get(first_segment) {
+            let remainder = &use_path[first_segment.len()..];
+            let remainder = remainder.trim_start_matches('/');
+            let dep_src = dep_root.join("src");
+            let candidates: Vec<PathBuf> = if remainder.is_empty() {
+                // use anvil.* → src/lib.forge or src/<name>.forge
+                vec![
+                    dep_src.join(format!("{}.forge", first_segment)),
+                    dep_src.join("lib.forge"),
+                    dep_root.join(format!("{}.forge", first_segment)),
+                    dep_root.join("lib.forge"),
+                ]
+            } else {
+                vec![
+                    dep_src.join(format!("{}.forge", remainder)),
+                    dep_root.join(format!("{}.forge", remainder)),
+                ]
+            };
+            for candidate in &candidates {
+                if candidate.exists() {
+                    return Ok(candidate.clone());
+                }
+            }
+            return Err(LoadError::NotFound {
+                path: candidates
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| dep_root.join(format!("{}.forge", use_path))),
+            });
+        }
+
         // src/ ディレクトリが存在する場合はそちらを優先
         let src_dir = self.project_root.join("src");
         let candidates: Vec<PathBuf> = if src_dir.exists() {
@@ -110,6 +155,27 @@ impl ModuleLoader {
     /// ディレクトリが存在して `mod.forge` が存在する場合は `Some(path)` を返す。
     /// ディレクトリは存在するが `mod.forge` がない場合は `None` を返す。
     pub fn resolve_mod_forge(&self, use_path: &str) -> Option<PathBuf> {
+        // dep_paths のチェック
+        let first_segment = use_path.split('/').next().unwrap_or(use_path);
+        if let Some(dep_root) = self.dep_paths.get(first_segment) {
+            let remainder = &use_path[first_segment.len()..];
+            let remainder = remainder.trim_start_matches('/');
+            let dir_path = if remainder.is_empty() {
+                dep_root.join("src")
+            } else {
+                dep_root.join("src").join(remainder)
+            };
+            if dir_path.is_dir() {
+                let mod_forge = dir_path.join("mod.forge");
+                return Some(if mod_forge.exists() {
+                    mod_forge
+                } else {
+                    dir_path
+                });
+            }
+            return None;
+        }
+
         let src_dir = self.project_root.join("src");
         let dir_path = if src_dir.exists() {
             src_dir.join(use_path)
@@ -132,6 +198,19 @@ impl ModuleLoader {
 
     /// ディレクトリが存在するかどうかを確認する
     pub fn is_directory(&self, use_path: &str) -> bool {
+        // dep_paths のチェック
+        let first_segment = use_path.split('/').next().unwrap_or(use_path);
+        if let Some(dep_root) = self.dep_paths.get(first_segment) {
+            let remainder = &use_path[first_segment.len()..];
+            let remainder = remainder.trim_start_matches('/');
+            let dir_path = if remainder.is_empty() {
+                dep_root.join("src")
+            } else {
+                dep_root.join("src").join(remainder)
+            };
+            return dir_path.is_dir();
+        }
+
         let src_dir = self.project_root.join("src");
         let dir_path = if src_dir.exists() {
             src_dir.join(use_path)
@@ -210,11 +289,23 @@ impl ModuleLoader {
 
     /// ディレクトリ内の全 pub シンボルを収集する（mod.forge がない場合）
     pub fn load_directory_all_pub(&mut self, dir_use_path: &str) -> Result<Vec<Stmt>, LoadError> {
-        let src_dir = self.project_root.join("src");
-        let dir_path = if src_dir.exists() {
-            src_dir.join(dir_use_path)
+        // dep_paths のチェック
+        let first_segment = dir_use_path.split('/').next().unwrap_or(dir_use_path);
+        let dir_path = if let Some(dep_root) = self.dep_paths.get(first_segment).cloned() {
+            let remainder = &dir_use_path[first_segment.len()..];
+            let remainder = remainder.trim_start_matches('/');
+            if remainder.is_empty() {
+                dep_root.join("src")
+            } else {
+                dep_root.join("src").join(remainder)
+            }
         } else {
-            self.project_root.join(dir_use_path)
+            let src_dir = self.project_root.join("src");
+            if src_dir.exists() {
+                src_dir.join(dir_use_path)
+            } else {
+                self.project_root.join(dir_use_path)
+            }
         };
 
         let mut all_stmts = Vec::new();
