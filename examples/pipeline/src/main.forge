@@ -1,0 +1,275 @@
+// examples/pipeline/src/main.forge
+//
+// データパイプライン デモ
+//
+// 社員・売上・評価の 3 ソースをメソッドチェーンで処理する。
+// 各変換ステップを let に束縛することでデータの流れが追いやすい。
+//
+// Note: パイプ演算子 |> は extend_idea.md に記載の実装予定機能。
+//       実装後はメソッドチェーンの代わりに使用できる。
+//
+// 実行:
+//   forge run examples/pipeline/
+
+// ----------------------------------------------------------------
+// データ型
+// ----------------------------------------------------------------
+
+struct Employee {
+    name:   string
+    dept:   string
+    salary: number
+    years:  number
+}
+
+struct Sale {
+    rep:     string
+    product: string
+    month:   number
+    amount:  number
+}
+
+struct Review {
+    name:  string
+    score: number
+}
+
+struct DeptReport {
+    dept:       string
+    head_count: number
+    avg_salary: number
+    avg_years:  number
+}
+
+struct RepReport {
+    name:        string
+    dept:        string
+    salary:      number
+    total_sales: number
+    score:       number
+}
+
+// ----------------------------------------------------------------
+// ソース 1: 社員マスタ
+// ----------------------------------------------------------------
+
+let employees = [
+    Employee { name: "Alice", dept: "Engineering", salary: 85000, years: 5 },
+    Employee { name: "Bob",   dept: "Engineering", salary: 72000, years: 3 },
+    Employee { name: "Carol", dept: "Marketing",   salary: 68000, years: 7 },
+    Employee { name: "Dave",  dept: "Marketing",   salary: 74000, years: 5 },
+    Employee { name: "Eve",   dept: "Engineering", salary: 91000, years: 8 },
+    Employee { name: "Frank", dept: "HR",          salary: 58000, years: 4 },
+    Employee { name: "Grace", dept: "HR",          salary: 62000, years: 6 },
+    Employee { name: "Hank",  dept: "Marketing",   salary: 61000, years: 2 },
+]
+
+// ----------------------------------------------------------------
+// ソース 2: 売上明細（3 ヶ月分・2 製品）
+// ----------------------------------------------------------------
+
+let sales = [
+    Sale { rep: "Alice", product: "Anvil Pro",  month: 1, amount: 120000 },
+    Sale { rep: "Alice", product: "Forge Lite", month: 2, amount:  85000 },
+    Sale { rep: "Alice", product: "Anvil Pro",  month: 3, amount: 135000 },
+    Sale { rep: "Bob",   product: "Anvil Pro",  month: 1, amount:  95000 },
+    Sale { rep: "Bob",   product: "Forge Lite", month: 3, amount:  67000 },
+    Sale { rep: "Carol", product: "Forge Lite", month: 1, amount: 140000 },
+    Sale { rep: "Carol", product: "Anvil Pro",  month: 2, amount: 110000 },
+    Sale { rep: "Carol", product: "Forge Lite", month: 3, amount: 125000 },
+    Sale { rep: "Dave",  product: "Forge Lite", month: 2, amount:  78000 },
+    Sale { rep: "Dave",  product: "Anvil Pro",  month: 3, amount:  92000 },
+    Sale { rep: "Eve",   product: "Anvil Pro",  month: 1, amount: 200000 },
+    Sale { rep: "Eve",   product: "Forge Lite", month: 2, amount: 155000 },
+    Sale { rep: "Eve",   product: "Anvil Pro",  month: 3, amount: 175000 },
+    Sale { rep: "Frank", product: "Forge Lite", month: 1, amount:  45000 },
+    Sale { rep: "Frank", product: "Anvil Pro",  month: 2, amount:  38000 },
+    Sale { rep: "Grace", product: "Anvil Pro",  month: 2, amount:  62000 },
+    Sale { rep: "Grace", product: "Forge Lite", month: 3, amount:  71000 },
+    Sale { rep: "Hank",  product: "Anvil Pro",  month: 1, amount:  88000 },
+    Sale { rep: "Hank",  product: "Forge Lite", month: 2, amount:  91000 },
+    Sale { rep: "Hank",  product: "Anvil Pro",  month: 3, amount: 103000 },
+]
+
+// ----------------------------------------------------------------
+// ソース 3: 360 度評価スコア（1〜5）
+// ----------------------------------------------------------------
+
+let reviews = [
+    Review { name: "Alice", score: 5 },
+    Review { name: "Bob",   score: 3 },
+    Review { name: "Carol", score: 4 },
+    Review { name: "Dave",  score: 4 },
+    Review { name: "Eve",   score: 5 },
+    Review { name: "Frank", score: 2 },
+    Review { name: "Grace", score: 3 },
+    Review { name: "Hank",  score: 4 },
+]
+
+// ----------------------------------------------------------------
+// ヘルパー
+// ----------------------------------------------------------------
+
+fn sales_of(rep_name: string) -> number {
+    let amounts = sales.filter((s) => { s.rep == rep_name }).map(s => s.amount)
+    amounts.fold(0, (acc, a) => acc + a)
+}
+
+fn score_of(emp_name: string) -> number {
+    let found = reviews.filter((r) => { r.name == emp_name })
+    match found.first() {
+        some(r) => r.score,
+        none    => 0,
+    }
+}
+
+fn divider() { println("--------------------------------------") }
+
+// ----------------------------------------------------------------
+// レポート 1: 部門別サマリー
+//   group_by → aggregate → order_by → each
+// ----------------------------------------------------------------
+fn report_dept_summary() {
+    println("")
+    println("[ 部門別サマリー ]")
+    divider()
+
+    let by_dept = employees.group_by(e => e.dept)
+    let stats = by_dept.map((g) => {
+        let n         = g.values.len()
+        let total_sal = g.values.map(e => e.salary).fold(0, (acc, s) => acc + s)
+        let total_yrs = g.values.map(e => e.years ).fold(0, (acc, y) => acc + y)
+        DeptReport {
+            dept:       g.key,
+            head_count: n,
+            avg_salary: total_sal / n,
+            avg_years:  total_yrs / n,
+        }
+    })
+    let ranked = stats.order_by(r => -r.avg_salary)
+    ranked.each((r) => {
+        println("{r.dept}  {r.head_count}名  平均給与: {r.avg_salary}円  平均勤続: {r.avg_years}年")
+    })
+}
+
+// ----------------------------------------------------------------
+// レポート 2: 月別 × 製品別 売上
+//   group_by → 内部で再 filter → 集計
+// ----------------------------------------------------------------
+fn report_monthly_breakdown() {
+    println("")
+    println("[ 月別 × 製品別 売上 ]")
+    divider()
+
+    let by_month = sales.group_by(s => s.month)
+    by_month.order_by(g => g.key).each((g) => {
+        let total = g.values.map(s => s.amount).fold(0, (acc, a) => acc + a)
+        let anvil = g.values.filter((s) => { s.product == "Anvil Pro"  }).map(s => s.amount).fold(0, (acc, a) => acc + a)
+        let lite  = g.values.filter((s) => { s.product == "Forge Lite" }).map(s => s.amount).fold(0, (acc, a) => acc + a)
+        println("{g.key}月  合計: {total}円  Anvil Pro: {anvil}円  Forge Lite: {lite}円")
+    })
+}
+
+// ----------------------------------------------------------------
+// レポート 3: 担当者別パフォーマンス（ソース 1 × ソース 2）
+//   employees を起点に sales を名前で参照（疑似ジョイン）
+// ----------------------------------------------------------------
+fn report_rep_performance() {
+    println("")
+    println("[ 担当者別パフォーマンス  (社員マスタ × 売上明細) ]")
+    divider()
+
+    let reports = employees.map((e) => {
+        RepReport {
+            name:        e.name,
+            dept:        e.dept,
+            salary:      e.salary,
+            total_sales: sales_of(e.name),
+            score:       0,
+        }
+    })
+    let ranked = reports.order_by(r => -r.total_sales)
+    ranked.each((r) => {
+        println("{r.name} ({r.dept})  売上: {r.total_sales}円  給与: {r.salary}円")
+    })
+}
+
+// ----------------------------------------------------------------
+// レポート 4: 総合ランキング（3 ソース全ミックス）
+//   売上50% + 評価30% + 勤続20% で正規化スコアを算出
+// ----------------------------------------------------------------
+fn report_composite_ranking() {
+    println("")
+    println("[ 総合ランキング  (社員マスタ × 売上明細 × 評価スコア) ]")
+    println("  スコア = 売上 50% + 評価 30% + 勤続 20%")
+    divider()
+
+    let all_sales = employees.map(e => sales_of(e.name))
+    let max_sales = all_sales.fold(0, (acc, s) => if s > acc { s } else { acc })
+    let max_years = employees.map(e => e.years).fold(0, (acc, y) => if y > acc { y } else { acc })
+
+    let scored = employees.map((e) => {
+        let ts        = sales_of(e.name)
+        let sc        = score_of(e.name)
+        let sales_pt  = ts * 50 / max_sales
+        let review_pt = sc * 30 / 5
+        let years_pt  = e.years * 20 / max_years
+        RepReport {
+            name:        e.name,
+            dept:        e.dept,
+            salary:      sales_pt + review_pt + years_pt,
+            total_sales: ts,
+            score:       sc,
+        }
+    })
+    let ranked = scored.order_by(r => -r.salary)
+    ranked.each((r) => {
+        println("{r.name} ({r.dept})  総合: {r.salary}点  売上: {r.total_sales}円  評価: {r.score}/5")
+    })
+}
+
+// ----------------------------------------------------------------
+// レポート 5: スター社員（3 条件の複合フィルタ）
+//   勤続 5 年以上 かつ 売上 300,000 円以上 かつ 評価 4 以上
+// ----------------------------------------------------------------
+fn report_stars() {
+    println("")
+    println("[ スター社員  勤続5年以上 × 売上30万以上 × 評価4以上 ]")
+    divider()
+
+    let veterans    = employees.filter((e) => { e.years >= 5 })
+    let top_sellers = veterans.filter((e) => { sales_of(e.name) >= 300000 })
+    let stars       = top_sellers.filter((e) => { score_of(e.name) >= 4 })
+    let reports     = stars.map((e) => {
+        RepReport {
+            name:        e.name,
+            dept:        e.dept,
+            salary:      e.salary,
+            total_sales: sales_of(e.name),
+            score:       score_of(e.name),
+        }
+    })
+    let ranked = reports.order_by(r => -r.total_sales)
+    ranked.each((r) => {
+        println("★ {r.name} ({r.dept})  売上: {r.total_sales}円  評価: {r.score}/5  給与: {r.salary}円")
+    })
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+fn main() {
+    println("==========================================")
+    println("  Pipeline Demo — ForgeScript")
+    println("  データソース: 社員 / 売上明細 / 評価スコア")
+    println("==========================================")
+    report_dept_summary()
+    report_monthly_breakdown()
+    report_rep_performance()
+    report_composite_ranking()
+    report_stars()
+    println("")
+    println("done.")
+}
+
+main()

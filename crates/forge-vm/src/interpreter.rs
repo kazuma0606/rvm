@@ -2439,6 +2439,47 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
             "collect" => Ok(mk_list(items.borrow().clone())),
+            // ── each ──────────────────────────────────────────────────────
+            // list.each(fn) — side-effecting iteration, returns unit
+            "each" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                for item in list {
+                    self.call_value(f.clone(), vec![item])?;
+                }
+                Ok(Value::Unit)
+            }
+            // ── group_by ──────────────────────────────────────────────────
+            // list.group_by(key_fn) -> list of { key, values }
+            "group_by" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                // preserve insertion order: vec of (key_value, vec<item>)
+                let mut order: Vec<Value> = Vec::new();
+                let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
+                for item in list {
+                    let key = self.call_value(f.clone(), vec![item.clone()])?;
+                    if let Some(pos) = order.iter().position(|k| k == &key) {
+                        buckets[pos].1.push(item);
+                    } else {
+                        order.push(key.clone());
+                        buckets.push((key, vec![item]));
+                    }
+                }
+                let groups = buckets
+                    .into_iter()
+                    .map(|(k, vals)| {
+                        let mut fields = std::collections::HashMap::new();
+                        fields.insert("key".to_string(), k);
+                        fields.insert("values".to_string(), mk_list(vals));
+                        Value::Struct {
+                            type_name: "Group".to_string(),
+                            fields: Rc::new(RefCell::new(fields)),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Ok(mk_list(groups))
+            }
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は list に対して未実装です",
                 other

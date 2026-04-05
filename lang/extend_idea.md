@@ -5,7 +5,103 @@
 
 ---
 
-## 1. 非同期クロージャの完成
+## 1. テンプレートメタプログラミング（コンパイル時計算）
+
+**参考言語**: C++ (TMP / `constexpr`)、Rust (`const fn` / `const generics`)
+
+C++ TMP の難しさの根源は「テンプレートが言語設計の副産物だった」こと。ForgeScript なら意図的に設計できる。
+
+**即実用レベル：コンパイル時定数・`const fn`**
+```forge
+const MAX_BUFFER = 1024 * 4
+const PI         = 3.14159265
+
+const fn clamp(value: number, min: number, max: number) -> number {
+    if value < min { min } else if value > max { max } else { value }
+}
+```
+
+**より面白いレベル：条件型・型レベル変換**
+```forge
+// TypeScript の条件型に近いイメージ
+type Nullable<T>  = T?
+type Fallible<T>  = T!
+type Unwrap<T!>   = T      // Result から中身の型を取り出す
+type ListItem<list<T>> = T // リストの要素型を取り出す
+```
+
+**優先度**: 中（`const fn` は低コスト・型レベル変換は型システムの拡張が必要）
+
+---
+
+## 2. 演算子オーバーロード
+
+**参考言語**: C++、Kotlin、Python (`__add__` 等)
+
+`impl` ブロックと自然に統合できる。`forge build` では Rust の `impl std::ops::Add` に変換するだけ。
+
+```forge
+struct Vector2 { x: float, y: float }
+
+impl Vector2 {
+    operator +(self, other: Vector2) -> Vector2 {
+        Vector2 { x: self.x + other.x, y: self.y + other.y }
+    }
+    operator *(self, scalar: float) -> Vector2 {
+        Vector2 { x: self.x * scalar, y: self.y * scalar }
+    }
+    operator ==(self, other: Vector2) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+    operator [](self, index: number) -> float {
+        if index == 0 { self.x } else { self.y }
+    }
+}
+
+let v1 = Vector2 { x: 1.0, y: 2.0 }
+let v2 = Vector2 { x: 3.0, y: 4.0 }
+let v3 = v1 + v2        // Vector2 { x: 4.0, y: 6.0 }
+let v4 = v3 * 2.0       // Vector2 { x: 8.0, y: 12.0 }
+let x  = v4[0]          // 8.0
+```
+
+`data` 型と組み合わせると数値計算・DSL 記述が一気に書きやすくなる。
+
+**優先度**: 高（実装コスト低・表現力の向上が大きい）
+
+---
+
+## 3. `|>` をコレクションのイディオムとして統一
+
+**参考言語**: Elixir、F#、Haskell (`$`)
+
+現状 ForgeScript はメソッドチェーン（`.filter().map()`）と `|>` の両方が使えるが、**公式スタイルを `|>` に統一**することで言語の個性を明確にできる。
+
+```forge
+// メソッドチェーン（動作するが非推奨スタイルに）
+let result = items.filter(fn(x) { x > 0 }).map(fn(x) { x * 2 })
+
+// |> 推奨スタイル：各ステップの意図が独立して読める
+let result = items
+    |> filter(fn(x) { x > 0 })
+    |> map(fn(x) { x * 2 })
+    |> fold(0, fn(acc, x) { acc + x })
+```
+
+| 観点 | メソッドチェーン | `\|>` |
+|---|---|---|
+| 複数ステップの可読性 | `.` が連続して詰まる | 各ステップが独立 |
+| 関数の再利用性 | 型にバインドされる | 単独関数として使い回せる |
+| AI 生成しやすさ | やや複雑 | ステップが明確 |
+| 言語の個性 | JS / Java 風 | Elixir / F# 風 |
+
+実装: 両方を残しつつ、ドキュメント・サンプルは `|>` をイディオムとして統一する。
+
+**優先度**: 設計方針の確定（コード変更不要、ドキュメント統一のみ）
+
+---
+
+## 4. 非同期クロージャの完成
 
 **参考言語**: JavaScript / TypeScript, Kotlin
 
@@ -197,8 +293,11 @@ display::table(rows)        // HTML テーブルとして描画
 
 | 機能 | 実装コスト | 実用性 | 一貫性 | 優先度 |
 |---|---|---|---|---|
+| 演算子オーバーロード | 低 | ◎ | ◎ | **高** |
+| `\|>` イディオム統一 | なし（方針確定のみ） | ◎ | ◎ | **高** |
 | 非同期クロージャ完成 | 中（B-3の続き） | ◎ | ◎ | **高** |
 | `?.` オプショナルチェーン | 低 | ◎ | ◎ | **高** |
+| `const fn` / コンパイル時定数 | 低 | ○ | ◎ | 中 |
 | ノートブック `.fnb` | 中 | ◎ | ◎ | **中〜高** |
 | yield / ジェネレータ | 高 | ◎ | ○ | 中 |
 | デコレータ拡張 | 中 | ○ | ○ | 中 |
