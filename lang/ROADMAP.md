@@ -1,6 +1,6 @@
 # ForgeScript ロードマップ
 
-> 最終更新: 2026-04-04
+> 最終更新: 2026-04-05
 > テスト総数: 293本（全通過）
 > 言語仕様: v0.2.0（ジェネリクス・forge.toml は v0.3.0 予定）
 
@@ -82,6 +82,14 @@
 | `--filter <pattern>` | テスト名の部分一致フィルタ |
 | テストスコープ分離 | 各テストで state がリセット |
 
+### パッケージ・エコシステム ✅
+
+| パッケージ | 詳細 |
+|---|---|
+| **Anvil HTTP フレームワーク** | Express スタイル。ルーティング・ミドルウェア・CORS・JSON パーサー・logger 実装済み（A-1〜A-5 完了） |
+| **`[dependencies]` ローカルパス解決** | `forge.toml` の `dep = { path = "..." }` → `use depname/module.*` で参照可能 |
+| **`examples/anvil`** | Anvil を外部依存として使うサンプルサーバ（/health・/echo・/users/:id の3エンドポイント） |
+
 ### ツール・周辺 ✅
 
 | 機能 | 詳細 |
@@ -121,27 +129,100 @@
 | 機能 | 仕様 | 備考 |
 |---|---|---|
 | ジェネリクス `<T>` | `lang/generics/spec.md` | Anvil の前提。v0.3.0 |
-| `forge.toml` パッケージ管理 | `lang/package/spec.md` | forge build との統合。v0.3.0 |
+| `forge.toml` パッケージ管理（完全版） | `lang/package/spec.md` | レジストリ・バージョン解決・forge build 統合。v0.3.0（ローカルパス依存は ✅ 実装済み） |
+
+## 設計中・方針確定 💭（標準ライブラリ拡充）
+
+現状の `forge/std` に不足している実用関数。`app_ideas.md` の素案を実現するために必要な最小セット。
+
+### 第2層：実用ライン（近日対応）
+
+| モジュール | 追加する関数 | 必要な素案 |
+|---|---|---|
+| `forge/std/env` | `env(key)` / `env_or(key, default)` | forge-env・forge-cron・全 CLI ツール |
+| `forge/std/process` | `args()` / `exit(code)` / `run(cmd, args)` | forge-todo・forge-pipeline 等 CLI全般 |
+| `forge/std/json` | `stringify(value)` | forge-webhook・全 REST API（現状は文字列補間で代替） |
+| `forge/std/fs`（拡張） | `list_dir` / `delete_file` / `make_dir` / `path_join` | forge-migrate・forge-config |
+| `forge/std/string`（拡張） | `split` / `trim` / `starts_with` / `ends_with` / `replace` / `to_upper` / `to_lower` | 全般 |
+
+### 第3層：パッケージとして切り出す（標準ライブラリには含めない）
+
+| パッケージ | 内部実装 | 概要 |
+|---|---|---|
+| **forge-http** | `reqwest` ラッパー | HTTP クライアント。`get` / `post` / `put` / `delete` / `request` + レスポンス型 |
+| forge-time | `chrono` ラッパー | `now()` / `format_date` / `parse_date` |
+| forge-crypto | `sha2` / `base64` ラッパー | `hash_sha256` / `base64_encode` / `base64_decode` |
+
+> **設計方針**: `forge/std/net` はサーバー側 TCP（Anvil の土台）を担当。
+> クライアント側 HTTP は責務が異なるため `packages/forge-http` として独立させる。
+> Anvil（サーバー）と forge-http（クライアント）が対になる構造。
+
+### forge-http パッケージ API 案
+
+```forge
+use forge_http.{ get, post, put, delete, request, Response }
+
+// シンプルな GET
+let res = get("https://api.example.com/users")?
+
+// ヘッダー付き POST
+let res = post("https://api.example.com/orders")
+    .header("Authorization", "Bearer {token}")
+    .json(payload)
+    .send()?
+
+// レスポンス操作
+let body   = res.text()
+let parsed = res.json()?
+let status = res.status          // number
+let ok     = res.ok              // bool (2xx)
+```
 
 ## 設計済み・未実装 📐（パッケージ）
 
 | パッケージ | 仕様 | 概要 |
 |---|---|---|
-| **Anvil** | `packages/anvil/spec.md` | Express スタイル HTTP マイクロフレームワーク |
+| **forge-http** | `packages/forge-http/spec.md`（未作成） | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 |
 | forge-grpc | `packages/forge-grpc/spec.md`（未作成） | gRPC サービス定義 DSL（tonic ラッパー） |
 | forge-graphql | `packages/forge-graphql/spec.md`（未作成） | GraphQL スキーマ DSL（async-graphql ラッパー） |
+
+## 設計中・方針確定 💭（DX ツール）
+
+| 機能 | 設計方針 | 備考 |
+|---|---|---|
+| `forge fmt` | AST から整形出力（Prettier スタイル）。CI/CD で必須 | parser 安定後に着手 |
+| `forge check`（強化版） | 現行の基礎型チェックに加え、未使用変数・到達不能コード・型推論エラーの詳細表示 | 現行は基礎のみ ✅ |
+| **forge-mcp** | ForgeScript 専用 MCP サーバ。`parse_file` / `type_check` / `run_snippet` / `search_symbol` / `get_spec_section` を tool として公開。AI コーディング支援の不確実性を低減 | 設計方針確定 |
+
+## 設計中・方針確定 💭（配布・インストール）
+
+| 機能 | 設計方針 | 備考 |
+|---|---|---|
+| GitHub Releases バイナリ配布 | Linux x86_64 / ARM64 / macOS / Windows の pre-built バイナリを CI でビルド・配布 | GitHub Actions で自動化 |
+| `install.sh` インストーラー | rustup スタイルのワンライナー。OS 検出 → バイナリ DL → `~/.forge/bin/` 配置 → PATH 追記 | Rust 不要でインストール可能に |
+| `cargo install` 対応 | `cargo install --git <repo> forge-cli` で Rust 環境ならすぐ使えるように | 短期で対応可能 |
+| `forge upgrade` コマンド | インストール済みバイナリの自動アップデート | install.sh と連動 |
+
+## 設計中・方針確定 💭（ノートブック）
+
+| 機能 | 設計方針 | 備考 |
+|---|---|---|
+| `.fnb` 形式 | Markdown ベース。コードブロックを ForgeScript セルとして実行。出力は `.fnb.out.json` に分離（git 差分を清潔に保つ） | Quarto `.qmd` に近いコンセプト |
+| VS Code Notebook 拡張 | 既存 VS Code 拡張に Notebook kernel を追加。ZeroMQ 不要・依存なし | WASM より先に着手可能 |
+| `forge notebook <file>` | `.fnb` ファイルをノートブックとして実行するコマンド | `forge run` の拡張 |
+| `display()` 組み込み | `display::html` / `display::json` / `display::table`。`forge run` では `println` に fallback | ノートブック向けリッチ出力 |
+| Jupyter 互換（後期） | `.ipynb` エクスポート対応（`forge nbconvert`）。Colab・JupyterHub での利用を可能にする | `.fnb` 設計後に追加 |
 
 ## 未設計 ⬜
 
 | 機能 | 備考 |
 |---|---|
 | `forge test` FT-2 | コンパニオンファイル・ディレクトリ走査 |
-| LSP（言語サーバー） | 型チェッカーを活用。ホバー・補完・定義ジャンプ |
+| LSP（言語サーバー） | `forge check` の型チェッカーを転用。ホバー・補完・定義ジャンプ・インラインエラー。Rust より親切な DX を目標 |
 | Playground（WASM） | forge-wasm クレートが必要 |
-| `forge fmt` | コードフォーマッタ |
 | `forge generate` | コードジェネレータ |
-| GitHub Actions / バイナリ配布 | CI/CD・リリース自動化 |
-| Tree-sitter grammar | シンタックスハイライトの拡張 |
+| Tree-sitter grammar | シンタックスハイライトの拡張（より高精度な構文解析） |
+| forge.toml レジストリ / `forge publish` | パッケージ公開・バージョン解決・`forge.lock` |
 
 ---
 
@@ -150,33 +231,51 @@
 ```
 ✅ 完了済み
   ├─ [1] struct / enum / trait / mixin / data / typestate 実装
-  │       → forge/typedefs/ に spec/plan/tasks 完備
+  ├─ [2] モジュールシステム実装（M-0〜M-7）
+  ├─ [3] forge test + test "..." ブロック（FT-1）
+  ├─ [4] ジェネリクス <T>
+  ├─ [5] forge.toml ローカルパス依存（`dep = { path = "..." }`）
+  ├─ [6] Anvil HTTP フレームワーク（A-1〜A-5 全完了）
+  └─ [7] examples/anvil サンプルサーバ
+
+  次のステップ（stdlib 拡充 + パッケージ）
   │
-今すぐ着手可能
+  ├─ [8] forge/std 第2層（env / process / stringify / fs拡張 / string拡張）
+  │       args() / env() / stringify() が揃うと CLI・API ツールが書けるようになる
   │
-✅ [2] モジュールシステム実装（M-0〜M-7 完了）
+  ├─ [9] forge-http パッケージ（reqwest ラッパー）
+  │       get / post / put / delete / request + Response 型
+  │       → forge/std/net（サーバー）と対になるクライアント側 HTTP
   │
-今すぐ着手可能
+  DX 強化
   │
-✅ [3] forge test + test "..." ブロック（FT-1 完了）
-  │       FT-2（コンパニオンファイル）は言語仕様安定後
+  ├─ [10] Linux インストール対応
+  │        cargo install --git 対応 → GitHub Releases バイナリ → install.sh
   │
-  次のステップ
+  ├─ [11] forge fmt（フォーマッタ）
+  │        CI/CD で必須。AST から整形出力
   │
-  ├─ [4] ジェネリクス <T>（Anvil の前提）
-  ├─ [5] forge.toml（パッケージ管理）
-  ├─ [6] Anvil HTTP フレームワーク
-  │       Stage A-1: std のみ基礎 HTTP
-  │       Stage A-2: ルーティング
-  │       Stage A-3: ミドルウェア
-  │       Stage A-4: 非同期（tokio）
+  ├─ [12] forge check 強化
+  │        未使用変数・到達不能コード・詳細エラー表示
+  │
+  ├─ [13] forge-mcp（MCP サーバ）
+  │        parse_file / type_check / run_snippet / search_symbol / get_spec_section
+  │        → AI コーディング支援の不確実性を低減
   │
   言語仕様安定後
   │
-  ├─ [7] LSP（言語サーバー）
-  ├─ [8] forge-grpc / forge-graphql
-  ├─ [9] Playground（WASM）
-  └─ [10] セルフホスティング
+  ├─ [14] LSP（言語サーバー）
+  │        forge check の型チェッカーを転用
+  │        ホバー・補完・定義ジャンプ
+  │
+  ├─ [15] ノートブック `.fnb` + VS Code Notebook 拡張
+  │        forge notebook コマンド・display() 組み込み
+  │        後から Jupyter 互換（.ipynb エクスポート）を追加可能
+  │
+  ├─ [16] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
+  ├─ [17] forge-grpc / forge-graphql
+  ├─ [18] Playground（WASM）
+  └─ [19] セルフホスティング
 ```
 
 ---
@@ -204,6 +303,8 @@ lang/                           ← 言語仕様・ドキュメント
   syntax/
     spec.md / plan.md / tasks.md ← S-1（完了）
   future_task_20260330.md       ← 将来タスク一覧
+  app_ideas.md                  ← ForgeScript で作ると有用なアプリケーション素案集
+  extend_idea.md                ← 他言語から取り込みたい言語拡張アイデア集
 
 crates/                         ← RVM 実装（Rust クレート群）
   forge-compiler/
@@ -214,9 +315,13 @@ crates/                         ← RVM 実装（Rust クレート群）
 
 packages/                       ← ForgeScript パッケージ群
   anvil/
-    spec.md                     ← Anvil HTTP フレームワーク仕様（📐 設計済み）
+    spec.md                     ← Anvil HTTP フレームワーク仕様（✅ 実装済み）
+    src/                        ← anvil.forge / request.forge / response.forge / middleware.forge / cors.forge
   forge-grpc/                   ← gRPC（spec 未作成）
   forge-graphql/                ← GraphQL（spec 未作成）
+
+examples/                       ← サンプルプロジェクト群
+  anvil/                        ← Anvil を外部依存として使うサンプルサーバ（✅ 動作確認済み）
 
 dev/
   design-v2.md / design-v3.md  ← 設計方針

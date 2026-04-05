@@ -620,11 +620,13 @@ impl Interpreter {
             native!(|args: Vec<Value>| {
                 let s = match args.first() {
                     Some(Value::String(s)) => s.clone(),
-                    Some(v) => return Err(format!("parse() expects string, got {}", v.type_name())),
+                    Some(v) => {
+                        return Err(format!("parse() expects string, got {}", v.type_name()))
+                    }
                     None => return Err("parse() requires 1 argument".to_string()),
                 };
-                let jv: serde_json::Value = serde_json::from_str(&s)
-                    .map_err(|e| format!("JSON parse error: {}", e))?;
+                let jv: serde_json::Value =
+                    serde_json::from_str(&s).map_err(|e| format!("JSON parse error: {}", e))?;
                 Ok(Value::Result(Ok(Box::new(json_to_value(jv)))))
             }),
             false,
@@ -858,7 +860,6 @@ impl Interpreter {
     }
 
     // ── UseDecl の評価 ────────────────────────────────────────────────────
-
 
     fn eval_use_decl(
         &mut self,
@@ -2039,8 +2040,7 @@ impl Interpreter {
             Some(MethodImpl::Native(NativeFn(f))) => f(args).map_err(RuntimeError::Custom),
             Some(MethodImpl::Forge(fn_def, captured)) => {
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> =
-                    captured.borrow().clone();
+                let mut initial: HashMap<String, Binding> = captured.borrow().clone();
                 // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
                     for (k, v) in global {
@@ -3259,8 +3259,7 @@ impl Interpreter {
             }
             Some(MethodImpl::Forge(fn_def, captured)) => {
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> =
-                    captured.borrow().clone();
+                let mut initial: HashMap<String, Binding> = captured.borrow().clone();
                 // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
                     for (k, v) in global {
@@ -3339,8 +3338,10 @@ impl Interpreter {
         let captured = self.capture_env();
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in methods {
-                info.methods
-                    .insert(method.name.clone(), MethodImpl::Forge(method, Rc::clone(&captured)));
+                info.methods.insert(
+                    method.name.clone(),
+                    MethodImpl::Forge(method, Rc::clone(&captured)),
+                );
             }
         }
         Ok(Value::Unit)
@@ -3422,8 +3423,10 @@ impl Interpreter {
         let captured = self.capture_env();
         if let Some(info) = self.type_registry.structs.get_mut(&target) {
             for method in &methods {
-                info.methods
-                    .insert(method.name.clone(), MethodImpl::Forge(method.clone(), Rc::clone(&captured)));
+                info.methods.insert(
+                    method.name.clone(),
+                    MethodImpl::Forge(method.clone(), Rc::clone(&captured)),
+                );
             }
         }
 
@@ -3751,8 +3754,7 @@ impl Interpreter {
             Some(MethodImpl::Forge(fn_def, captured)) => {
                 // self を暗黙引数として束縛してメソッドを呼び出す
                 let saved = std::mem::take(&mut self.scopes);
-                let mut initial: HashMap<String, Binding> =
-                    captured.borrow().clone();
+                let mut initial: HashMap<String, Binding> = captured.borrow().clone();
 
                 // グローバルスコープで上書き（最新の値を優先）
                 if let Some(global) = saved.first() {
@@ -4532,9 +4534,7 @@ impl Interpreter {
 }
 
 /// HTTP リクエストを std::net::TcpStream からパースする（同期版）
-fn http_parse_request(
-    stream: &std::net::TcpStream,
-) -> Result<HttpRawRequest, String> {
+fn http_parse_request(stream: &std::net::TcpStream) -> Result<HttpRawRequest, String> {
     use std::io::{BufRead, BufReader};
 
     let mut reader = BufReader::new(stream);
@@ -4579,7 +4579,13 @@ fn http_parse_request(
         body = String::from_utf8_lossy(&buf).to_string();
     }
 
-    Ok(HttpRawRequest { method, path, query, headers, body })
+    Ok(HttpRawRequest {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    })
 }
 
 struct HttpRawRequest {
@@ -4590,9 +4596,7 @@ struct HttpRawRequest {
     body: String,
 }
 
-fn parse_path_query(
-    full_path: &str,
-) -> (String, std::collections::HashMap<String, String>) {
+fn parse_path_query(full_path: &str) -> (String, std::collections::HashMap<String, String>) {
     let mut query = std::collections::HashMap::new();
     if let Some((path, qs)) = full_path.split_once('?') {
         for pair in qs.split('&') {
@@ -4608,13 +4612,15 @@ fn parse_path_query(
     }
 }
 
-fn extract_raw_response(
-    val: Value,
-) -> (i64, std::collections::HashMap<String, String>, String) {
+fn extract_raw_response(val: Value) -> (i64, std::collections::HashMap<String, String>, String) {
     let fields = match val {
         Value::Struct { fields, .. } => fields,
         _ => {
-            return (500, std::collections::HashMap::new(), "invalid response".to_string())
+            return (
+                500,
+                std::collections::HashMap::new(),
+                "invalid response".to_string(),
+            )
         }
     };
     let f = fields.borrow();
