@@ -144,6 +144,7 @@
 | `forge/std/json` | `stringify(value)` | forge-webhook・全 REST API（現状は文字列補間で代替） |
 | `forge/std/fs`（拡張） | `list_dir` / `delete_file` / `make_dir` / `path_join` | forge-migrate・forge-config |
 | `forge/std/string`（拡張） | `split` / `trim` / `starts_with` / `ends_with` / `replace` / `to_upper` / `to_lower` | 全般 |
+| 組み込み関数（時間計測） | `time_ms()` / `time_ns()` | ベンチマーク・パフォーマンス計測全般 |
 
 ### 第3層：パッケージとして切り出す（標準ライブラリには含めない）
 
@@ -185,6 +186,18 @@ let ok     = res.ok              // bool (2xx)
 | **forge-http** | `packages/forge-http/spec.md`（未作成） | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 |
 | forge-grpc | `packages/forge-grpc/spec.md`（未作成） | gRPC サービス定義 DSL（tonic ラッパー） |
 | forge-graphql | `packages/forge-graphql/spec.md`（未作成） | GraphQL スキーマ DSL（async-graphql ラッパー） |
+
+## 設計中・方針確定 💭（トランスパイラ最適化）
+
+詳細は `lang/transpiler_perf.md` を参照。
+
+| 最適化 | 概要 | 優先度 |
+|---|---|---|
+| イテレータ融合 | filter/map/fold チェーンを中間 Vec なしの単一パスに変換 | ◎ |
+| `Vec::with_capacity` 自動挿入 | map の出力に容量事前確保を自動付与 | ◎ |
+| クロージャ静的展開 | `Box<dyn Fn>` を使わず常に `impl Fn` でモノモーフィズム展開 | ◎ |
+| 文字列補間の事前確保 | 補間変数の長さ合算で `String::with_capacity` を自動挿入 | ○ |
+| 小 struct への Copy 自動付与 | 全フィールドが数値型の小さい struct に `#[derive(Copy)]` | ○ |
 
 ## 設計中・方針確定 💭（DX ツール）
 
@@ -240,8 +253,9 @@ let ok     = res.ok              // bool (2xx)
 
   次のステップ（stdlib 拡充 + パッケージ）
   │
-  ├─ [8] forge/std 第2層（env / process / stringify / fs拡張 / string拡張）
+  ├─ [8] forge/std 第2層（env / process / stringify / fs拡張 / string拡張 / time_ms・time_ns）
   │       args() / env() / stringify() が揃うと CLI・API ツールが書けるようになる
+  │       time_ms() / time_ns() は実装コスト極小・ベンチマーク体験に直結
   │
   ├─ [9] forge-http パッケージ（reqwest ラッパー）
   │       get / post / put / delete / request + Response 型
@@ -252,30 +266,35 @@ let ok     = res.ok              // bool (2xx)
   ├─ [10] Linux インストール対応
   │        cargo install --git 対応 → GitHub Releases バイナリ → install.sh
   │
-  ├─ [11] forge fmt（フォーマッタ）
+  ├─ [11] forge build: Rust コード保存（target/forge_rs/）
+  │        build 時にデフォルトで target/forge_rs/ にコピーを残す
+  │        Rust 学習材料・トランスパイラデバッグ・脱出ハッチとして機能
+  │        --no-keep-rs フラグで CI 向けに抑制可能
+  │
+  ├─ [12] forge fmt（フォーマッタ）
   │        CI/CD で必須。AST から整形出力
   │
-  ├─ [12] forge check 強化
+  ├─ [13] forge check 強化
   │        未使用変数・到達不能コード・詳細エラー表示
   │
-  ├─ [13] forge-mcp（MCP サーバ）
+  ├─ [14] forge-mcp（MCP サーバ）
   │        parse_file / type_check / run_snippet / search_symbol / get_spec_section
   │        → AI コーディング支援の不確実性を低減
   │
   言語仕様安定後
   │
-  ├─ [14] LSP（言語サーバー）
+  ├─ [15] LSP（言語サーバー）
   │        forge check の型チェッカーを転用
   │        ホバー・補完・定義ジャンプ
   │
-  ├─ [15] ノートブック `.fnb` + VS Code Notebook 拡張
+  ├─ [16] ノートブック `.fnb` + VS Code Notebook 拡張
   │        forge notebook コマンド・display() 組み込み
   │        後から Jupyter 互換（.ipynb エクスポート）を追加可能
   │
-  ├─ [16] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
-  ├─ [17] forge-grpc / forge-graphql
-  ├─ [18] Playground（WASM）
-  └─ [19] セルフホスティング
+  ├─ [17] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
+  ├─ [18] forge-grpc / forge-graphql
+  ├─ [19] Playground（WASM）
+  └─ [20] セルフホスティング
 ```
 
 ---
@@ -305,6 +324,7 @@ lang/                           ← 言語仕様・ドキュメント
   future_task_20260330.md       ← 将来タスク一覧
   app_ideas.md                  ← ForgeScript で作ると有用なアプリケーション素案集
   extend_idea.md                ← 他言語から取り込みたい言語拡張アイデア集
+  transpiler_perf.md            ← トランスパイラ最適化アイデア（イテレータ融合・with_capacity 等）
 
 crates/                         ← RVM 実装（Rust クレート群）
   forge-compiler/
