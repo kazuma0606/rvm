@@ -222,9 +222,16 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::Let => self.parse_let(),
             TokenKind::State => self.parse_state(),
-            TokenKind::Const => self.parse_const(),
+            TokenKind::Const => {
+                if matches!(self.kind_at(1), Some(TokenKind::Fn)) {
+                    self.parse_const_fn()
+                } else {
+                    self.parse_const()
+                }
+            }
             TokenKind::Fn => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Yield => self.parse_yield(),
             TokenKind::Struct => self.parse_struct_def(vec![]),
             TokenKind::Impl => self.parse_impl_or_impl_trait(),
             TokenKind::Trait => self.parse_trait_def(),
@@ -253,7 +260,13 @@ impl Parser {
             TokenKind::Use => self.parse_use_decl(true),
             TokenKind::Fn => self.parse_fn_with_pub(true),
             TokenKind::Let => self.parse_let_with_pub(true),
-            TokenKind::Const => self.parse_const_with_pub(true),
+            TokenKind::Const => {
+                if matches!(self.kind_at(1), Some(TokenKind::Fn)) {
+                    self.parse_const_fn_with_pub(true)
+                } else {
+                    self.parse_const_with_pub(true)
+                }
+            }
             TokenKind::Struct => self.parse_struct_def_with_pub(vec![], true),
             TokenKind::Trait => self.parse_trait_def_with_pub(true),
             TokenKind::Mixin => self.parse_mixin_def_with_pub(true),
@@ -685,11 +698,26 @@ impl Parser {
     }
 
     fn parse_fn(&mut self) -> Result<Stmt, ParseError> {
-        self.parse_fn_with_pub(false)
+        self.parse_fn_with_const(false, false)
+    }
+
+    fn parse_const_fn(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_fn_with_const(false, true)
     }
 
     fn parse_fn_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
+        self.parse_fn_with_const(is_pub, false)
+    }
+
+    fn parse_const_fn_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
+        self.parse_fn_with_const(is_pub, true)
+    }
+
+    fn parse_fn_with_const(&mut self, is_pub: bool, is_const: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
+        if is_const {
+            self.expect_token(&TokenKind::Const)?;
+        }
         self.expect_token(&TokenKind::Fn)?;
         let (name, _) = self.expect_name()?;
         let type_params = self.parse_type_params()?;
@@ -730,6 +758,7 @@ impl Parser {
             return_type,
             body: Box::new(body),
             is_pub,
+            is_const,
             span,
         })
     }
@@ -746,6 +775,17 @@ impl Parser {
             Some(self.parse_expr()?)
         };
         Ok(Stmt::Return(value, span))
+    }
+
+    fn parse_yield(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Yield)?;
+        let value = self.parse_expr()?;
+        self.skip_sep();
+        Ok(Stmt::Yield {
+            value: Box::new(value),
+            span,
+        })
     }
 
     fn parse_type_ann(&mut self) -> Result<TypeAnn, ParseError> {
@@ -790,6 +830,12 @@ impl Parser {
                         let inner = self.parse_type_ann()?;
                         self.expect_token(&TokenKind::Gt)?;
                         TypeAnn::List(Box::new(inner))
+                    }
+                    "generate" => {
+                        self.expect_token(&TokenKind::Lt)?;
+                        let inner = self.parse_type_ann()?;
+                        self.expect_token(&TokenKind::Gt)?;
+                        TypeAnn::Generate(Box::new(inner))
                     }
                     "map" => {
                         self.expect_token(&TokenKind::Lt)?;
@@ -904,9 +950,19 @@ impl Parser {
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         // 代入: base を or レベルで解析し、直後に `=` があれば Assign / FieldAssign / IndexAssign
-        let base = self.parse_or()?;
+        let mut expr = self.parse_or()?;
+        while matches!(self.peek_kind(), TokenKind::QuestionQuestion) {
+            let span = self.current_span();
+            self.advance();
+            let right = self.parse_or()?;
+            expr = Expr::NullCoalesce {
+                value: Box::new(expr),
+                default: Box::new(right),
+                span,
+            };
+        }
         if matches!(self.peek_kind(), TokenKind::Eq) {
-            match base {
+            match expr {
                 Expr::Ident(name, span) => {
                     self.advance(); // consume '='
                     let value = self.parse_expr()?;
@@ -947,7 +1003,7 @@ impl Parser {
                 other => return Ok(other),
             }
         }
-        Ok(base)
+        Ok(expr)
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
@@ -1260,6 +1316,24 @@ impl Parser {
                         };
                     }
                 }
+                TokenKind::QuestionDot => {
+                    let span = self.current_span();
+                    self.advance();
+                    let (name, _) = self.expect_name()?;
+                    let chain = if matches!(self.peek_kind(), TokenKind::LParen) {
+                        self.advance();
+                        let args = self.parse_call_args()?;
+                        self.expect_token(&TokenKind::RParen)?;
+                        ChainKind::Method { name, args }
+                    } else {
+                        ChainKind::Field(name)
+                    };
+                    expr = Expr::OptionalChain {
+                        object: Box::new(expr),
+                        chain,
+                        span,
+                    };
+                }
                 TokenKind::LBracket => {
                     let span = self.current_span();
                     self.advance();
@@ -1285,6 +1359,17 @@ impl Parser {
                 _ => break,
             }
         }
+        while matches!(self.peek_kind(), TokenKind::PipeArrow) {
+            let span = self.current_span();
+            self.advance();
+            let (method, args) = self.parse_pipe_call_suffix()?;
+            expr = Expr::MethodCall {
+                object: Box::new(expr),
+                method,
+                args,
+                span,
+            };
+        }
         Ok(expr)
     }
 
@@ -1299,6 +1384,19 @@ impl Parser {
             }
         }
         Ok(args)
+    }
+
+    fn parse_pipe_call_suffix(&mut self) -> Result<(String, Vec<Expr>), ParseError> {
+        let (name, _) = self.expect_ident()?;
+        let args = if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.advance();
+            let args = self.parse_call_args()?;
+            self.expect_token(&TokenKind::RParen)?;
+            args
+        } else {
+            Vec::new()
+        };
+        Ok((name, args))
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -1380,6 +1478,15 @@ impl Parser {
             // ── ブロック / Map / Set ──
             TokenKind::LBrace => self.parse_brace_expr(),
 
+            TokenKind::Spawn => {
+                self.advance();
+                let body = self.parse_block()?;
+                Ok(Expr::Spawn {
+                    body: Box::new(body),
+                    span: tok.span,
+                })
+            }
+
             // ── if / while / for / match ──
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
@@ -1433,6 +1540,7 @@ impl Parser {
                 TokenKind::At => stmts.push(self.parse_annotated_stmt()?),
                 TokenKind::Data => stmts.push(self.parse_data_def()?),
                 TokenKind::Typestate => stmts.push(self.parse_typestate_def()?),
+                TokenKind::Yield => stmts.push(self.parse_yield()?),
                 _ => {
                     let expr = self.parse_expr()?;
                     if matches!(self.peek_kind(), TokenKind::Semicolon) {
@@ -1764,12 +1872,26 @@ impl Parser {
             // 旧来の `impl Name { ... }` 形式（trait_name: None の ImplBlock）
             self.expect_token(&TokenKind::LBrace)?;
             let mut methods: Vec<FnDef> = Vec::new();
+            let mut operators: Vec<OperatorDef> = Vec::new();
             loop {
                 self.skip_sep();
                 if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
-                methods.push(self.parse_fn_def()?);
+                if matches!(self.peek_kind(), TokenKind::Const)
+                    || matches!(self.peek_kind(), TokenKind::Fn)
+                {
+                    methods.push(self.parse_fn_def()?);
+                } else if matches!(self.peek_kind(), TokenKind::Operator) {
+                    operators.push(self.parse_operator_def()?);
+                } else {
+                    let tok = self.peek().clone();
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "fn, const fn, or operator".to_string(),
+                        found: tok.kind,
+                        span: tok.span,
+                    });
+                }
             }
             self.expect_token(&TokenKind::RBrace)?;
             Ok(Stmt::ImplBlock {
@@ -1778,6 +1900,7 @@ impl Parser {
                 target_type_args: first_type_args,
                 trait_name: None,
                 methods,
+                operators,
                 span,
             })
         }
@@ -1911,12 +2034,18 @@ impl Parser {
             target_type_args,
             trait_name,
             methods,
+            operators: Vec::new(),
             span,
         })
     }
     /// impl ブロック内の fn 定義をパース
     fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
         let span = self.current_span();
+        let mut is_const = false;
+        if matches!(self.peek_kind(), TokenKind::Const) {
+            is_const = true;
+            self.advance();
+        }
         self.expect_token(&TokenKind::Fn)?;
         let (name, _) = self.expect_name()?;
         let type_params = self.parse_type_params()?;
@@ -1980,6 +2109,7 @@ impl Parser {
             body: Box::new(body),
             has_self,
             has_state_self,
+            is_const,
             span,
         })
     }
@@ -2626,6 +2756,152 @@ impl Parser {
         Ok(FnDef {
             name,
             type_params: vec![],
+            params,
+            return_type,
+            body: Box::new(body),
+            has_self,
+            has_state_self,
+            is_const: false,
+            span,
+        })
+    }
+
+    fn parse_operator_kind(&mut self) -> Result<OperatorKind, ParseError> {
+        let tok = self.peek().clone();
+        let span = tok.span;
+        match tok.kind {
+            TokenKind::Ident(ref name) if name == "unary" => {
+                self.advance();
+                if matches!(self.peek_kind(), TokenKind::Minus) {
+                    self.advance();
+                    Ok(OperatorKind::Neg)
+                } else {
+                    let found = self.peek_kind().clone();
+                    Err(ParseError::UnexpectedToken {
+                        expected: " '-' after unary".to_string(),
+                        found,
+                        span,
+                    })
+                }
+            }
+            TokenKind::Plus => {
+                self.advance();
+                Ok(OperatorKind::Add)
+            }
+            TokenKind::Minus => {
+                self.advance();
+                Ok(OperatorKind::Sub)
+            }
+            TokenKind::Star => {
+                self.advance();
+                Ok(OperatorKind::Mul)
+            }
+            TokenKind::Slash => {
+                self.advance();
+                Ok(OperatorKind::Div)
+            }
+            TokenKind::Percent => {
+                self.advance();
+                Ok(OperatorKind::Rem)
+            }
+            TokenKind::EqEq => {
+                self.advance();
+                Ok(OperatorKind::Eq)
+            }
+            TokenKind::Lt => {
+                self.advance();
+                Ok(OperatorKind::Lt)
+            }
+            TokenKind::LBracket => {
+                if matches!(self.kind_at(1), Some(TokenKind::RBracket)) {
+                    self.advance();
+                    self.advance();
+                    Ok(OperatorKind::Index)
+                } else {
+                    let found = self.peek_kind().clone();
+                    Err(ParseError::UnexpectedToken {
+                        expected: "']' after '[' for operator []".to_string(),
+                        found,
+                        span,
+                    })
+                }
+            }
+            other => Err(ParseError::UnexpectedToken {
+                expected: "operator symbol".to_string(),
+                found: other.clone(),
+                span,
+            }),
+        }
+    }
+
+    fn parse_operator_def(&mut self) -> Result<OperatorDef, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Operator)?;
+        let op = self.parse_operator_kind()?;
+        self.expect_token(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+        let mut has_self = false;
+        let mut has_state_self = false;
+
+        if matches!(self.peek_kind(), TokenKind::State) {
+            self.advance();
+            if matches!(self.peek_kind(), TokenKind::SelfVal) {
+                self.advance();
+                has_self = true;
+                has_state_self = true;
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                }
+            }
+        } else if matches!(self.peek_kind(), TokenKind::SelfVal) {
+            self.advance();
+            has_self = true;
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let (param_name, param_span) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let type_ann = self.parse_type_ann()?;
+            params.push(Param {
+                name: param_name,
+                type_ann: Some(type_ann),
+                span: param_span,
+            });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.expect_token(&TokenKind::RParen)?;
+
+        let return_type = if matches!(self.peek_kind(), TokenKind::ThinArrow) {
+            self.advance();
+            Some(self.parse_type_ann()?)
+        } else {
+            None
+        };
+
+        let body = if matches!(self.peek_kind(), TokenKind::LBrace) {
+            self.parse_block()?
+        } else {
+            if matches!(self.peek_kind(), TokenKind::Semicolon) {
+                self.advance();
+            }
+            Expr::Block {
+                stmts: vec![],
+                tail: None,
+                span: span.clone(),
+            }
+        };
+
+        Ok(OperatorDef {
+            op,
             params,
             return_type,
             body: Box::new(body),

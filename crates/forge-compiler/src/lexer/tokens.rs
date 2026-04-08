@@ -47,6 +47,9 @@ pub enum TokenKind {
     Mixin,
     Data,
     Typestate,
+    Operator,
+    Spawn,
+    Yield,
     // ── モジュールキーワード (Phase M-0) ─────
     Use,  // use
     Pub,  // pub
@@ -76,18 +79,21 @@ pub enum TokenKind {
     GtEq,
 
     // ── 論理演算子 ────────────────────────────
-    And,  // &&
-    Or,   // ||
-    Pipe, // |  (Pick/Omit のキー区切り)
-    Bang, // !
+    And,       // &&
+    Or,        // ||
+    Pipe,      // |  (Pick/Omit のキー区切り)
+    PipeArrow, // |> (Pipeline)
+    Bang,      // !
 
     // ── 代入・型注釈 ─────────────────────────
-    Eq,         // =
-    Colon,      // :
-    ThinArrow,  // ->
-    Arrow,      // =>
-    Question,   // ?
-    ColonColon, // ::
+    Eq,               // =
+    Colon,            // :
+    ThinArrow,        // ->
+    Arrow,            // =>
+    Question,         // ?
+    QuestionDot,      // ?.
+    QuestionQuestion, // ??
+    ColonColon,       // ::
 
     // ── 範囲 ─────────────────────────────────
     DotDot,   // ..

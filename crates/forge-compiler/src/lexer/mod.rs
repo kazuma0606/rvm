@@ -332,6 +332,9 @@ impl Lexer {
                         "mixin" => TokenKind::Mixin,
                         "data" => TokenKind::Data,
                         "typestate" => TokenKind::Typestate,
+                        "operator" => TokenKind::Operator,
+                        "spawn" => TokenKind::Spawn,
+                        "yield" => TokenKind::Yield,
                         "use" => TokenKind::Use,
                         "pub" => TokenKind::Pub,
                         "as" => TokenKind::As,
@@ -468,7 +471,13 @@ impl Lexer {
                 }
                 Some('|') => {
                     self.advance();
-                    if self.peek() == Some('|') {
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        tokens.push(Token {
+                            kind: TokenKind::PipeArrow,
+                            span: self.make_span(start, start_line, start_col),
+                        });
+                    } else if self.peek() == Some('|') {
                         self.advance();
                         tokens.push(Token {
                             kind: TokenKind::Or,
@@ -498,10 +507,24 @@ impl Lexer {
                 }
                 Some('?') => {
                     self.advance();
-                    tokens.push(Token {
-                        kind: TokenKind::Question,
-                        span: self.make_span(start, start_line, start_col),
-                    });
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        tokens.push(Token {
+                            kind: TokenKind::QuestionDot,
+                            span: self.make_span(start, start_line, start_col),
+                        });
+                    } else if self.peek() == Some('?') {
+                        self.advance();
+                        tokens.push(Token {
+                            kind: TokenKind::QuestionQuestion,
+                            span: self.make_span(start, start_line, start_col),
+                        });
+                    } else {
+                        tokens.push(Token {
+                            kind: TokenKind::Question,
+                            span: self.make_span(start, start_line, start_col),
+                        });
+                    }
                 }
                 Some('.') => {
                     self.advance();
@@ -680,6 +703,12 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_operator_keyword() {
+        let got = kinds("operator");
+        assert_eq!(got, vec![TokenKind::Operator, TokenKind::Eof]);
+    }
+
+    #[test]
     fn test_lex_operators() {
         let src = "+ - * / % == != < > <= >= && || !";
         let got = kinds(src);
@@ -704,6 +733,30 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_pipe_arrow() {
+        let got = kinds("|> |> |");
+        let expected = vec![
+            TokenKind::PipeArrow,
+            TokenKind::PipeArrow,
+            TokenKind::Pipe,
+            TokenKind::Eof,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_lex_spawn() {
+        let got = kinds("spawn");
+        assert_eq!(got, vec![TokenKind::Spawn, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_lex_yield() {
+        let got = kinds("yield");
+        assert_eq!(got, vec![TokenKind::Yield, TokenKind::Eof]);
+    }
+
+    #[test]
     fn test_lex_symbols() {
         let src = "=> -> ? : . .. ..= [ ]";
         let got = kinds(src);
@@ -719,6 +772,24 @@ mod tests {
             TokenKind::RBracket,
             TokenKind::Eof,
         ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_lex_question_dot() {
+        let got = kinds("?.foo");
+        let expected = vec![
+            TokenKind::QuestionDot,
+            TokenKind::Ident("foo".to_string()),
+            TokenKind::Eof,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_lex_question_question() {
+        let got = kinds("??");
+        let expected = vec![TokenKind::QuestionQuestion, TokenKind::Eof];
         assert_eq!(got, expected);
     }
 

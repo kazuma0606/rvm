@@ -20,6 +20,12 @@ enum MethodImpl {
     Native(NativeFn),
 }
 
+/// Operator 実装（operator 定義）
+#[derive(Debug, Clone)]
+enum OperatorImpl {
+    Forge(OperatorDef, CapturedEnv),
+}
+
 impl std::fmt::Debug for MethodImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -35,6 +41,7 @@ struct StructInfo {
     fields: Vec<(String, TypeAnn)>,
     derives: Vec<String>,
     methods: HashMap<String, MethodImpl>,
+    operators: HashMap<OperatorKind, OperatorImpl>,
 }
 
 /// enum 型の定義情報（型レジストリに格納）
@@ -185,6 +192,8 @@ pub struct Interpreter {
     pub imported_symbols: HashMap<String, ImportInfo>,
     /// 現在ロード中のモジュールパスのスタック（循環参照検出用）（M-4-B）
     loading_stack: Vec<String>,
+    /// yield 値を蓄積するスタック
+    generator_stack: Vec<Vec<Value>>,
     /// テストモードフラグ（M-5-C）: `forge test` コマンドで true になる
     pub is_test_mode: bool,
     /// REPL でロード済みのモジュール情報（M-7-A）
@@ -201,6 +210,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            generator_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -217,6 +227,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            generator_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -233,6 +244,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            generator_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -256,6 +268,7 @@ impl Interpreter {
             deps_manager: DepsManager::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
+            generator_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -663,7 +676,11 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
             Stmt::Fn {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                body,
+                ..
             } => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 let captured = self.capture_env();
@@ -671,6 +688,7 @@ impl Interpreter {
                     params: param_names,
                     body: body.clone(),
                     env: Rc::clone(&captured),
+                    return_type: return_type.clone(),
                 };
                 // 再帰呼び出しのために自己参照を captured env に追加
                 captured
@@ -686,6 +704,17 @@ impl Interpreter {
                 };
                 Err(RuntimeError::Return(v))
             }
+            Stmt::Yield { value, .. } => {
+                let v = self.eval_expr(value)?;
+                if let Some(buf) = self.generator_stack.last_mut() {
+                    buf.push(v);
+                    Ok(Value::Unit)
+                } else {
+                    Err(RuntimeError::Custom(
+                        "yield は generate<T> 関数内でのみ使用可能です".to_string(),
+                    ))
+                }
+            }
             Stmt::Expr(expr) => self.eval_expr(expr),
             Stmt::StructDef {
                 name,
@@ -697,8 +726,9 @@ impl Interpreter {
                 target,
                 trait_name: _,
                 methods,
+                operators,
                 ..
-            } => self.eval_impl_block(target.clone(), methods.clone()),
+            } => self.eval_impl_block(target.clone(), methods.clone(), operators.clone()),
             Stmt::EnumDef {
                 name,
                 variants,
@@ -1554,6 +1584,10 @@ impl Interpreter {
             } => self.eval_method_call(object, method, args),
             Expr::Closure { params, body, .. } => self.eval_closure(params, body),
             Expr::Await { expr, .. } => self.eval_expr(expr),
+            Expr::Spawn { body, .. } => {
+                let result = self.eval_expr(body)?;
+                Ok(Value::Option(Some(Box::new(result))))
+            }
             Expr::Question(inner, _) => self.eval_question(inner),
             Expr::Interpolation { parts, .. } => self.eval_interpolation(parts),
             Expr::Range {
@@ -1577,6 +1611,8 @@ impl Interpreter {
             } => self.eval_index_assign(object, index, value),
             Expr::Index { object, index, .. } => self.eval_index(object, index),
             Expr::Field { object, field, .. } => self.eval_field_access(object, field),
+            Expr::OptionalChain { object, chain, .. } => self.eval_optional_chain(object, chain),
+            Expr::NullCoalesce { value, default, .. } => self.eval_null_coalesce(value, default),
             Expr::StructInit { name, fields, .. } => self.eval_struct_init(name, fields),
             Expr::FieldAssign {
                 object,
@@ -1607,7 +1643,6 @@ impl Interpreter {
     }
 
     fn eval_binop(&mut self, op: &BinOp, left: &Expr, right: &Expr) -> Result<Value, RuntimeError> {
-        // 短絡評価
         match op {
             BinOp::And => {
                 let l = self.eval_expr(left)?;
@@ -1628,11 +1663,18 @@ impl Interpreter {
             _ => {}
         }
 
-        let l = self.eval_expr(left)?;
-        let r = self.eval_expr(right)?;
+        let left_val = self.eval_expr(left)?;
+        let right_val = self.eval_expr(right)?;
+        let left_clone = left_val.clone();
+        let right_clone = right_val.clone();
+        if let Some(result) =
+            self.call_struct_binary_operator(op, left_clone.clone(), right_clone.clone())?
+        {
+            return Ok(result);
+        }
 
         match op {
-            BinOp::Add => match (l, r) {
+            BinOp::Add => match (left_val, right_val) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
@@ -1641,36 +1683,103 @@ impl Interpreter {
                     &format!("{} + {}", l.type_name(), r.type_name()),
                 )),
             },
-            BinOp::Sub => int_float_op(l, r, i64::wrapping_sub, std::ops::Sub::sub, "-"),
-            BinOp::Mul => int_float_op(l, r, i64::wrapping_mul, std::ops::Mul::mul, "*"),
+            BinOp::Sub => {
+                let l = left_val;
+                let r = right_val;
+                int_float_op(l, r, i64::wrapping_sub, std::ops::Sub::sub, "-")
+            }
+            BinOp::Mul => {
+                let l = left_val;
+                let r = right_val;
+                int_float_op(l, r, i64::wrapping_mul, std::ops::Mul::mul, "*")
+            }
             BinOp::Div => {
+                let l = left_val;
+                let r = right_val;
                 if matches!((&l, &r), (Value::Int(_), Value::Int(0))) {
                     return Err(RuntimeError::DivisionByZero);
                 }
                 int_float_op(l, r, i64::wrapping_div, std::ops::Div::div, "/")
             }
-            BinOp::Rem => int_float_op(l, r, i64::wrapping_rem, std::ops::Rem::rem, "%"),
-            BinOp::Eq => Ok(Value::Bool(l == r)),
-            BinOp::Ne => Ok(Value::Bool(l != r)),
-            BinOp::Lt => cmp_op(l, r, |a, b| a < b, |a, b| a < b),
-            BinOp::Gt => cmp_op(l, r, |a, b| a > b, |a, b| a > b),
-            BinOp::Le => cmp_op(l, r, |a, b| a <= b, |a, b| a <= b),
-            BinOp::Ge => cmp_op(l, r, |a, b| a >= b, |a, b| a >= b),
+            BinOp::Rem => {
+                let l = left_val;
+                let r = right_val;
+                int_float_op(l, r, i64::wrapping_rem, std::ops::Rem::rem, "%")
+            }
+            BinOp::Eq => Ok(Value::Bool(left_val == right_val)),
+            BinOp::Ne => Ok(Value::Bool(left_val != right_val)),
+            BinOp::Lt => {
+                let l = left_val;
+                let r = right_val;
+                cmp_op(l, r, |a, b| a < b, |a, b| a < b)
+            }
+            BinOp::Gt => {
+                let l = left_val;
+                let r = right_val;
+                match cmp_op(l.clone(), r.clone(), |a, b| a > b, |a, b| a > b) {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        if let Some(result) = self.call_struct_binary_operator(&BinOp::Lt, r, l)? {
+                            return Ok(result);
+                        }
+                        Err(type_err(
+                            "number",
+                            &format!("{} > {}", left_clone.type_name(), right_clone.type_name()),
+                        ))
+                    }
+                }
+            }
+            BinOp::Le => cmp_op(left_val, right_val, |a, b| a <= b, |a, b| a <= b),
+            BinOp::Ge => cmp_op(left_val, right_val, |a, b| a >= b, |a, b| a >= b),
             BinOp::And | BinOp::Or => unreachable!(),
         }
     }
 
+    fn call_struct_binary_operator(
+        &mut self,
+        op: &BinOp,
+        left: Value,
+        right: Value,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let kind = match op {
+            BinOp::Add => Some(OperatorKind::Add),
+            BinOp::Sub => Some(OperatorKind::Sub),
+            BinOp::Mul => Some(OperatorKind::Mul),
+            BinOp::Div => Some(OperatorKind::Div),
+            BinOp::Rem => Some(OperatorKind::Rem),
+            BinOp::Eq => Some(OperatorKind::Eq),
+            BinOp::Lt => Some(OperatorKind::Lt),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if let Value::Struct { type_name, .. } = &left {
+                let type_name = type_name.clone();
+                return self.call_struct_operator(&type_name, kind, left, vec![right]);
+            }
+        }
+        Ok(None)
+    }
+
     fn eval_unary(&mut self, op: &UnaryOp, operand: &Expr) -> Result<Value, RuntimeError> {
         let v = self.eval_expr(operand)?;
+        if let UnaryOp::Neg = op {
+            if let Value::Struct { type_name, .. } = &v {
+                if let Some(result) =
+                    self.call_struct_operator(type_name, OperatorKind::Neg, v.clone(), vec![])?
+                {
+                    return Ok(result);
+                }
+            }
+        }
         match op {
             UnaryOp::Neg => match v {
                 Value::Int(n) => Ok(Value::Int(-n)),
                 Value::Float(f) => Ok(Value::Float(-f)),
-                _ => Err(type_err("number", v.type_name())),
+                other => Err(type_err("number", other.type_name())),
             },
             UnaryOp::Not => match v {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
-                _ => Err(type_err("bool", v.type_name())),
+                other => Err(type_err("bool", other.type_name())),
             },
         }
     }
@@ -1780,9 +1889,12 @@ impl Interpreter {
             .collect::<Result<_, _>>()?;
 
         match callee_val {
-            Value::Closure { params, body, env } => {
-                self.call_closure(&params, &body, &env, arg_vals)
-            }
+            Value::Closure {
+                params,
+                body,
+                env,
+                return_type,
+            } => self.call_closure(&params, &body, &env, return_type.clone(), arg_vals),
             Value::NativeFunction(NativeFn(f)) => f(arg_vals).map_err(|msg| {
                 if let Some(rest) = msg.strip_prefix("__tf__:") {
                     RuntimeError::TestFailure(rest.to_string())
@@ -1799,6 +1911,7 @@ impl Interpreter {
         params: &[String],
         body: &Expr,
         captured: &CapturedEnv,
+        return_type: Option<TypeAnn>,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         // クロージャ専用のスコープスタックを構築
@@ -1814,6 +1927,10 @@ impl Interpreter {
             initial.insert(param.clone(), (arg, false));
         }
         self.scopes = vec![initial];
+        let is_generator = matches!(return_type.as_ref(), Some(TypeAnn::Generate(_)));
+        if is_generator {
+            self.generator_stack.push(Vec::new());
+        }
 
         let result = self.eval_expr(body);
         if let Some(scope) = self.scopes.first() {
@@ -1828,6 +1945,20 @@ impl Interpreter {
             }
         }
         self.scopes = saved;
+        let generated_values = if is_generator {
+            Some(self.generator_stack.pop().unwrap())
+        } else {
+            None
+        };
+
+        if let Some(values) = generated_values {
+            match result {
+                Ok(_) | Err(RuntimeError::Return(_)) => {
+                    return Ok(Value::List(Rc::new(RefCell::new(values))));
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         match result {
             Ok(v) => Ok(v),
@@ -2534,7 +2665,12 @@ impl Interpreter {
     /// Value（Closure または NativeFunction）を引数付きで呼び出す
     fn call_value(&mut self, f: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match f {
-            Value::Closure { params, body, env } => self.call_closure(&params, &body, &env, args),
+            Value::Closure {
+                params,
+                body,
+                env,
+                return_type,
+            } => self.call_closure(&params, &body, &env, return_type.clone(), args),
             Value::NativeFunction(NativeFn(func)) => func(args).map_err(RuntimeError::Custom),
             v => Err(type_err("function", v.type_name())),
         }
@@ -2546,6 +2682,7 @@ impl Interpreter {
             params: params.to_vec(),
             body: Box::new(body.clone()),
             env: captured,
+            return_type: None,
         })
     }
 
@@ -2628,25 +2765,46 @@ impl Interpreter {
     fn eval_index(&mut self, object: &Expr, index: &Expr) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object)?;
         let idx = self.eval_expr(index)?;
-        match (obj, idx) {
-            (Value::List(list), Value::Int(i)) => {
-                let list = list.borrow();
-                let len = list.len();
-                if i < 0 || i as usize >= len {
-                    Err(RuntimeError::IndexOutOfBounds { index: i, len })
+        if let Value::List(list) = &obj {
+            let len = list.borrow().len();
+            if let Value::Int(i) = &idx {
+                let i_val = *i;
+                if i_val < 0 || i_val as usize >= len {
+                    Err(RuntimeError::IndexOutOfBounds { index: i_val, len })
                 } else {
-                    Ok(list[i as usize].clone())
+                    Ok(list.borrow()[i_val as usize].clone())
                 }
+            } else {
+                Err(type_err(
+                    "list[number]",
+                    &format!("list[{}]", idx.type_name()),
+                ))
             }
-            (Value::Map(entries), key) => entries
-                .into_iter()
+        } else if let Value::Map(entries) = &obj {
+            let key = idx.clone();
+            entries
+                .iter()
                 .find(|(entry_key, _)| *entry_key == key)
-                .map(|(_, value)| value)
-                .ok_or_else(|| RuntimeError::Custom("map に指定したキーが存在しません".into())),
-            (o, i) => Err(type_err(
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| RuntimeError::Custom("map に指定したキーが存在しません".into()))
+        } else if let Value::Struct { type_name, .. } = &obj {
+            if let Some(result) = self.call_struct_operator(
+                type_name,
+                OperatorKind::Index,
+                obj.clone(),
+                vec![idx.clone()],
+            )? {
+                return Ok(result);
+            }
+            Err(type_err(
+                "list[number] / map[key] / struct operator",
+                &format!("{}[{}]", obj.type_name(), idx.type_name()),
+            ))
+        } else {
+            Err(type_err(
                 "list[number] / map[key]",
-                &format!("{}[{}]", o.type_name(), i.type_name()),
-            )),
+                &format!("{}[{}]", obj.type_name(), idx.type_name()),
+            ))
         }
     }
 
@@ -2687,6 +2845,7 @@ impl Interpreter {
             fields: fields.clone(),
             derives: derives.clone(),
             methods: HashMap::new(),
+            operators: HashMap::new(),
         };
         self.type_registry.structs.insert(name.clone(), info);
 
@@ -3180,6 +3339,7 @@ impl Interpreter {
                             fields: vec![],
                             derives: vec![],
                             methods: HashMap::new(),
+                            operators: HashMap::new(),
                         },
                     );
                 }
@@ -3203,6 +3363,7 @@ impl Interpreter {
                             fields: vec![],
                             derives: vec![],
                             methods: HashMap::new(),
+                            operators: HashMap::new(),
                         },
                     );
                 }
@@ -3226,6 +3387,7 @@ impl Interpreter {
                             fields: vec![],
                             derives: vec![],
                             methods: HashMap::new(),
+                            operators: HashMap::new(),
                         },
                     );
                 }
@@ -3365,6 +3527,7 @@ impl Interpreter {
         &mut self,
         target: String,
         methods: Vec<FnDef>,
+        operators: Vec<OperatorDef>,
     ) -> Result<Value, RuntimeError> {
         if !self.type_registry.structs.contains_key(&target) {
             self.type_registry.structs.insert(
@@ -3373,6 +3536,7 @@ impl Interpreter {
                     fields: vec![],
                     derives: vec![],
                     methods: HashMap::new(),
+                    operators: HashMap::new(),
                 },
             );
         }
@@ -3384,8 +3548,36 @@ impl Interpreter {
                     MethodImpl::Forge(method, Rc::clone(&captured)),
                 );
             }
+            for operator in operators {
+                self.register_operator(&target, operator, Rc::clone(&captured))?;
+            }
         }
         Ok(Value::Unit)
+    }
+
+    fn register_operator(
+        &mut self,
+        target: &str,
+        operator: OperatorDef,
+        captured: CapturedEnv,
+    ) -> Result<(), RuntimeError> {
+        if let Some(info) = self.type_registry.structs.get_mut(target) {
+            if operator.op == OperatorKind::Eq && info.derives.iter().any(|d| d == "Eq") {
+                return Err(RuntimeError::Custom(
+                    "derive(Eq) と operator == を同時に定義できません".into(),
+                ));
+            }
+            if operator.op == OperatorKind::Lt && info.derives.iter().any(|d| d == "Ord") {
+                return Err(RuntimeError::Custom(
+                    "derive(Ord) と operator < を同時に定義できません".into(),
+                ));
+            }
+            info.operators.insert(
+                operator.op.clone(),
+                OperatorImpl::Forge(operator, Rc::clone(&captured)),
+            );
+        }
+        Ok(())
     }
 
     // ── T-3-C: trait / mixin / impl trait サポート ────────────────────────
@@ -3417,6 +3609,7 @@ impl Interpreter {
                         body,
                         has_self,
                         has_state_self,
+                        is_const: false,
                         span,
                     };
                     default_methods.insert(method_name, fn_def);
@@ -3455,6 +3648,7 @@ impl Interpreter {
                     fields: vec![],
                     derives: vec![],
                     methods: HashMap::new(),
+                    operators: HashMap::new(),
                 },
             );
         }
@@ -3539,6 +3733,10 @@ impl Interpreter {
 
     fn eval_field_access(&mut self, object: &Expr, field: &str) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object)?;
+        self.field_access_value(&obj, field)
+    }
+
+    fn field_access_value(&self, obj: &Value, field: &str) -> Result<Value, RuntimeError> {
         match obj {
             Value::Struct { ref fields, .. } | Value::Typestate { ref fields, .. } => {
                 fields.borrow().get(field).cloned().ok_or_else(|| {
@@ -3564,6 +3762,103 @@ impl Interpreter {
             _ => Err(RuntimeError::Custom(format!(
                 "フィールドアクセスは struct でのみ使用可能です (got {})",
                 obj.type_name()
+            ))),
+        }
+    }
+
+    fn eval_optional_chain(
+        &mut self,
+        object: &Expr,
+        chain: &ChainKind,
+    ) -> Result<Value, RuntimeError> {
+        let obj = self.eval_expr(object)?;
+        match obj {
+            Value::Option(opt) => match opt {
+                Some(inner_box) => {
+                    let inner = *inner_box;
+                    let result = match chain {
+                        ChainKind::Field(field) => self.field_access_value(&inner, field)?,
+                        ChainKind::Method { name, args } => {
+                            self.call_method_on_inner_value(inner, name, args)?
+                        }
+                    };
+                    Ok(Value::Option(Some(Box::new(result))))
+                }
+                None => Ok(Value::Option(None)),
+            },
+            other => Err(RuntimeError::Custom(format!(
+                "Optional chain は option 型にのみ使用可能です (got {})",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn call_method_on_inner_value(
+        &mut self,
+        object: Value,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Value, RuntimeError> {
+        if method == "clone" && args.is_empty() {
+            return Ok(object.clone());
+        }
+        let arg_vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr(a))
+            .collect::<Result<_, _>>()?;
+        match object {
+            Value::Result(result) => match method {
+                "is_ok" => Ok(Value::Bool(result.is_ok())),
+                "is_err" => Ok(Value::Bool(result.is_err())),
+                other => Err(RuntimeError::Custom(format!(
+                    "オプショナルチェーン経由では result で '{}' は使えません",
+                    other
+                ))),
+            },
+            Value::List(items) => self.eval_list_method(items, method, arg_vals),
+            ref obj @ Value::Struct { ref type_name, .. } => {
+                let type_name_cloned = type_name.clone();
+                self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
+            }
+            ref obj @ Value::Enum { ref type_name, .. } => {
+                let type_name_cloned = type_name.clone();
+                self.eval_enum_method(obj.clone(), &type_name_cloned, method, arg_vals)
+            }
+            ref obj @ Value::Typestate {
+                ref type_name,
+                ref current_state,
+                ..
+            } => {
+                let type_name_cloned = type_name.clone();
+                let current_state_cloned = current_state.clone();
+                self.eval_typestate_method(
+                    obj.clone(),
+                    &type_name_cloned,
+                    &current_state_cloned,
+                    method,
+                    arg_vals,
+                )
+            }
+            Value::String(text) => self.eval_string_method(text, method, arg_vals),
+            Value::Closure { .. } | Value::NativeFunction(_) => self.call_value(object, arg_vals),
+            other => Err(RuntimeError::Custom(format!(
+                "オプショナルチェーン経由では '{}' に対して '{}' を呼び出せません",
+                other.type_name(),
+                method
+            ))),
+        }
+    }
+
+    fn eval_null_coalesce(&mut self, value: &Expr, default: &Expr) -> Result<Value, RuntimeError> {
+        let val = self.eval_expr(value)?;
+        match val {
+            Value::Option(opt) => match opt {
+                Some(inner) => Ok(*inner),
+                None => self.eval_expr(default),
+            },
+            other => Err(RuntimeError::Custom(format!(
+                "Null coalesce は option 型にのみ使用可能です (got {})",
+                other.type_name()
             ))),
         }
     }
@@ -3656,7 +3951,7 @@ impl Interpreter {
 
     fn eval_set_method(
         &mut self,
-        object_expr: &Expr,
+        _object_expr: &Expr,
         mut items: Vec<Value>,
         method: &str,
         args: Vec<Value>,
@@ -3830,6 +4125,46 @@ impl Interpreter {
                 method, type_name
             ))),
         }
+    }
+
+    fn call_struct_operator(
+        &mut self,
+        type_name: &str,
+        op: OperatorKind,
+        self_val: Value,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let operator_impl = self
+            .type_registry
+            .structs
+            .get(type_name)
+            .and_then(|info| info.operators.get(&op))
+            .cloned();
+        if let Some(OperatorImpl::Forge(operator, captured)) = operator_impl {
+            let saved = std::mem::take(&mut self.scopes);
+            let mut initial: HashMap<String, Binding> = captured.borrow().clone();
+            if let Some(global) = saved.first() {
+                for (name, binding) in global {
+                    initial.insert(name.clone(), binding.clone());
+                }
+            }
+            initial.insert(
+                "self".to_string(),
+                (self_val.clone(), operator.has_state_self),
+            );
+            for (param, arg) in operator.params.iter().zip(args.into_iter()) {
+                initial.insert(param.name.clone(), (arg, false));
+            }
+            self.scopes = vec![initial];
+            let result = self.eval_expr(&operator.body);
+            self.scopes = saved;
+            return match result {
+                Ok(v) => Ok(Some(v)),
+                Err(RuntimeError::Return(v)) => Ok(Some(v)),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(None)
     }
 
     fn partial_from_value(&self, instance: Value) -> Result<Value, RuntimeError> {
@@ -4485,7 +4820,6 @@ fn zero_value_for_type(ann: &TypeAnn) -> Value {
 impl Interpreter {
     fn eval_tcp_listen(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         use std::collections::HashMap as StdMap;
-        use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
 
         if args.len() != 2 {
@@ -4875,6 +5209,29 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_const_fn_basic() {
+        let src = r#"
+const fn identity(value: number) -> number {
+    value
+}
+identity(5)
+"#;
+        assert_eq!(run(src), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_const_fn_in_const_var() {
+        let src = r#"
+const fn clamp(value: number, min: number, max: number) -> number {
+    if value < min { min } else if value > max { max } else { value }
+}
+const RESULT = clamp(150, 0, 100)
+RESULT
+"#;
+        assert_eq!(run(src), Ok(Value::Int(100)));
+    }
+
+    #[test]
     fn test_eval_closure() {
         assert_eq!(run("let f = x => x * 2; f(5)"), Ok(Value::Int(10)));
     }
@@ -4957,6 +5314,250 @@ mod tests {
     fn test_eval_scope() {
         let result = run("{ let x = 1 }; x");
         assert!(matches!(result, Err(RuntimeError::UndefinedVariable(_))));
+    }
+
+    #[test]
+    fn test_eval_optional_chain_none() {
+        assert_eq!(
+            run("let user = none(); user?.name"),
+            Ok(Value::Option(None))
+        );
+    }
+
+    #[test]
+    fn test_eval_optional_chain_some() {
+        assert_eq!(
+            run(r#"struct User { name: string }
+let user = some(User { name: "Alice" });
+user?.name"#),
+            Ok(Value::Option(Some(Box::new(Value::String(
+                "Alice".to_string()
+            )))))
+        );
+    }
+
+    #[test]
+    fn test_eval_optional_chain_nested() {
+        assert_eq!(
+            run(r#"struct Inner { value: number }
+struct Outer { inner: Inner? }
+let config = some(Outer { inner: some(Inner { value: 1 }) });
+config?.inner?.value"#),
+            Ok(Value::Option(Some(Box::new(Value::Int(1)))))
+        );
+    }
+
+    #[test]
+    fn test_eval_null_coalesce_none() {
+        assert_eq!(run("none() ?? 5"), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_null_coalesce_some() {
+        assert_eq!(run("some(3) ?? 5"), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn test_eval_spawn_sequential() {
+        assert_eq!(
+            run("let handle = spawn { let value = 1; value + 2 }; handle"),
+            Ok(Value::Option(Some(Box::new(Value::Int(3)))))
+        );
+    }
+
+    #[test]
+    fn test_eval_generator_finite() {
+        let src = r#"
+fn gen() -> generate<number> {
+    yield 1
+    yield 2
+    yield 3
+}
+gen()
+"#;
+        match run(src) {
+            Ok(Value::List(list)) => assert_eq!(
+                *list.borrow(),
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+            ),
+            other => panic!("expected list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_generator_with_take() {
+        let src = r#"
+fn numbers() -> generate<number> {
+    state i = 0
+    while i < 5 {
+        yield i
+        i = i + 1
+    }
+}
+numbers().take(3)
+"#;
+        match run(src) {
+            Ok(Value::List(list)) => {
+                assert_eq!(
+                    *list.borrow(),
+                    vec![Value::Int(0), Value::Int(1), Value::Int(2)]
+                );
+            }
+            other => panic!("expected list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_generator_filter_map() {
+        let src = r#"
+fn numbers() -> generate<number> {
+    state i = 0
+    while i < 6 {
+        yield i
+        i = i + 1
+    }
+}
+numbers()
+    .filter(n => n % 2 == 0)
+    .map(n => n * 10)
+"#;
+        match run(src) {
+            Ok(Value::List(list)) => {
+                assert_eq!(
+                    *list.borrow(),
+                    vec![Value::Int(0), Value::Int(20), Value::Int(40)]
+                );
+            }
+            other => panic!("expected list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_generator_fibonacci() {
+        let src = r#"
+fn fibonacci() -> generate<number> {
+    state a = 0
+    state b = 1
+    state count = 0
+    while count < 5 {
+        yield a
+        let next = a + b
+        a = b
+        b = next
+        count = count + 1
+    }
+}
+fibonacci().take(5)
+"#;
+        match run(src) {
+            Ok(Value::List(list)) => {
+                assert_eq!(
+                    *list.borrow(),
+                    vec![
+                        Value::Int(0),
+                        Value::Int(1),
+                        Value::Int(1),
+                        Value::Int(2),
+                        Value::Int(3)
+                    ]
+                );
+            }
+            other => panic!("expected list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_operator_add() {
+        let src = r#"
+struct Vec2 { x: number, y: number }
+impl Vec2 {
+    operator +(self, other: Vec2) -> Vec2 {
+        Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+let a = Vec2 { x: 1, y: 2 };
+let b = Vec2 { x: 3, y: 4 };
+let c = a + b;
+c.x + c.y
+"#;
+        assert_eq!(run(src), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn test_eval_operator_mul() {
+        let src = r#"
+struct Scale { value: number }
+impl Scale {
+    operator *(self, other: Scale) -> Scale {
+        Scale { value: self.value * other.value }
+    }
+}
+let s = Scale { value: 3 };
+let t = Scale { value: 4 };
+(s * t).value
+"#;
+        assert_eq!(run(src), Ok(Value::Int(12)));
+    }
+
+    #[test]
+    fn test_eval_operator_eq() {
+        let src = r#"
+struct Pair { x: number, y: number }
+impl Pair {
+    operator ==(self, other: Pair) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+let a = Pair { x: 1, y: 2 };
+let b = Pair { x: 1, y: 2 };
+let c = Pair { x: 2, y: 3 };
+(a == b) && !(a == c)
+"#;
+        assert_eq!(run(src), Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_operator_index() {
+        let src = r#"
+struct Table { base: number }
+impl Table {
+    operator [](self, index: number) -> number {
+        if index == 0 { self.base } else { index }
+    }
+}
+let tbl = Table { base: 5 };
+tbl[0]
+"#;
+        assert_eq!(run(src), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_operator_unary_neg() {
+        let src = r#"
+struct Value { amount: number }
+impl Value {
+    operator unary-(self) -> Value {
+        Value { amount: -self.amount }
+    }
+}
+let v = Value { amount: 5 };
+(-v).amount
+"#;
+        assert_eq!(run(src), Ok(Value::Int(-5)));
+    }
+
+    #[test]
+    fn test_eval_operator_conflict_derive_eq_error() {
+        let src = r#"
+@derive(Eq)
+struct Foo { x: number }
+impl Foo {
+    operator ==(self, other: Foo) -> bool {
+        self.x == other.x
+    }
+}
+"#;
+        assert!(run(src).is_err());
     }
 
     // ── Phase 2-C tests ───────────────────────────────────────────────────

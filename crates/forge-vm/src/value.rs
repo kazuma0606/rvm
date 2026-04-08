@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use forge_compiler::ast::Expr;
+use forge_compiler::ast::{Expr, TypeAnn};
 
 /// クロージャがキャプチャする環境（変数名 → (Value, mutable) のマップ）
 pub type CapturedEnv = Rc<RefCell<HashMap<String, (Value, bool)>>>;
@@ -67,6 +67,7 @@ pub enum Value {
         params: Vec<String>,
         body: Box<Expr>,
         env: CapturedEnv,
+        return_type: Option<TypeAnn>,
     },
     /// ネイティブ（Rust）関数
     NativeFunction(NativeFn),
