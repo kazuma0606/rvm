@@ -33,6 +33,7 @@ pub struct TypeChecker {
     env: Vec<HashMap<String, Type>>,
     /// 発見した型エラーの一覧
     pub errors: Vec<TypeError>,
+    generator_stack: Vec<Option<Type>>,
 }
 
 impl TypeChecker {
@@ -40,6 +41,7 @@ impl TypeChecker {
         Self {
             env: vec![HashMap::new()],
             errors: Vec::new(),
+            generator_stack: Vec::new(),
         }
     }
 
@@ -67,6 +69,18 @@ impl TypeChecker {
             }
         }
         None
+    }
+
+    fn push_generator(&mut self, ty: Option<Type>) {
+        self.generator_stack.push(ty);
+    }
+
+    fn pop_generator(&mut self) {
+        self.generator_stack.pop();
+    }
+
+    fn current_generator_item(&self) -> Option<&Type> {
+        self.generator_stack.last().and_then(|opt| opt.as_ref())
     }
 
     fn add_error(&mut self, message: impl Into<String>, span: Option<Span>) {
@@ -118,6 +132,16 @@ impl TypeChecker {
                     .map(Type::from_ann)
                     .unwrap_or(Type::Unknown);
 
+                let generator_item = return_type.as_ref().and_then(|ty| {
+                    if let TypeAnn::Generate(inner) = ty {
+                        Some(Type::from_ann(inner))
+                    } else {
+                        None
+                    }
+                });
+
+                self.push_generator(generator_item.clone());
+
                 self.push_scope();
                 for param in params {
                     let ty = param
@@ -129,6 +153,7 @@ impl TypeChecker {
                 }
                 let body_ty = self.infer_expr(body);
                 self.pop_scope();
+                self.pop_generator();
 
                 if declared_ret != Type::Unknown
                     && body_ty != Type::Unknown
@@ -153,6 +178,28 @@ impl TypeChecker {
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
                     self.infer_expr(e);
+                }
+            }
+            Stmt::Yield { value, span } => {
+                let value_ty = self.infer_expr(value);
+                if let Some(expected) = self.current_generator_item() {
+                    if expected != &Type::Unknown
+                        && value_ty != Type::Unknown
+                        && expected != &value_ty
+                    {
+                        self.add_error(
+                            format!(
+                                "yield の値が generate の要素型と一致しません: {} / {}",
+                                expected, value_ty
+                            ),
+                            Some(span.clone()),
+                        );
+                    }
+                } else {
+                    self.add_error(
+                        "yield は generate<T> 関数内でのみ使用可能です",
+                        Some(span.clone()),
+                    );
                 }
             }
 
@@ -329,6 +376,10 @@ impl TypeChecker {
             Expr::Assign { value, .. } => {
                 self.infer_expr(value);
                 Type::Unit
+            }
+            Expr::Spawn { body, .. } => {
+                self.infer_expr(body);
+                Type::Unknown
             }
             _ => Type::Unknown,
         }

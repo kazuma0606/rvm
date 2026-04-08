@@ -124,10 +124,16 @@
 
 ---
 
-## 設計済み・未実装 📐（言語機能）
+## 設計済み・未実装 📐（言語機能拡張）
 
 | 機能 | 仕様 | 備考 |
 |---|---|---|
+| E-1: `\|>` パイプ演算子 | `lang/extends/spec.md` | Lexer + Parser のみ。インタープリタ変更なし |
+| E-2: `?.` / `??` | `lang/extends/spec.md` | T? 型へのオプショナルアクセス |
+| E-3: 演算子オーバーロード | `lang/extends/spec.md` | `impl` ブロック内 `operator +` |
+| E-4: 非同期クロージャ / `spawn` | `lang/extends/spec.md` | B-7 async/await の完成 |
+| E-5: `const fn` | `lang/extends/spec.md` | コンパイル時定数関数 |
+| E-6: ジェネレータ / `yield` | `lang/extends/spec.md` | E-4 完成後。`generate<T>` 型 |
 | ジェネリクス `<T>` | `lang/generics/spec.md` | Anvil の前提。v0.3.0 |
 | `forge.toml` パッケージ管理（完全版） | `lang/package/spec.md` | レジストリ・バージョン解決・forge build 統合。v0.3.0（ローカルパス依存は ✅ 実装済み） |
 
@@ -325,6 +331,10 @@ lang/                           ← 言語仕様・ドキュメント
   app_ideas.md                  ← ForgeScript で作ると有用なアプリケーション素案集
   extend_idea.md                ← 他言語から取り込みたい言語拡張アイデア集
   transpiler_perf.md            ← トランスパイラ最適化アイデア（イテレータ融合・with_capacity 等）
+  extends/
+    spec.md                     ← E-1〜E-6 言語拡張仕様（|> / ?. / operator / spawn / const fn / yield）
+    plan.md                     ← E-1〜E-6 実装計画・フェーズ構成
+    tasks.md                    ← E-1〜E-6 タスク一覧（全 84 タスク・未着手）
 
 crates/                         ← RVM 実装（Rust クレート群）
   forge-compiler/

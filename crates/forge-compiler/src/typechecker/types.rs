@@ -39,6 +39,7 @@ impl Type {
             TypeAnn::Result(inner) => Type::Result(Box::new(Type::from_ann(inner))),
             TypeAnn::ResultWith(inner, _err) => Type::Result(Box::new(Type::from_ann(inner))),
             TypeAnn::List(inner) => Type::List(Box::new(Type::from_ann(inner))),
+            TypeAnn::Generate(inner) => Type::List(Box::new(Type::from_ann(inner))),
             TypeAnn::Named(_) => Type::Unknown,
             // G-1-A: 新バリアント — 型チェッカーは Unknown で扱う
             TypeAnn::Generic { .. }

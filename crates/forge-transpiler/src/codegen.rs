@@ -1,9 +1,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use forge_compiler::ast::{
-    BinOp, Constraint, EnumInitData, EnumVariant, Expr, FnDef, InterpPart, Literal, MatchArm,
-    Module, Param, Pattern, Stmt, TraitMethod, TypeAnn, TypestateMarker, UnaryOp, UsePath,
-    UseSymbols, ValidateRule, WhenCondition,
+    BinOp, ChainKind, Constraint, EnumInitData, EnumVariant, Expr, FnDef, InterpPart, Literal,
+    MatchArm, Module, OperatorDef, OperatorKind, Param, Pattern, Stmt, TraitMethod, TypeAnn,
+    TypestateMarker, UnaryOp, UsePath, UseSymbols, ValidateRule, WhenCondition,
 };
 
 use crate::builtin::{try_builtin_call, try_constructor_call};
@@ -13,6 +13,8 @@ pub struct CodeGenerator {
     indent: usize,
     rename_main: bool,
     scopes: Vec<HashMap<String, VarInfo>>,
+    generator_stack: Vec<String>,
+    generator_counter: usize,
     async_fns: HashSet<String>,
     recursive_async_fns: HashSet<String>,
     synthetic_main_async: bool,
@@ -22,6 +24,7 @@ pub struct CodeGenerator {
     needs_phantom_data: bool,
     needs_hashmap_use: bool,
     needs_hashset_use: bool,
+    needs_ordering_use: bool,
     generic_type_params: HashMap<String, Vec<String>>,
     typestate_initial_states: HashMap<String, String>,
     typestate_state_names: HashMap<String, HashSet<String>>,
@@ -46,6 +49,8 @@ impl CodeGenerator {
             indent: 0,
             rename_main: false,
             scopes: vec![HashMap::new()],
+            generator_stack: Vec::new(),
+            generator_counter: 0,
             async_fns: HashSet::new(),
             recursive_async_fns: HashSet::new(),
             synthetic_main_async: false,
@@ -55,10 +60,543 @@ impl CodeGenerator {
             needs_phantom_data: false,
             needs_hashmap_use: false,
             needs_hashset_use: false,
+            needs_ordering_use: false,
             generic_type_params: HashMap::new(),
             typestate_initial_states: HashMap::new(),
             typestate_state_names: HashMap::new(),
         }
+    }
+
+    fn current_generator_buf(&self) -> Option<&str> {
+        self.generator_stack.last().map(|name| name.as_str())
+    }
+
+    fn next_generator_buf(&mut self) -> String {
+        let name = format!("__forge_generator_vals_{}", self.generator_counter);
+        self.generator_counter += 1;
+        name
+    }
+
+    fn operator_helper_name(op: &OperatorKind) -> &'static str {
+        match op {
+            OperatorKind::Add => "__forge_operator_add",
+            OperatorKind::Sub => "__forge_operator_sub",
+            OperatorKind::Mul => "__forge_operator_mul",
+            OperatorKind::Div => "__forge_operator_div",
+            OperatorKind::Rem => "__forge_operator_rem",
+            OperatorKind::Eq => "__forge_operator_eq",
+            OperatorKind::Lt => "__forge_operator_lt",
+            OperatorKind::Index => "__forge_operator_index",
+            OperatorKind::Neg => "__forge_operator_neg",
+        }
+    }
+
+    fn operator_param_type_string(param: &Param) -> String {
+        param
+            .type_ann
+            .as_ref()
+            .map(type_ann_to_rust)
+            .unwrap_or_else(|| "_".to_string())
+    }
+
+    fn operator_return_type_string(&self, operator: &OperatorDef, target_base: &str) -> String {
+        operator
+            .return_type
+            .as_ref()
+            .map(type_ann_to_rust)
+            .unwrap_or_else(|| target_base.to_string())
+    }
+
+    fn gen_operator_helper(
+        &mut self,
+        operator: &OperatorDef,
+        _target_impl: &str,
+        target_base: &str,
+    ) -> Option<String> {
+        let helper_name = Self::operator_helper_name(&operator.op);
+        match operator.op {
+            OperatorKind::Add
+            | OperatorKind::Sub
+            | OperatorKind::Mul
+            | OperatorKind::Div
+            | OperatorKind::Rem => {
+                self.gen_binary_operator_helper(operator, helper_name, target_base)
+            }
+            OperatorKind::Neg => {
+                Some(self.gen_unary_operator_helper(operator, helper_name, target_base))
+            }
+            OperatorKind::Eq | OperatorKind::Lt => {
+                self.gen_reference_operator_helper(operator, helper_name, target_base)
+            }
+            OperatorKind::Index => {
+                self.gen_index_operator_helper(operator, helper_name, target_base)
+            }
+        }
+    }
+
+    fn gen_binary_operator_helper(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let return_type = Self::operator_return_type_string(self, operator, target_base);
+        let self_binding = if operator.has_state_self {
+            "mut self"
+        } else {
+            "self"
+        };
+        let params = vec![(param, format!("{}: {}", param.name, param_type))];
+        Some(self.gen_operator_helper_method(
+            helper_name,
+            operator,
+            self_binding,
+            &params,
+            Some(return_type),
+        ))
+    }
+
+    fn gen_unary_operator_helper(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        target_base: &str,
+    ) -> String {
+        let return_type = Self::operator_return_type_string(self, operator, target_base);
+        let self_binding = if operator.has_state_self {
+            "mut self"
+        } else {
+            "self"
+        };
+        self.gen_operator_helper_method(helper_name, operator, self_binding, &[], Some(return_type))
+    }
+
+    fn gen_reference_operator_helper(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        _target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let return_type = "bool".to_string();
+        let params = vec![(param, format!("{}: &{}", param.name, param_type))];
+        Some(self.gen_operator_helper_method(
+            helper_name,
+            operator,
+            "&self",
+            &params,
+            Some(return_type),
+        ))
+    }
+
+    fn gen_index_operator_helper(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let return_type = Self::operator_return_type_string(self, operator, target_base);
+        let params = vec![(param, format!("{}: {}", param.name, param_type))];
+        Some(self.gen_operator_helper_method(
+            helper_name,
+            operator,
+            "&self",
+            &params,
+            Some(format!("&{}", return_type)),
+        ))
+    }
+
+    fn gen_operator_helper_method(
+        &mut self,
+        helper_name: &str,
+        operator: &OperatorDef,
+        self_binding: &str,
+        params: &[(&Param, String)],
+        return_type: Option<String>,
+    ) -> String {
+        let mut param_names = Vec::new();
+        param_names.push(self_binding.to_string());
+        param_names.extend(params.iter().map(|(_, decl)| decl.clone()));
+        let params_str = param_names.join(", ");
+        let ret_decl = return_type
+            .map(|ret| format!(" -> {}", ret))
+            .unwrap_or_default();
+        let mut out = format!(
+            "{}fn {}({}){} {{\n",
+            self.indent_str(),
+            helper_name,
+            params_str,
+            ret_decl
+        );
+        self.push_scope();
+        self.declare_var("self", operator.has_state_self, None);
+        for (param, _) in params {
+            self.declare_var(&param.name, false, param.type_ann.clone());
+        }
+        out.push_str(&self.gen_block_body(&operator.body, false));
+        self.pop_scope();
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        out
+    }
+
+    fn gen_operator_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        impl_generics: &str,
+        target_impl: &str,
+        target_base: &str,
+    ) -> Option<String> {
+        let helper_name = Self::operator_helper_name(&operator.op);
+        match operator.op {
+            OperatorKind::Add => self.gen_binary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Add",
+                "add",
+            ),
+            OperatorKind::Sub => self.gen_binary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Sub",
+                "sub",
+            ),
+            OperatorKind::Mul => self.gen_binary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Mul",
+                "mul",
+            ),
+            OperatorKind::Div => self.gen_binary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Div",
+                "div",
+            ),
+            OperatorKind::Rem => self.gen_binary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Rem",
+                "rem",
+            ),
+            OperatorKind::Neg => self.gen_unary_operator_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+                "std::ops::Neg",
+                "neg",
+            ),
+            OperatorKind::Eq => self.gen_partial_eq_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+            ),
+            OperatorKind::Lt => self.gen_partial_ord_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+            ),
+            OperatorKind::Index => self.gen_index_trait_impl(
+                operator,
+                helper_name,
+                impl_generics,
+                target_impl,
+                target_base,
+            ),
+        }
+    }
+
+    fn gen_binary_operator_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        impl_generics: &str,
+        target_impl: &str,
+        target_base: &str,
+        trait_path: &str,
+        method_name: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let output_type = Self::operator_return_type_string(self, operator, target_base);
+        let base_indent = self.indent;
+        let mut out = format!(
+            "{}impl{} {} for {} {{\n",
+            self.indent_str(),
+            impl_generics,
+            trait_path,
+            target_impl
+        );
+        self.indent += 1;
+        out.push_str(&format!(
+            "{}type Output = {};\n",
+            self.indent_str(),
+            output_type
+        ));
+        out.push_str(&self.gen_operator_trait_method_call(
+            method_name,
+            helper_name,
+            operator,
+            if operator.has_state_self {
+                "mut self"
+            } else {
+                "self"
+            },
+            &[format!("{}: {}", param.name, param_type)],
+            &format!(" -> {}", output_type),
+        ));
+        self.indent = base_indent;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        Some(out)
+    }
+
+    fn gen_unary_operator_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        impl_generics: &str,
+        target_impl: &str,
+        target_base: &str,
+        trait_path: &str,
+        method_name: &str,
+    ) -> Option<String> {
+        let output_type = Self::operator_return_type_string(self, operator, target_base);
+        let base_indent = self.indent;
+        let mut out = format!(
+            "{}impl{} {} for {} {{\n",
+            self.indent_str(),
+            impl_generics,
+            trait_path,
+            target_impl
+        );
+        self.indent += 1;
+        out.push_str(&format!(
+            "{}type Output = {};\n",
+            self.indent_str(),
+            output_type
+        ));
+        out.push_str(&self.gen_operator_trait_method_call(
+            method_name,
+            helper_name,
+            operator,
+            if operator.has_state_self {
+                "mut self"
+            } else {
+                "self"
+            },
+            &[],
+            &format!(" -> {}", output_type),
+        ));
+        self.indent = base_indent;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        Some(out)
+    }
+
+    fn gen_partial_eq_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        impl_generics: &str,
+        target_impl: &str,
+        _target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let base_indent = self.indent;
+        let mut out = format!(
+            "{}impl{} PartialEq for {} {{\n",
+            self.indent_str(),
+            impl_generics,
+            target_impl
+        );
+        self.indent += 1;
+        out.push_str(&self.gen_operator_trait_method_call(
+            "eq",
+            helper_name,
+            operator,
+            "&self",
+            &[format!("{}: &{}", param.name, param_type)],
+            " -> bool",
+        ));
+        self.indent = base_indent;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        Some(out)
+    }
+
+    fn gen_partial_ord_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        impl_generics: &str,
+        target_impl: &str,
+        _target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        self.needs_ordering_use = true;
+        let base_indent = self.indent;
+        let mut out = format!(
+            "{}impl{} PartialOrd for {} {{\n",
+            self.indent_str(),
+            impl_generics,
+            target_impl
+        );
+        self.indent += 1;
+        out.push_str(&self.gen_partial_ord_method(
+            helper_name,
+            operator,
+            &format!("{}: &{}", param.name, param_type),
+        ));
+        self.indent = base_indent;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        Some(out)
+    }
+
+    fn gen_index_trait_impl(
+        &mut self,
+        operator: &OperatorDef,
+        helper_name: &str,
+        impl_generics: &str,
+        target_impl: &str,
+        target_base: &str,
+    ) -> Option<String> {
+        let param = operator.params.get(0)?;
+        let param_type = Self::operator_param_type_string(param);
+        let return_type = Self::operator_return_type_string(self, operator, target_base);
+        let trait_path = format!("std::ops::Index<{}>", param_type);
+        let base_indent = self.indent;
+        let mut out = format!(
+            "{}impl{} {} for {} {{\n",
+            self.indent_str(),
+            impl_generics,
+            trait_path,
+            target_impl
+        );
+        self.indent += 1;
+        out.push_str(&format!(
+            "{}type Output = {};\n",
+            self.indent_str(),
+            return_type
+        ));
+        out.push_str(&self.gen_operator_trait_method_call(
+            "index",
+            helper_name,
+            operator,
+            "&self",
+            &[format!("{}: {}", param.name, param_type)],
+            " -> &Self::Output",
+        ));
+        self.indent = base_indent;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        Some(out)
+    }
+
+    fn gen_partial_ord_method(
+        &mut self,
+        helper_name: &str,
+        operator: &OperatorDef,
+        param_decl: &str,
+    ) -> String {
+        let param_name = operator
+            .params
+            .get(0)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "other".to_string());
+        let mut out = format!(
+            "{}fn partial_cmp(&self, {}) -> Option<Ordering> {{\n",
+            self.indent_str(),
+            param_decl
+        );
+        self.indent += 1;
+        out.push_str(&format!(
+            "{}if self.{}({}) {{\n",
+            self.indent_str(),
+            helper_name,
+            param_name
+        ));
+        self.indent += 1;
+        out.push_str(&format!("{}Some(Ordering::Less)\n", self.indent_str()));
+        self.indent -= 1;
+        out.push_str(&format!(
+            "{}}} else if {}.{}(self) {{\n",
+            self.indent_str(),
+            param_name,
+            helper_name
+        ));
+        self.indent += 1;
+        out.push_str(&format!("{}Some(Ordering::Greater)\n", self.indent_str()));
+        self.indent -= 1;
+        out.push_str(&format!("{}}} else {{\n", self.indent_str()));
+        self.indent += 1;
+        out.push_str(&format!("{}Some(Ordering::Equal)\n", self.indent_str()));
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        out
+    }
+
+    fn gen_operator_trait_method_call(
+        &mut self,
+        method_name: &str,
+        helper_name: &str,
+        operator: &OperatorDef,
+        self_binding: &str,
+        param_decls: &[String],
+        ret_decl: &str,
+    ) -> String {
+        let mut param_names = Vec::new();
+        param_names.push(self_binding.to_string());
+        param_names.extend(param_decls.iter().cloned());
+        let params_str = param_names.join(", ");
+        let mut out = format!(
+            "{}fn {}({}){} {{\n",
+            self.indent_str(),
+            method_name,
+            params_str,
+            ret_decl
+        );
+        self.indent += 1;
+        let args = operator
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "{}self.{}({});\n",
+            self.indent_str(),
+            helper_name,
+            args
+        ));
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        out
     }
 
     pub fn generate_module(&mut self, module: &Module) -> Result<String, TranspileError> {
@@ -87,6 +625,9 @@ impl CodeGenerator {
         }
         if self.needs_phantom_data {
             out.push_str("use std::marker::PhantomData;\n\n");
+        }
+        if self.needs_ordering_use {
+            out.push_str("use std::cmp::Ordering;\n\n");
         }
 
         out.push_str(&self.gen_utility_structs(module));
@@ -366,6 +907,9 @@ impl CodeGenerator {
                 }
                 self.scan_expr_codegen_requirements(body);
             }
+            Stmt::Yield { value, .. } => {
+                self.scan_expr_codegen_requirements(value);
+            }
             Stmt::Return(Some(expr), _) | Stmt::Expr(expr) => {
                 self.scan_expr_codegen_requirements(expr)
             }
@@ -392,9 +936,33 @@ impl CodeGenerator {
                     }
                 }
             }
-            Stmt::ImplBlock { methods, .. }
-            | Stmt::MixinDef { methods, .. }
-            | Stmt::ImplTrait { methods, .. } => {
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
+                for method in methods {
+                    for p in &method.params {
+                        if let Some(ann) = &p.type_ann {
+                            self.scan_type_ann_codegen_requirements(ann);
+                        }
+                    }
+                    if let Some(ann) = &method.return_type {
+                        self.scan_type_ann_codegen_requirements(ann);
+                    }
+                    self.scan_expr_codegen_requirements(&method.body);
+                }
+                for operator in operators {
+                    for param in &operator.params {
+                        if let Some(ann) = &param.type_ann {
+                            self.scan_type_ann_codegen_requirements(ann);
+                        }
+                    }
+                    if let Some(ann) = &operator.return_type {
+                        self.scan_type_ann_codegen_requirements(ann);
+                    }
+                    self.scan_expr_codegen_requirements(&operator.body);
+                }
+            }
+            Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => {
                 for method in methods {
                     for p in &method.params {
                         if let Some(ann) = &p.type_ann {
@@ -495,6 +1063,18 @@ impl CodeGenerator {
             | Expr::Field {
                 object: operand, ..
             } => self.scan_expr_codegen_requirements(operand),
+            Expr::OptionalChain { object, chain, .. } => {
+                self.scan_expr_codegen_requirements(object);
+                if let ChainKind::Method { args, .. } = chain {
+                    for arg in args {
+                        self.scan_expr_codegen_requirements(arg);
+                    }
+                }
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.scan_expr_codegen_requirements(value);
+                self.scan_expr_codegen_requirements(default);
+            }
             Expr::If {
                 cond,
                 then_block,
@@ -529,6 +1109,9 @@ impl CodeGenerator {
                 if let Some(tail) = tail {
                     self.scan_expr_codegen_requirements(tail);
                 }
+            }
+            Expr::Spawn { body, .. } => {
+                self.scan_expr_codegen_requirements(body);
             }
             Expr::Call { callee, args, .. } => {
                 self.scan_expr_codegen_requirements(callee);
@@ -601,9 +1184,10 @@ impl CodeGenerator {
 
     fn scan_type_ann_codegen_requirements(&mut self, ann: &TypeAnn) {
         match ann {
-            TypeAnn::Option(inner) | TypeAnn::Result(inner) | TypeAnn::List(inner) => {
-                self.scan_type_ann_codegen_requirements(inner)
-            }
+            TypeAnn::Option(inner)
+            | TypeAnn::Result(inner)
+            | TypeAnn::List(inner)
+            | TypeAnn::Generate(inner) => self.scan_type_ann_codegen_requirements(inner),
             TypeAnn::Set(inner) => {
                 self.needs_hashset_use = true;
                 self.scan_type_ann_codegen_requirements(inner);
@@ -673,9 +1257,19 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } => self.ensure_no_await_in_closure(body),
             Stmt::Return(Some(expr), _) => self.ensure_no_await_in_closure(expr),
             Stmt::Return(None, _) => Ok(()),
-            Stmt::ImplBlock { methods, .. }
-            | Stmt::MixinDef { methods, .. }
-            | Stmt::ImplTrait { methods, .. } => {
+            Stmt::Yield { value, .. } => self.ensure_no_await_in_closure(value),
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
+                for method in methods {
+                    self.ensure_no_await_in_closure(&method.body)?;
+                }
+                for operator in operators {
+                    self.ensure_no_await_in_closure(&operator.body)?;
+                }
+                Ok(())
+            }
+            Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => {
                 for method in methods {
                     self.ensure_no_await_in_closure(&method.body)?;
                 }
@@ -706,15 +1300,7 @@ impl CodeGenerator {
 
     fn ensure_no_await_in_closure(&self, expr: &Expr) -> Result<(), TranspileError> {
         match expr {
-            Expr::Closure { body, .. } => {
-                if self.expr_contains_await(body) {
-                    Err(TranspileError::UnsupportedFeature(
-                        "クロージャ内での .await はサポートされていません".to_string(),
-                    ))
-                } else {
-                    self.ensure_no_await_in_closure(body)
-                }
-            }
+            Expr::Closure { body, .. } => self.ensure_no_await_in_closure(body),
             Expr::Block { stmts, tail, .. } => {
                 for stmt in stmts {
                     self.ensure_no_await_in_stmt_closure(stmt)?;
@@ -724,6 +1310,7 @@ impl CodeGenerator {
                 }
                 Ok(())
             }
+            Expr::Spawn { body, .. } => self.ensure_no_await_in_closure(body),
             Expr::BinOp { left, right, .. } => {
                 self.ensure_no_await_in_closure(left)?;
                 self.ensure_no_await_in_closure(right)
@@ -734,6 +1321,19 @@ impl CodeGenerator {
             | Expr::Field {
                 object: operand, ..
             } => self.ensure_no_await_in_closure(operand),
+            Expr::OptionalChain { object, chain, .. } => {
+                self.ensure_no_await_in_closure(object)?;
+                if let ChainKind::Method { args, .. } = chain {
+                    for arg in args {
+                        self.ensure_no_await_in_closure(arg)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.ensure_no_await_in_closure(value)?;
+                self.ensure_no_await_in_closure(default)
+            }
             Expr::Index { object, index, .. } => {
                 self.ensure_no_await_in_closure(object)?;
                 self.ensure_no_await_in_closure(index)
@@ -856,6 +1456,7 @@ impl CodeGenerator {
     fn expr_contains_await(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Await { .. } => true,
+            Expr::Spawn { .. } => false,
             Expr::Block { stmts, tail, .. } => {
                 stmts.iter().any(|stmt| self.stmt_contains_await(stmt))
                     || tail
@@ -946,6 +1547,17 @@ impl CodeGenerator {
                     || self.expr_contains_await(index)
                     || self.expr_contains_await(value)
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.expr_contains_await(object)
+                    || matches!(
+                        chain,
+                        ChainKind::Method { args, .. }
+                            if args.iter().any(|arg| self.expr_contains_await(arg))
+                    )
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.expr_contains_await(value) || self.expr_contains_await(default)
+            }
             Expr::Literal(_, _) | Expr::Ident(_, _) => false,
         }
     }
@@ -959,9 +1571,18 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } => self.expr_contains_await(body),
             Stmt::Return(Some(expr), _) => self.expr_contains_await(expr),
             Stmt::Return(None, _) => false,
-            Stmt::ImplBlock { methods, .. }
-            | Stmt::MixinDef { methods, .. }
-            | Stmt::ImplTrait { methods, .. } => methods
+            Stmt::Yield { value, .. } => self.expr_contains_await(value),
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
+                methods
+                    .iter()
+                    .any(|method| self.expr_contains_await(&method.body))
+                    || operators
+                        .iter()
+                        .any(|operator| self.expr_contains_await(&operator.body))
+            }
+            Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => methods
                 .iter()
                 .any(|method| self.expr_contains_await(&method.body)),
             Stmt::TraitDef { methods, .. } => methods.iter().any(|method| match method {
@@ -1111,6 +1732,18 @@ impl CodeGenerator {
                     self.collect_called_fns_expr(item, names);
                 }
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.collect_called_fns_expr(object, names);
+                if let ChainKind::Method { args, .. } = chain {
+                    for arg in args {
+                        self.collect_called_fns_expr(arg, names);
+                    }
+                }
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.collect_called_fns_expr(value, names);
+                self.collect_called_fns_expr(default, names);
+            }
             Expr::IndexAssign {
                 object,
                 index,
@@ -1121,6 +1754,7 @@ impl CodeGenerator {
                 self.collect_called_fns_expr(index, names);
                 self.collect_called_fns_expr(value, names);
             }
+            _ => {}
         }
     }
 
@@ -1133,14 +1767,23 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } => self.collect_called_fns_expr(body, names),
             Stmt::Return(Some(expr), _) => self.collect_called_fns_expr(expr, names),
             Stmt::Return(None, _) => {}
+            Stmt::Yield { value, .. } => self.collect_called_fns_expr(value, names),
             Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
                 for inner in body {
                     self.collect_called_fns_stmt(inner, names);
                 }
             }
-            Stmt::ImplBlock { methods, .. }
-            | Stmt::MixinDef { methods, .. }
-            | Stmt::ImplTrait { methods, .. } => {
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
+                for method in methods {
+                    self.collect_called_fns_expr(&method.body, names);
+                }
+                for operator in operators {
+                    self.collect_called_fns_expr(&operator.body, names);
+                }
+            }
+            Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => {
                 for method in methods {
                     self.collect_called_fns_expr(&method.body, names);
                 }
@@ -1168,6 +1811,7 @@ impl CodeGenerator {
                     || args.iter().any(|arg| self.expr_calls_fn(arg, fn_name))
             }
             Expr::Await { expr, .. } => self.expr_calls_fn(expr, fn_name),
+            Expr::Spawn { .. } => false,
             Expr::Block { stmts, tail, .. } => {
                 stmts.iter().any(|stmt| self.stmt_calls_fn(stmt, fn_name))
                     || tail
@@ -1246,6 +1890,17 @@ impl CodeGenerator {
             Expr::SetLiteral { items, .. } => {
                 items.iter().any(|item| self.expr_calls_fn(item, fn_name))
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.expr_calls_fn(object, fn_name)
+                    || matches!(
+                        chain,
+                        ChainKind::Method { args, .. }
+                            if args.iter().any(|arg| self.expr_calls_fn(arg, fn_name))
+                    )
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.expr_calls_fn(value, fn_name) || self.expr_calls_fn(default, fn_name)
+            }
             Expr::IndexAssign {
                 object,
                 index,
@@ -1268,12 +1923,21 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } => self.expr_calls_fn(body, fn_name),
             Stmt::Return(Some(expr), _) => self.expr_calls_fn(expr, fn_name),
             Stmt::Return(None, _) => false,
+            Stmt::Yield { value, .. } => self.expr_calls_fn(value, fn_name),
             Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
                 body.iter().any(|stmt| self.stmt_calls_fn(stmt, fn_name))
             }
-            Stmt::ImplBlock { methods, .. }
-            | Stmt::MixinDef { methods, .. }
-            | Stmt::ImplTrait { methods, .. } => methods
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
+                methods
+                    .iter()
+                    .any(|method| self.expr_calls_fn(&method.body, fn_name))
+                    || operators
+                        .iter()
+                        .any(|operator| self.expr_calls_fn(&operator.body, fn_name))
+            }
+            Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => methods
                 .iter()
                 .any(|method| self.expr_calls_fn(&method.body, fn_name)),
             Stmt::TraitDef { methods, .. } => methods.iter().any(|method| match method {
@@ -1432,10 +2096,19 @@ impl CodeGenerator {
                 return_type,
                 body,
                 is_pub,
+                is_const,
                 ..
             } => {
                 self.declare_var(name, false, None);
-                self.gen_fn(name, type_params, params, return_type, body, *is_pub)
+                self.gen_fn(
+                    name,
+                    type_params,
+                    params,
+                    return_type,
+                    body,
+                    *is_pub,
+                    *is_const,
+                )
             }
             Stmt::Return(Some(expr), _) => {
                 format!(
@@ -1445,6 +2118,14 @@ impl CodeGenerator {
                 )
             }
             Stmt::Return(None, _) => format!("{}return;\n", self.indent_str()),
+            Stmt::Yield { value, .. } => {
+                let buf = self
+                    .current_generator_buf()
+                    .expect("yield must only appear inside generator functions")
+                    .to_string();
+                let value_str = self.gen_expr(value, false);
+                format!("{}{}.push({});\n", self.indent_str(), buf, value_str)
+            }
             Stmt::Expr(expr) => format!("{}{};\n", self.indent_str(), self.gen_expr(expr, false)),
             Stmt::StructDef {
                 name,
@@ -1460,6 +2141,7 @@ impl CodeGenerator {
                 target_type_args,
                 trait_name,
                 methods,
+                operators,
                 ..
             } => self.gen_impl_block(
                 target,
@@ -1467,6 +2149,7 @@ impl CodeGenerator {
                 target_type_args,
                 trait_name.as_deref(),
                 methods,
+                operators,
             ),
             Stmt::EnumDef {
                 name,
@@ -1532,6 +2215,7 @@ impl CodeGenerator {
         return_type: &Option<TypeAnn>,
         body: &Expr,
         is_pub: bool,
+        is_const: bool,
     ) -> String {
         let fn_name = self.rust_fn_name(name);
         let params_str = params
@@ -1547,9 +2231,20 @@ impl CodeGenerator {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let ret_str = match return_type {
-            Some(ty) => format!(" -> {}", type_ann_to_rust(ty)),
-            None => String::new(),
+        let generator_inner_ann = return_type.as_ref().and_then(|ty| {
+            if let TypeAnn::Generate(inner) = ty {
+                Some(inner.clone())
+            } else {
+                None
+            }
+        });
+        let is_generator = generator_inner_ann.is_some();
+        let ret_str = if let Some(inner_ann) = generator_inner_ann.as_ref() {
+            format!(" -> impl Iterator<Item = {}>", type_ann_to_rust(inner_ann))
+        } else if let Some(ty) = return_type {
+            format!(" -> {}", type_ann_to_rust(ty))
+        } else {
+            String::new()
         };
         let generic_str = format_generic_params(type_params);
         let is_async = self.async_fns.contains(name);
@@ -1562,7 +2257,30 @@ impl CodeGenerator {
         if is_async || is_recursive_async {
             self.async_context_depth += 1;
         }
-        let body_str = self.gen_block_body(body, false);
+        let body_str = if is_generator {
+            let buf_name = self.next_generator_buf();
+            let mut block = String::new();
+            block.push_str(&format!(
+                "{}let mut {} = Vec::new();\n",
+                self.indent_str(),
+                buf_name
+            ));
+            self.generator_stack.push(buf_name.clone());
+            block.push_str(&self.gen_block_body(body, false));
+            self.generator_stack.pop();
+            block.push_str(&format!(
+                "{}let mut __forge_iter = {}.into_iter();\n",
+                self.indent_str(),
+                buf_name
+            ));
+            block.push_str(&format!(
+                "{}std::iter::from_fn(move || __forge_iter.next())\n",
+                self.indent_str()
+            ));
+            block
+        } else {
+            self.gen_block_body(body, false)
+        };
         if is_async || is_recursive_async {
             self.async_context_depth -= 1;
         }
@@ -1590,10 +2308,16 @@ impl CodeGenerator {
             out
         } else {
             let async_kw = if is_async { "async " } else { "" };
+            let const_kw = if is_const && !is_async && !is_recursive_async {
+                "const "
+            } else {
+                ""
+            };
             let mut out = format!(
-                "{}{}{}fn {}({}){} {{\n",
+                "{}{}{}{}fn {}({}){} {{\n",
                 self.indent_str(),
                 Self::vis(is_pub),
+                const_kw,
                 async_kw,
                 format!("{}{}", fn_name, generic_str),
                 params_str,
@@ -1637,10 +2361,12 @@ impl CodeGenerator {
             .map(|t| format!(" -> {}", type_ann_to_rust(t)))
             .unwrap_or_default();
 
+        let const_kw = if method.is_const { "const " } else { "" };
         let mut out = format!(
-            "{}{}fn {}({}){} {{\n",
+            "{}{}{}fn {}({}){} {{\n",
             self.indent_str(),
             Self::vis(is_pub),
+            const_kw,
             format!("{}{}", self.rust_fn_name(&method.name), generic_str),
             params.join(", "),
             ret
@@ -1797,14 +2523,16 @@ impl CodeGenerator {
         target_type_args: &[TypeAnn],
         trait_name: Option<&str>,
         methods: &[FnDef],
+        operators: &[OperatorDef],
     ) -> String {
         let impl_generics = format_generic_params(type_params);
-        let target = if target_type_args.is_empty() {
-            target.to_string()
+        let target_base = target.to_string();
+        let target_impl = if target_type_args.is_empty() {
+            target_base.clone()
         } else {
             format!(
                 "{}<{}>",
-                target,
+                target_base,
                 target_type_args
                     .iter()
                     .map(type_ann_to_rust)
@@ -1818,9 +2546,14 @@ impl CodeGenerator {
                 self.indent_str(),
                 impl_generics,
                 name,
-                target
+                target_impl
             ),
-            None => format!("{}impl{} {} {{\n", self.indent_str(), impl_generics, target),
+            None => format!(
+                "{}impl{} {} {{\n",
+                self.indent_str(),
+                impl_generics,
+                target_impl
+            ),
         };
 
         let mut out = header;
@@ -1828,8 +2561,24 @@ impl CodeGenerator {
         for method in methods {
             out.push_str(&self.gen_pub_method_def(method));
         }
+        for operator in operators {
+            if let Some(helper_str) = self.gen_operator_helper(operator, &target_impl, &target_base)
+            {
+                out.push_str(&helper_str);
+            }
+        }
         self.indent -= 1;
         out.push_str(&format!("{}}}\n", self.indent_str()));
+
+        for operator in operators {
+            if let Some(trait_str) =
+                self.gen_operator_trait_impl(operator, &impl_generics, &target_impl, &target_base)
+            {
+                out.push('\n');
+                out.push_str(&trait_str);
+            }
+        }
+
         out
     }
 
@@ -2733,6 +3482,30 @@ impl CodeGenerator {
             Expr::Field { object, field, .. } => {
                 format!("{}.{}", self.gen_expr(object, false), field)
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                let object_expr = self.gen_expr(object, false);
+                match chain {
+                    ChainKind::Field(field) => {
+                        format!("{}.and_then(|v| Some(v.{}))", object_expr, field)
+                    }
+                    ChainKind::Method { name, args } => {
+                        let args_code = args
+                            .iter()
+                            .map(|expr| self.gen_expr(expr, false))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "{}.and_then(|v| Some(v.{}({})))",
+                            object_expr, name, args_code
+                        )
+                    }
+                }
+            }
+            Expr::NullCoalesce { value, default, .. } => format!(
+                "{}.unwrap_or({})",
+                self.gen_expr(value, false),
+                self.gen_expr(default, false)
+            ),
             Expr::Index { object, index, .. } => {
                 let object_expr = self.gen_expr(object, false);
                 let index_expr = self.gen_expr(index, false);
@@ -2785,6 +3558,15 @@ impl CodeGenerator {
                 let inner = self.gen_expr(expr, false);
                 self.suppress_auto_await_depth -= 1;
                 format!("{}.await", inner)
+            }
+            Expr::Spawn { body, .. } => {
+                self.async_context_depth += 1;
+                let body_str = self.gen_block_body(body, false);
+                self.async_context_depth -= 1;
+                let mut out = String::from("tokio::spawn(async move {\n");
+                out.push_str(&body_str);
+                out.push_str(&format!("{}}})", self.indent_str()));
+                out
             }
             Expr::Assign { name, value, .. } => {
                 format!("{} = {}", name, self.gen_expr(value, false))
@@ -3225,12 +4007,22 @@ impl CodeGenerator {
             ClosureKind::FnMut | ClosureKind::FnOnce => "move ",
         };
 
-        format!(
-            "{}|{}| {}",
-            prefix,
-            params.join(", "),
-            self.gen_expr(body, false)
-        )
+        if self.expr_contains_await(body) {
+            self.async_context_depth += 1;
+            let body_str = self.gen_block_body(body, false);
+            self.async_context_depth -= 1;
+            let mut out = format!("{}|{}| async move {{\n", prefix, params.join(", "));
+            out.push_str(&body_str);
+            out.push_str(&format!("{}}}", self.indent_str()));
+            out
+        } else {
+            format!(
+                "{}|{}| {}",
+                prefix,
+                params.join(", "),
+                self.gen_expr(body, false)
+            )
+        }
     }
 
     fn expr_references_self(&self, expr: &Expr) -> bool {
@@ -3328,6 +4120,18 @@ impl CodeGenerator {
             Expr::FieldAssign { object, value, .. } => {
                 self.expr_references_self(object) || self.expr_references_self(value)
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.expr_references_self(object)
+                    || matches!(
+                        chain,
+                        ChainKind::Method { args, .. }
+                            if args.iter().any(|arg| self.expr_references_self(arg))
+                    )
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.expr_references_self(value) || self.expr_references_self(default)
+            }
+            _ => false,
         }
     }
 
@@ -3463,8 +4267,21 @@ impl CodeGenerator {
                 consumed,
                 false,
             ),
+            Stmt::Yield { value, .. } => {
+                self.analyze_closure_expr(
+                    value,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+            }
             Stmt::Return(None, _) => {}
-            Stmt::ImplBlock { methods, .. } => {
+            Stmt::ImplBlock {
+                methods, operators, ..
+            } => {
                 for method in methods {
                     local_scopes.push(
                         method
@@ -3476,6 +4293,26 @@ impl CodeGenerator {
                     );
                     self.analyze_closure_expr(
                         &method.body,
+                        outer_names,
+                        local_scopes,
+                        captured,
+                        mutated,
+                        consumed,
+                        false,
+                    );
+                    local_scopes.pop();
+                }
+                for operator in operators {
+                    local_scopes.push(
+                        operator
+                            .params
+                            .iter()
+                            .map(|param| param.name.clone())
+                            .chain(std::iter::once("self".to_string()))
+                            .collect::<HashSet<_>>(),
+                    );
+                    self.analyze_closure_expr(
+                        &operator.body,
                         outer_names,
                         local_scopes,
                         captured,
@@ -4058,7 +4895,61 @@ impl CodeGenerator {
                     false,
                 );
             }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.analyze_closure_expr(
+                    object,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+                if let ChainKind::Method { name, args } = chain {
+                    if name.starts_with("into_") {
+                        self.mark_consumed_idents(
+                            object,
+                            outer_names,
+                            local_scopes,
+                            captured,
+                            consumed,
+                        );
+                    }
+                    for arg in args {
+                        self.analyze_closure_expr(
+                            arg,
+                            outer_names,
+                            local_scopes,
+                            captured,
+                            mutated,
+                            consumed,
+                            false,
+                        );
+                    }
+                }
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.analyze_closure_expr(
+                    value,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+                self.analyze_closure_expr(
+                    default,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+            }
             Expr::Literal(_, _) => {}
+            _ => {}
         }
     }
 
@@ -4085,6 +4976,24 @@ impl CodeGenerator {
                 if let Some(tail) = tail {
                     self.mark_consumed_idents(tail, outer_names, local_scopes, captured, consumed);
                 }
+            }
+            Expr::OptionalChain { object, chain, .. } => {
+                self.mark_consumed_idents(object, outer_names, local_scopes, captured, consumed);
+                if let ChainKind::Method { args, .. } = chain {
+                    for arg in args {
+                        self.mark_consumed_idents(
+                            arg,
+                            outer_names,
+                            local_scopes,
+                            captured,
+                            consumed,
+                        );
+                    }
+                }
+            }
+            Expr::NullCoalesce { value, default, .. } => {
+                self.mark_consumed_idents(value, outer_names, local_scopes, captured, consumed);
+                self.mark_consumed_idents(default, outer_names, local_scopes, captured, consumed);
             }
             _ => {}
         }
@@ -4263,6 +5172,7 @@ fn type_supports_hash(ann: &TypeAnn) -> bool {
         | TypeAnn::OrderedMap(_, _)
         | TypeAnn::OrderedSet(_)
         | TypeAnn::Fn { .. } => false,
+        TypeAnn::Generate(inner) => type_supports_hash(inner),
     }
 }
 
@@ -4284,6 +5194,7 @@ fn type_supports_eq(ann: &TypeAnn) -> bool {
             type_supports_eq(key) && type_supports_eq(value)
         }
         TypeAnn::Generic { .. } | TypeAnn::Fn { .. } => false,
+        TypeAnn::Generate(inner) => type_supports_eq(inner),
     }
 }
 
@@ -4305,6 +5216,7 @@ fn type_supports_serde(ann: &TypeAnn) -> bool {
             type_supports_serde(ok) && type_supports_serde(err)
         }
         TypeAnn::Generic { .. } | TypeAnn::Fn { .. } => false,
+        TypeAnn::Generate(inner) => type_supports_serde(inner),
     }
 }
 
@@ -4324,6 +5236,7 @@ pub fn type_ann_to_rust(ann: &TypeAnn) -> String {
             )
         }
         TypeAnn::List(inner) => format!("Vec<{}>", type_ann_to_rust(inner)),
+        TypeAnn::Generate(inner) => format!("Vec<{}>", type_ann_to_rust(inner)),
         TypeAnn::Named(name) => name.clone(),
         TypeAnn::Generic { name, args } => {
             utility_type_ann_to_rust(name, args).unwrap_or_else(|| {
@@ -4515,9 +5428,31 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
                 }
             }
         }
-        Stmt::ImplBlock { methods, .. }
-        | Stmt::MixinDef { methods, .. }
-        | Stmt::ImplTrait { methods, .. } => {
+        Stmt::ImplBlock {
+            methods, operators, ..
+        } => {
+            for method in methods {
+                for p in &method.params {
+                    if let Some(ann) = &p.type_ann {
+                        collect_utility_types_ann(ann, out);
+                    }
+                }
+                if let Some(ann) = &method.return_type {
+                    collect_utility_types_ann(ann, out);
+                }
+            }
+            for operator in operators {
+                for p in &operator.params {
+                    if let Some(ann) = &p.type_ann {
+                        collect_utility_types_ann(ann, out);
+                    }
+                }
+                if let Some(ann) = &operator.return_type {
+                    collect_utility_types_ann(ann, out);
+                }
+            }
+        }
+        Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => {
             for method in methods {
                 for p in &method.params {
                     if let Some(ann) = &p.type_ann {
@@ -4564,6 +5499,7 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
                 collect_utility_types_stmt(inner, out);
             }
         }
+        Stmt::Yield { .. } => {}
         Stmt::Return(_, _) | Stmt::Expr(_) | Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
     }
 }
@@ -4614,6 +5550,7 @@ fn collect_utility_types_ann(ann: &TypeAnn, out: &mut Vec<UtilitySpec>) {
             }
             collect_utility_types_ann(return_type, out);
         }
+        TypeAnn::Generate(inner) => collect_utility_types_ann(inner, out),
         TypeAnn::Number
         | TypeAnn::Float
         | TypeAnn::String
@@ -4745,6 +5682,100 @@ mod tests {
     }
 
     #[test]
+    fn test_transpile_pipe_arrow() {
+        let src = r#"
+let nums = [1, 2, 3]
+let total = nums
+    |> filter(x => x > 1)
+    |> sum()
+"#;
+        let out = transpile(src);
+        assert!(out.contains("iter().filter("), "filter not found: {}", out);
+        assert!(out.contains(".sum::<"), "sum not found: {}", out);
+    }
+
+    #[test]
+    fn test_transpile_optional_chain_field() {
+        let src = "let city = user?.name";
+        let out = transpile(src);
+        assert!(out.contains(".and_then(|v| Some(v.name))"));
+    }
+
+    #[test]
+    fn test_transpile_operator_overload_vector2() {
+        let src = r#"
+struct Vec2 { x: number, y: number }
+impl Vec2 {
+    operator +(self, other: Vec2) -> Vec2 {
+        Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+    operator unary-(self) -> Vec2 {
+        Vec2 { x: -self.x, y: -self.y }
+    }
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("impl std::ops::Add for Vec2"),
+            "Add impl missing: {}",
+            out
+        );
+        assert!(
+            out.contains("impl std::ops::Neg for Vec2"),
+            "Neg impl missing: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_operator_eq_index() {
+        let src = r#"
+struct Pair { left: number, right: number }
+impl Pair {
+    operator ==(self, other: Pair) -> bool {
+        self.left == other.left && self.right == other.right
+    }
+    operator [](self, index: number) -> number {
+        if index == 0 { self.left } else { self.right }
+    }
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("impl PartialEq for Pair"),
+            "PartialEq impl missing: {}",
+            out
+        );
+        assert!(
+            out.contains("impl std::ops::Index<i64> for Pair"),
+            "Index impl missing: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_optional_chain_method() {
+        let src = "let len = name?.len()";
+        let out = transpile(src);
+        assert!(out.contains(".and_then(|v| Some(v.len()))"));
+    }
+
+    #[test]
+    fn test_transpile_null_coalesce() {
+        let src = r#"let city = user ?? "unknown""#;
+        let out = transpile(src);
+        assert!(out.contains(".unwrap_or(\"unknown\".to_string())"));
+    }
+
+    #[test]
+    fn test_transpile_optional_chain_nested() {
+        let src = "let city = user?.address?.city";
+        let out = transpile(src);
+        assert!(out.contains(".and_then(|v| Some(v.address))"));
+        assert!(out.contains(".and_then(|v| Some(v.city))"));
+    }
+
+    #[test]
     fn let_binding() {
         let out = transpile("let x = 42");
         assert!(out.contains("let x = 42;"), "got: {}", out);
@@ -4764,6 +5795,31 @@ fn add(a: number, b: number) -> number {
             out
         );
         assert!(out.contains("a + b"), "got: {}", out);
+    }
+
+    #[test]
+    fn test_transpile_const_fn() {
+        let src = r#"
+const fn clamp(value: number) -> number {
+    if value < 0 { 0 } else { value }
+}
+"#;
+        let out = transpile(src);
+        assert!(out.contains("const fn clamp"));
+    }
+
+    #[test]
+    fn test_transpile_const_var_with_const_fn() {
+        let src = r#"
+const fn clamp(value: number) -> number {
+    if value < 0 { 0 } else if value > 100 { 100 } else { value }
+}
+const MAX = clamp(150)
+"#;
+        let out = transpile(src);
+        assert!(out.contains("const fn clamp"));
+        assert!(out.contains("const MAX"));
+        assert!(out.contains("clamp(150)"));
     }
 
     #[test]
@@ -5570,7 +6626,73 @@ test "async works" {
     }
 
     #[test]
-    fn closure_await_error() {
+    fn async_spawn_block() {
+        let src = r#"
+use raw {
+    async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(3) }
+}
+
+let handle = spawn {
+    fetch_num().await
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("tokio::spawn(async move {"),
+            "spawn not found: {}",
+            out
+        );
+        assert!(
+            out.contains("fetch_num().await"),
+            "await not found: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_spawn() {
+        let src = r#"
+let handle = spawn {
+    let offset = 1
+    offset + 2
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("tokio::spawn(async move {"),
+            "spawn not found: {}",
+            out
+        );
+        assert!(out.contains("offset + 2"), "body not found: {}", out);
+    }
+
+    #[test]
+    fn test_transpile_spawn_handle_await() {
+        let src = r#"
+use raw {
+    async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(3) }
+}
+
+let handle = spawn {
+    fetch_num().await
+}
+let value = handle.await?
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("tokio::spawn(async move {"),
+            "spawn not found: {}",
+            out
+        );
+        assert!(
+            out.contains("handle.await?"),
+            "await handle not found: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_async_closure() {
         let src = r#"
 use raw {
     async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(1) }
@@ -5578,12 +6700,61 @@ use raw {
 
 let f = () => fetch_num().await
 "#;
-        let err = transpile_err(src);
+        let out = transpile(src);
         assert!(
-            err.contains("クロージャ内での .await はサポートされていません"),
-            "got: {}",
-            err
+            out.contains("|| async move {"),
+            "async closure not generated: {}",
+            out
         );
+        assert!(out.contains("fetch_num().await"), "await missing: {}", out);
+    }
+
+    #[test]
+    fn test_transpile_generator_fibonacci() {
+        let src = r#"
+fn fibonacci() -> generate<number> {
+    state a = 0
+    state b = 1
+    loop {
+        if a > 10 {
+            return
+        }
+        yield a
+        let next = a + b
+        a = b
+        b = next
+    }
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains(" -> impl Iterator<Item = i64>"),
+            "expected iterator return: {}",
+            out
+        );
+        assert!(out.contains("Vec::new()"), "buffer not found: {}", out);
+        assert!(
+            out.contains("std::iter::from_fn"),
+            "from_fn missing: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_generator_with_take() {
+        let src = r#"
+fn ones() -> generate<number> {
+    yield 1
+}
+let result = ones().take(3)
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("std::iter::from_fn"),
+            "from_fn missing: {}",
+            out
+        );
+        assert!(out.contains(".take(3)"), "take not found: {}", out);
     }
 
     #[test]

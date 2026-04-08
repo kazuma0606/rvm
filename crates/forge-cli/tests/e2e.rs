@@ -351,6 +351,47 @@ print(result)
 }
 
 #[test]
+fn test_pipe_arrow_filter_map_fold() {
+    let src = r#"
+let nums = [1, 2, 3, 4]
+let result = nums
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+    |> sum()
+print(result)
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "20\n");
+}
+
+#[test]
+fn test_pipe_arrow_equals_method_chain() {
+    let src = r#"
+let nums = [1, 2, 3, 4]
+let pipeline = nums
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+    |> sum()
+let method_chain = nums.filter(x => x % 2 == 0).map(x => x * x).sum()
+print(pipeline == method_chain)
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn test_pipe_arrow_method_without_parentheses() {
+    let src = r#"
+let nums = [1, 2, 3]
+let pipeline = nums |> len
+let method_chain = nums.len()
+print(pipeline == method_chain)
+"#;
+    let out = run_forge(src).unwrap();
+    assert_eq!(out, "true\n");
+}
+
+#[test]
 fn e2e_generics_basic() {
     let src = r#"
 struct Response<T> {
@@ -815,8 +856,10 @@ println(render().await?)
     assert_eq!(run_built(src).unwrap(), "41\n");
 }
 
+// E-4: 非同期クロージャは実装済み。`await` を含むクロージャは自動的に
+// `async move` クロージャへ昇格してトランスパイルされる（エラーにならない）。
 #[test]
-fn closure_with_await_compile_error() {
+fn closure_with_await_transpiles_successfully() {
     let src = r#"
 use raw {
     async fn fetch_num() -> Result<i64, anyhow::Error> { Ok(1) }
@@ -824,11 +867,12 @@ use raw {
 
 let f = () => fetch_num().await
 "#;
-    let err = run_transpile_error(src).unwrap_err();
+    // E-4 実装後はエラーなくトランスパイルが成功する
+    let result = run_transpile_error(src);
     assert!(
-        err.contains("クロージャ内での .await はサポートされていません"),
-        "stderr: {}",
-        err
+        result.is_ok(),
+        "async closure should transpile successfully after E-4, got: {:?}",
+        result
     );
 }
 

@@ -81,10 +81,13 @@ pub enum Stmt {
         return_type: Option<TypeAnn>,
         body: Box<Expr>,
         is_pub: bool,
+        is_const: bool,
         span: Span,
     },
     /// return expr
     Return(Option<Expr>, Span),
+    /// yield expr
+    Yield { value: Box<Expr>, span: Span },
     /// 式文
     Expr(Expr),
     /// struct Name { field: Type, ... }
@@ -103,6 +106,7 @@ pub enum Stmt {
         target_type_args: Vec<TypeAnn>,
         trait_name: Option<String>,
         methods: Vec<FnDef>,
+        operators: Vec<OperatorDef>,
         span: Span,
     },
     /// enum Name { Variant, Variant(Type), Variant { field: Type } }
@@ -378,6 +382,26 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    /// オプショナルチェーン / null 合体
+    OptionalChain {
+        object: Box<Expr>,
+        chain: ChainKind,
+        span: Span,
+    },
+    NullCoalesce {
+        value: Box<Expr>,
+        default: Box<Expr>,
+        span: Span,
+    },
+    /// spawn { ... }
+    Spawn { body: Box<Expr>, span: Span },
+}
+
+/// オプショナルチェーンの種類
+#[derive(Debug, Clone)]
+pub enum ChainKind {
+    Field(String),
+    Method { name: String, args: Vec<Expr> },
 }
 
 /// 文字列補間パーツ
@@ -494,6 +518,8 @@ pub enum TypeAnn {
         params: Vec<TypeAnn>,
         return_type: Box<TypeAnn>,
     }, // T => U
+    /// generate<T>
+    Generate(Box<TypeAnn>),
     /// Pick/Omit の Keys 引数: "id" | "name" | "email" 形式
     StringLiteralUnion(Vec<String>),
 }
@@ -529,6 +555,32 @@ pub enum TraitMethod {
     },
 }
 
+/// Operator definitions parsed inside impl blocks
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OperatorKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Lt,
+    Index,
+    Neg,
+}
+
+/// Operator definition node
+#[derive(Debug, Clone)]
+pub struct OperatorDef {
+    pub op: OperatorKind,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeAnn>,
+    pub body: Box<Expr>,
+    pub has_self: bool,
+    pub has_state_self: bool,
+    pub span: Span,
+}
+
 /// impl ブロック内のメソッド定義
 #[derive(Debug, Clone)]
 pub struct FnDef {
@@ -539,6 +591,7 @@ pub struct FnDef {
     pub body: Box<Expr>,
     pub has_self: bool,       // `self` または `state self` で宣言されたか
     pub has_state_self: bool, // `state self` で宣言されたか
+    pub is_const: bool,
     pub span: Span,
 }
 
