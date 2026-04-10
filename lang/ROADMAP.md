@@ -1,7 +1,7 @@
 # ForgeScript ロードマップ
 
-> 最終更新: 2026-04-05
-> テスト総数: 293本（全通過）
+> 最終更新: 2026-04-11
+> テスト総数: 436本（全通過）
 > 言語仕様: v0.2.0（ジェネリクス・forge.toml は v0.3.0 予定）
 
 ---
@@ -48,6 +48,47 @@
 | B-7: async/await | async fn 自動昇格・tokio・Box::pin再帰 | 実装済み |
 | B-8: typestate変換 | PhantomData パターン・制約チェック付き | 実装済み |
 | ラウンドトリップ | forge run == forge build + 実行 の等価確認 | 18本 |
+
+### 言語拡張（forge run / forge build）✅
+
+| 機能 | 詳細 | テスト数 |
+|---|---|---|
+| E-1: `\|>` パイプ演算子 | 左結合パイプ。`x \|> f \|> g` | E-1: 18本 |
+| E-2: `?.` / `??` | オプショナルチェーン・null 合体演算子 | E-2: 15本 |
+| E-3: 演算子オーバーロード | `impl` ブロック内 `operator +` 等 | E-3: 17本 |
+| E-4: `spawn` / 非同期クロージャ | async タスク生成 | E-4: 14本 |
+| E-5: `const fn` | コンパイル時定数関数 | E-5: 16本 |
+| E-6: `yield` / ジェネレータ | `generate<T>` 型・遅延評価 | E-6: 17本 |
+| E-7: `defer` | スコープ終了保証。`scopeguard::defer` に変換 | E-7: 10本 |
+| S-5-B: `pipeline { }` DSL | 宣言的 ETL パイプライン構文 | 実装済み |
+
+### 標準ライブラリ forge/std ✅
+
+**第2層（実用ライン）**
+
+| モジュール | 概要 | テスト数 |
+|---|---|---|
+| `forge/std/env` | 環境変数 + dotenv 自動ロード | 4本 |
+| `forge/std/log` | ConsoleLogger / JsonLogger / SilentLogger + `@timed` | 5本 |
+| `forge/std/process` | `args()` / `exit()` / `run()` / `on_signal()` | 2本 |
+| `forge/std/io` | `read_line()` / `read_stdin()` / `eprintln()` | 3本 |
+| `forge/std/json` | `stringify()` / `stringify_pretty()` / `parse()` | 4本 |
+| `forge/std/fs`（拡張） | `list_dir` / `make_dir` / `delete_file` / `path_join` 等 | 5本 |
+| `forge/std/string`（拡張） | `trim` / `split` / `replace` / `index_of` / `pad_left` 等 | 6本 |
+| `forge/std/regex` | `regex_match` / `regex_find_all` / `regex_replace` | 4本 |
+| `forge/std/uuid` | `uuid_v4()` | 2本 |
+| `forge/std/random` | `random_int` / `random_float` / `random_choice` / `shuffle` | 4本 |
+
+**第3層（高レベル抽象）**
+
+| モジュール | 概要 | テスト数 |
+|---|---|---|
+| `forge/std/retry` | `retry` / 指数バックオフ / `CircuitBreaker` / `@retry` `@circuit_breaker` デコレータ | 6本 |
+| `forge/std/cache` | `Cache::new` / TTL 制御 / `@memoize` `@cache` デコレータ | 4本 |
+| `forge/std/metrics` | プラガブル `MetricsBackend` / `@timed` デコレータ / Prometheus・StatsD 対応 | 5本 |
+| `forge/std/event` | インプロセス Pub/Sub / `emit` / `on` / `@on` デコレータ | 4本 |
+| `forge/std/config` | 多ソース統合設定（env + toml + data デフォルト値）/ `FORGE_ENV` 切り替え | 5本 |
+| `forge/std/pipeline` | 宣言的 ETL パイプライン / Source・Filter・Map・Sink + 並列実行 | 実装済み |
 
 ### 型定義（forge run）✅
 
@@ -128,48 +169,14 @@
 
 | 機能 | 仕様 | 備考 |
 |---|---|---|
-| E-1: `\|>` パイプ演算子 | `lang/extends/spec.md` | Lexer + Parser のみ。インタープリタ変更なし |
-| E-2: `?.` / `??` | `lang/extends/spec.md` | T? 型へのオプショナルアクセス |
-| E-3: 演算子オーバーロード | `lang/extends/spec.md` | `impl` ブロック内 `operator +` |
-| E-4: 非同期クロージャ / `spawn` | `lang/extends/spec.md` | B-7 async/await の完成 |
-| E-5: `const fn` | `lang/extends/spec.md` | コンパイル時定数関数 |
-| E-6: ジェネレータ / `yield` | `lang/extends/spec.md` | E-4 完成後。`generate<T>` 型 |
-| E-7: `defer` | `lang/extends/spec.md` | スコープ終了保証。`scopeguard` クレートに変換 |
 | ジェネリクス `<T>` | `lang/generics/spec.md` | Anvil の前提。v0.3.0 |
 | `forge.toml` パッケージ管理（完全版） | `lang/package/spec.md` | レジストリ・バージョン解決・forge build 統合。v0.3.0（ローカルパス依存は ✅ 実装済み） |
 
-## 設計中・方針確定 💭（標準ライブラリ拡充）
-
-### 第2層：実用ライン（近日対応）
-
-詳細仕様は `lang/std/v1/spec.md` を参照。
-
-**第2層：実用ライン**
+## 設計中・方針確定 💭（標準ライブラリ追加予定）
 
 | モジュール | 概要 |
 |---|---|
-| `forge/std/env` | 環境変数 + dotenv 自動ロード（優先順位: system > .env.local > .env.{FORGE_ENV} > .env） |
-| `forge/std/log` | プラガブル Logger trait。ConsoleLogger / JsonLogger / SilentLogger + サードパーティ（Prometheus / Mongo） |
-| `forge/std/process` | `args()` / `exit()` / `run()` / `on_signal()` |
-| `forge/std/io` | `read_line()` / `read_stdin()` / `eprintln()` |
-| `forge/std/json` | `stringify()` / `parse()` |
-| `forge/std/fs`（拡張） | `list_dir` / `make_dir` / `delete_file` / `path_join` 等 |
-| `forge/std/string`（拡張） | `trim` / `split` / `replace` / `to_upper` / `pad_left` 等 |
-| `forge/std/regex` | `regex_match` / `regex_find_all` / `regex_replace` |
-| `forge/std/uuid` | `uuid_v4()` |
-| `forge/std/random` | `random_int` / `random_float` / `random_choice` / `shuffle` |
 | 組み込み関数 | `time_ms()` / `time_ns()`（`lang/extend_idea.md` §8） |
-
-**第3層：Rust にない高レベル抽象**
-
-| モジュール | 概要 |
-|---|---|
-| `forge/std/retry` | `@retry` デコレータ・指数バックオフ・サーキットブレーカー |
-| `forge/std/cache` | `@memoize` / `@cache(ttl)` デコレータ・LRU キャッシュ |
-| `forge/std/metrics` | プラガブル MetricsBackend。`@timed` デコレータ。Prometheus / StatsD 対応 |
-| `forge/std/event` | インプロセス・インメモリ Pub/Sub。`emit` / `on` / `@on` デコレータ |
-| `forge/std/config` | 多ソース統合型設定（env + toml + data デフォルト値） |
-| `forge/std/pipeline` | 宣言的 ETL パイプライン。Source / Transform / Sink + 並列実行 |
 
 > **`forge/std/event` と外部ブローカーの使い分け**: `forge/std/event` は同一プロセス内専用。
 > マイクロサービス間通信・永続キュー・ACK が必要な場合は別パッケージを使用する。
@@ -182,7 +189,7 @@
 >
 > いずれも `container { bind EventBus to AmqpEventBus::new(...) }` で差し替え可能な設計にする。
 
-### 第3層：パッケージとして切り出す
+### パッケージとして切り出す予定
 
 | パッケージ | 概要 | 仕様 |
 |---|---|---|
@@ -266,52 +273,52 @@
   ├─ [4] ジェネリクス <T>
   ├─ [5] forge.toml ローカルパス依存（`dep = { path = "..." }`）
   ├─ [6] Anvil HTTP フレームワーク（A-1〜A-5 全完了）
-  └─ [7] examples/anvil サンプルサーバ
+  ├─ [7] examples/anvil サンプルサーバ
+  ├─ [8] 言語拡張 E-1〜E-7（|> / ?. / operator / spawn / const fn / yield / defer）
+  └─ [9] forge/std 第2層・第3層（env / log / process / io / json / fs / string / regex /
+          uuid / random / retry / cache / metrics / event / config / pipeline）
+          + S-5-B pipeline DSL パーサー
 
-  次のステップ（stdlib 拡充 + パッケージ）
+  次のステップ（パッケージ + DX）
   │
-  ├─ [8] forge/std 第2層（env / process / stringify / fs拡張 / string拡張 / time_ms・time_ns）
-  │       args() / env() / stringify() が揃うと CLI・API ツールが書けるようになる
-  │       time_ms() / time_ns() は実装コスト極小・ベンチマーク体験に直結
-  │
-  ├─ [9] forge-http パッケージ（reqwest ラッパー）
+  ├─ [10] forge-http パッケージ（reqwest ラッパー）
   │       get / post / put / delete / request + Response 型
   │       → forge/std/net（サーバー）と対になるクライアント側 HTTP
   │
   DX 強化
   │
-  ├─ [10] Linux インストール対応
+  ├─ [11] Linux インストール対応
   │        cargo install --git 対応 → GitHub Releases バイナリ → install.sh
   │
-  ├─ [11] forge build: Rust コード保存（target/forge_rs/）
+  ├─ [12] forge build: Rust コード保存（target/forge_rs/）
   │        build 時にデフォルトで target/forge_rs/ にコピーを残す
   │        Rust 学習材料・トランスパイラデバッグ・脱出ハッチとして機能
   │        --no-keep-rs フラグで CI 向けに抑制可能
   │
-  ├─ [12] forge fmt（フォーマッタ）
+  ├─ [13] forge fmt（フォーマッタ）
   │        CI/CD で必須。AST から整形出力
   │
-  ├─ [13] forge check 強化
+  ├─ [14] forge check 強化
   │        未使用変数・到達不能コード・詳細エラー表示
   │
-  ├─ [14] forge-mcp（MCP サーバ）
+  ├─ [15] forge-mcp（MCP サーバ）
   │        parse_file / type_check / run_snippet / search_symbol / get_spec_section
   │        → AI コーディング支援の不確実性を低減
   │
   言語仕様安定後
   │
-  ├─ [15] LSP（言語サーバー）
+  ├─ [16] LSP（言語サーバー）
   │        forge check の型チェッカーを転用
   │        ホバー・補完・定義ジャンプ
   │
-  ├─ [16] ノートブック `.fnb` + VS Code Notebook 拡張
+  ├─ [17] ノートブック `.fnb` + VS Code Notebook 拡張
   │        forge notebook コマンド・display() 組み込み
   │        後から Jupyter 互換（.ipynb エクスポート）を追加可能
   │
-  ├─ [17] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
-  ├─ [18] forge-grpc / forge-graphql
-  ├─ [19] Playground（WASM）
-  └─ [20] セルフホスティング
+  ├─ [18] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
+  ├─ [19] forge-grpc / forge-graphql
+  ├─ [20] Playground（WASM）
+  └─ [21] セルフホスティング
 ```
 
 ---
@@ -344,11 +351,12 @@ lang/                           ← 言語仕様・ドキュメント
   transpiler_perf.md            ← トランスパイラ最適化アイデア（イテレータ融合・with_capacity 等）
   architecture.md               ← クリーンアーキテクチャ / DI 設計方針（A+B+C ハイブリッド）
   extends/
-    spec.md                     ← E-1〜E-6 言語拡張仕様（|> / ?. / operator / spawn / const fn / yield）
-    plan.md                     ← E-1〜E-6 実装計画・フェーズ構成
-    tasks.md                    ← E-1〜E-6 タスク一覧（全 84 タスク・完了済み）
+    spec.md                     ← E-1〜E-7 言語拡張仕様（|> / ?. / operator / spawn / const fn / yield / defer）
+    plan.md                     ← E-1〜E-7 実装計画・フェーズ構成
+    tasks.md                    ← E-1〜E-7 タスク一覧（全 123 タスク・完了済み）
   std/
-    v1/spec.md                  ← forge/std 第2層 全モジュール仕様（env/log/process/io/json/fs/string/regex/uuid/random）
+    v1/spec.md                  ← forge/std 第2層・第3層 全モジュール仕様
+    v1/tasks.md                 ← forge/std タスク一覧（全 112 タスク・完了済み）
   validator/spec.md             ← forge/validator バリデーション DSL
   packages/
     http/spec.md                ← forge/http HTTP クライアント
