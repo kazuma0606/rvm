@@ -196,7 +196,7 @@
 | **`forge/http`** | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 | `lang/packages/http/spec.md` |
 | `forge-time` | `now()` / `format_date` / `parse_date` / `duration` | `lang/packages/forge-time/spec.md` |
 | `forge-crypto` | `hash_sha256` / `hmac_sha256` / `base64_*` / `bcrypt_*` | `lang/packages/forge-crypto/spec.md` |
-| `forge-db` | `query` / `execute` / `transaction`。SQLite / Postgres（sqlx） | `lang/packages/forge-db/spec.md` |
+| **`crucible`** | ForgeScript-native PostgreSQL ドライバ。wire protocol を ForgeScript で実装。sqlx 不要 | `packages/crucible/spec.md`（設計中）|
 | **`forge/validator`** | クロスフィールド・全エラー収集・カスタムメッセージ・正規表現バリデーション | `lang/validator/spec.md` |
 
 > **設計方針**: `forge/std/net` はサーバー側 TCP（Anvil の土台）を担当。
@@ -362,7 +362,8 @@ lang/                           ← 言語仕様・ドキュメント
     http/spec.md                ← forge/http HTTP クライアント
     forge-time/spec.md          ← 日時操作
     forge-crypto/spec.md        ← ハッシュ・暗号化
-    forge-db/spec.md            ← DB クライアント抽象
+packages/
+  crucible/spec.md              ← ForgeScript-native PostgreSQL ドライバ（設計中）
 
 crates/                         ← RVM 実装（Rust クレート群）
   forge-compiler/

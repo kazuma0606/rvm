@@ -1,0 +1,103 @@
+    fn parse_annotations(&mut self) -> Result<Annotations, ParseError> {
+        let mut annotations = Annotations::default();
+        while matches!(self.peek_kind(), TokenKind::At) {
+            self.advance();
+            let (ann_name, ann_span) = self.expect_ident()?;
+            match ann_name.as_str() {
+                "derive" => {
+                    self.expect_token(&TokenKind::LParen)?;
+                    while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                        let (name, _) = self.expect_ident()?;
+                        annotations.derives.push(name);
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                }
+                "defer" => {
+                    self.expect_token(&TokenKind::LParen)?;
+                    let mut cleanup = None;
+                    loop {
+                        let (param_name, param_span) = self.expect_ident()?;
+                        if param_name != "cleanup" {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "cleanup parameter".to_string(),
+                                found: TokenKind::Ident(param_name),
+                                span: param_span,
+                            });
+                        }
+                        self.expect_token(&TokenKind::Colon)?;
+                        match self.peek_kind().clone() {
+                            TokenKind::Str(method) => {
+                                cleanup = Some(method.clone());
+                                self.advance();
+                            }
+                            other => {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "string literal".to_string(),
+                                    found: other.clone(),
+                                    span: self.peek().span.clone(),
+                                });
+                            }
+                        }
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                    if cleanup.is_none() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "cleanup parameter".to_string(),
+                            found: TokenKind::Ident("cleanup".to_string()),
+                            span: ann_span,
+                        });
+                    }
+                    annotations.defer_cleanup = cleanup;
+                }
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "@derive or @defer".to_string(),
+                        found: TokenKind::Ident(other),
+                        span: ann_span,
+                    });
+                }
+            }
+            self.skip_sep();
+        }
+        Ok(annotations)
+    }
+
+    fn parse_annotated_stmt_body(
+        &mut self,
+        annotations: Annotations,
+        is_pub: bool,
+    ) -> Result<Stmt, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::Struct => self.parse_struct_def(annotations.derives),
+            TokenKind::Ident(ref name) if name == "enum" => {
+                self.advance();
+                self.parse_enum_def_body(annotations.derives)
+            }
+            TokenKind::Typestate => self.parse_typestate_def_with_meta(annotations.derives),
+            TokenKind::Const if matches!(self.kind_at(1), Some(TokenKind::Fn)) => {
+                self.parse_fn_with_const(is_pub, true, annotations.defer_cleanup.clone())
+            }
+            TokenKind::Fn => {
+                self.parse_fn_with_const(is_pub, false, annotations.defer_cleanup.clone())
+            }
+            _ => {
+                let tok = self.peek().clone();
+                Err(ParseError::UnexpectedToken {
+                    expected: "struct, enum, typestate, or fn after annotation".to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                })
+            }
+        }
+    }
+

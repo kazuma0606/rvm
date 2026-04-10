@@ -891,11 +891,11 @@ pipeline {
 | Source | `CsvSource` | CSV ファイルを行単位で読み込む |
 | Source | `JsonSource` | JSON Lines ファイルを読み込む |
 | Source | `ListSource` | list をソースとして使う（テスト用） |
-| Source | `DbSource` | forge-db クエリ結果をソースとして使う |
+| Source | `DbSource` | crucible クエリ結果をソースとして使う |
 | Sink | `CsvSink` | CSV ファイルに書き出す |
 | Sink | `JsonSink` | JSON Lines ファイルに書き出す |
 | Sink | `StdoutSink` | 標準出力に出力 |
-| Sink | `DbSink` | forge-db テーブルに INSERT |
+| Sink | `DbSink` | crucible テーブルに INSERT |
 | Sink | `CollectSink` | `list<T>` に収集して返す（テスト用） |
 
 ### パイプライン演算子一覧
