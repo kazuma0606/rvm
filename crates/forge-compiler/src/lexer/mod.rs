@@ -333,6 +333,7 @@ impl Lexer {
                         "data" => TokenKind::Data,
                         "typestate" => TokenKind::Typestate,
                         "operator" => TokenKind::Operator,
+                        "defer" => TokenKind::Defer,
                         "spawn" => TokenKind::Spawn,
                         "yield" => TokenKind::Yield,
                         "use" => TokenKind::Use,
@@ -340,6 +341,9 @@ impl Lexer {
                         "as" => TokenKind::As,
                         "when" => TokenKind::When,
                         "test" => TokenKind::Test,
+                        // All pipeline keywords (pipeline, source, filter, map, etc.) are
+                        // kept as Ident tokens since they're frequently used as method/variable
+                        // names. The pipeline DSL parser will match them contextually.
                         _ => TokenKind::Ident(ident),
                     };
                     tokens.push(Token { kind, span });
@@ -703,9 +707,38 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_pipeline_keywords() {
+        // All pipeline step words are Ident tokens (not keywords) so they can be
+        // used as method/variable names. The pipeline DSL parser matches them contextually.
+        let src = "pipeline source filter flat_map group sort take skip each sink parallel desc";
+        let got = kinds(src);
+        let expected = vec![
+            TokenKind::Ident("pipeline".to_string()),
+            TokenKind::Ident("source".to_string()),
+            TokenKind::Ident("filter".to_string()),
+            TokenKind::Ident("flat_map".to_string()),
+            TokenKind::Ident("group".to_string()),
+            TokenKind::Ident("sort".to_string()),
+            TokenKind::Ident("take".to_string()),
+            TokenKind::Ident("skip".to_string()),
+            TokenKind::Ident("each".to_string()),
+            TokenKind::Ident("sink".to_string()),
+            TokenKind::Ident("parallel".to_string()),
+            TokenKind::Ident("desc".to_string()),
+            TokenKind::Eof,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
     fn test_lex_operator_keyword() {
         let got = kinds("operator");
         assert_eq!(got, vec![TokenKind::Operator, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_lex_defer() {
+        assert_eq!(kinds("defer"), vec![TokenKind::Defer, TokenKind::Eof]);
     }
 
     #[test]

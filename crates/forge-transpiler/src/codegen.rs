@@ -1,9 +1,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use forge_compiler::ast::{
-    BinOp, ChainKind, Constraint, EnumInitData, EnumVariant, Expr, FnDef, InterpPart, Literal,
-    MatchArm, Module, OperatorDef, OperatorKind, Param, Pattern, Stmt, TraitMethod, TypeAnn,
-    TypestateMarker, UnaryOp, UsePath, UseSymbols, ValidateRule, WhenCondition,
+    BinOp, ChainKind, Constraint, DeferBody, EnumInitData, EnumVariant, Expr, FnDef, InterpPart,
+    Literal, MatchArm, Module, OperatorDef, OperatorKind, Param, Pattern, PipelineStep, Stmt,
+    TraitMethod, TypeAnn, TypestateMarker, UnaryOp, UsePath, UseSymbols, ValidateRule,
+    WhenCondition,
 };
 
 use crate::builtin::{try_builtin_call, try_constructor_call};
@@ -15,6 +16,7 @@ pub struct CodeGenerator {
     scopes: Vec<HashMap<String, VarInfo>>,
     generator_stack: Vec<String>,
     generator_counter: usize,
+    defer_counter: usize,
     async_fns: HashSet<String>,
     recursive_async_fns: HashSet<String>,
     synthetic_main_async: bool,
@@ -28,6 +30,8 @@ pub struct CodeGenerator {
     generic_type_params: HashMap<String, Vec<String>>,
     typestate_initial_states: HashMap<String, String>,
     typestate_state_names: HashMap<String, HashSet<String>>,
+    fn_cleanup: HashMap<String, String>,
+    pipeline_counter: usize,
 }
 
 #[derive(Clone, Default)]
@@ -51,6 +55,7 @@ impl CodeGenerator {
             scopes: vec![HashMap::new()],
             generator_stack: Vec::new(),
             generator_counter: 0,
+            defer_counter: 0,
             async_fns: HashSet::new(),
             recursive_async_fns: HashSet::new(),
             synthetic_main_async: false,
@@ -64,6 +69,8 @@ impl CodeGenerator {
             generic_type_params: HashMap::new(),
             typestate_initial_states: HashMap::new(),
             typestate_state_names: HashMap::new(),
+            fn_cleanup: HashMap::new(),
+            pipeline_counter: 0,
         }
     }
 
@@ -75,6 +82,47 @@ impl CodeGenerator {
         let name = format!("__forge_generator_vals_{}", self.generator_counter);
         self.generator_counter += 1;
         name
+    }
+
+    fn next_defer_guard(&mut self) -> String {
+        let name = format!("__forge_defer_guard_{}", self.defer_counter);
+        self.defer_counter += 1;
+        name
+    }
+
+    fn next_pipeline_name(&mut self, suffix: &str) -> String {
+        let name = format!("__pipeline_{}_{}", suffix, self.pipeline_counter);
+        self.pipeline_counter += 1;
+        name
+    }
+
+    fn called_function_name<'a>(&self, expr: &'a Expr) -> Option<&'a str> {
+        match expr {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident(name, _) => Some(name.as_str()),
+                _ => None,
+            },
+            Expr::Question(inner, _) => self.called_function_name(inner),
+            Expr::Await { expr, .. } => self.called_function_name(expr),
+            _ => None,
+        }
+    }
+
+    fn maybe_generate_defer_guard(&mut self, var: &str, value: &Expr) -> Option<String> {
+        if let Some(fn_name) = self.called_function_name(value) {
+            let method = self.fn_cleanup.get(fn_name).cloned();
+            if let Some(method) = method {
+                let guard_name = self.next_defer_guard();
+                return Some(format!(
+                    "{}let {guard} = scopeguard::defer(|| {{ {var}.{method}(); }});\n",
+                    self.indent_str(),
+                    guard = guard_name,
+                    var = var,
+                    method = method,
+                ));
+            }
+        }
+        None
     }
 
     fn operator_helper_name(op: &OperatorKind) -> &'static str {
@@ -600,6 +648,9 @@ impl CodeGenerator {
     }
 
     pub fn generate_module(&mut self, module: &Module) -> Result<String, TranspileError> {
+        self.fn_cleanup.clear();
+        self.defer_counter = 0;
+        self.pipeline_counter = 0;
         self.analyze_async(module)?;
         self.analyze_typestates(module)?;
         self.analyze_generic_types(module);
@@ -640,9 +691,11 @@ impl CodeGenerator {
 
         for stmt in &module.stmts {
             match stmt {
-                Stmt::Let { .. } | Stmt::State { .. } | Stmt::Expr(..) | Stmt::Return(..) => {
-                    main_body.push(stmt)
-                }
+                Stmt::Let { .. }
+                | Stmt::State { .. }
+                | Stmt::Expr(..)
+                | Stmt::Return(..)
+                | Stmt::Defer { .. } => main_body.push(stmt),
                 _ => top_level.push(stmt),
             }
         }
@@ -733,13 +786,22 @@ impl CodeGenerator {
         let mut called_fns: HashMap<String, HashSet<String>> = HashMap::new();
 
         for stmt in &module.stmts {
-            if let Stmt::Fn { name, body, .. } = stmt {
+            if let Stmt::Fn {
+                name,
+                body,
+                defer_cleanup,
+                ..
+            } = stmt
+            {
                 self.ensure_no_await_in_closure(body)?;
                 if self.expr_contains_await(body) {
                     self.async_fns.insert(name.clone());
                 }
                 fn_bodies.insert(name.clone(), body.as_ref().clone());
                 called_fns.insert(name.clone(), self.collect_called_fns(body));
+                if let Some(cleanup) = defer_cleanup {
+                    self.fn_cleanup.insert(name.clone(), cleanup.clone());
+                }
             } else if let Stmt::TestBlock { body, .. } = stmt {
                 for inner in body {
                     self.ensure_no_await_in_stmt_closure(inner)?;
@@ -754,9 +816,11 @@ impl CodeGenerator {
                 .stmts
                 .iter()
                 .filter_map(|stmt| match stmt {
-                    Stmt::Let { .. } | Stmt::State { .. } | Stmt::Expr(..) | Stmt::Return(..) => {
-                        Some(stmt.clone())
-                    }
+                    Stmt::Let { .. }
+                    | Stmt::State { .. }
+                    | Stmt::Expr(..)
+                    | Stmt::Return(..)
+                    | Stmt::Defer { .. } => Some(stmt.clone()),
                     _ => None,
                 })
                 .collect(),
@@ -910,6 +974,11 @@ impl CodeGenerator {
             Stmt::Yield { value, .. } => {
                 self.scan_expr_codegen_requirements(value);
             }
+            Stmt::Defer { body, .. } => match body {
+                DeferBody::Expr(expr) | DeferBody::Block(expr) => {
+                    self.scan_expr_codegen_requirements(expr)
+                }
+            },
             Stmt::Return(Some(expr), _) | Stmt::Expr(expr) => {
                 self.scan_expr_codegen_requirements(expr)
             }
@@ -1179,6 +1248,7 @@ impl CodeGenerator {
                 }
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) | Expr::Closure { .. } => {}
+            Expr::Pipeline { .. } => {}
         }
     }
 
@@ -1258,6 +1328,11 @@ impl CodeGenerator {
             Stmt::Return(Some(expr), _) => self.ensure_no_await_in_closure(expr),
             Stmt::Return(None, _) => Ok(()),
             Stmt::Yield { value, .. } => self.ensure_no_await_in_closure(value),
+            Stmt::Defer { body, .. } => match body {
+                DeferBody::Expr(expr) | DeferBody::Block(expr) => {
+                    self.ensure_no_await_in_closure(expr)
+                }
+            },
             Stmt::ImplBlock {
                 methods, operators, ..
             } => {
@@ -1450,6 +1525,7 @@ impl CodeGenerator {
                 self.ensure_no_await_in_closure(value)
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) => Ok(()),
+            Expr::Pipeline { .. } => Ok(()),
         }
     }
 
@@ -1559,6 +1635,7 @@ impl CodeGenerator {
                 self.expr_contains_await(value) || self.expr_contains_await(default)
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) => false,
+            Expr::Pipeline { .. } => false,
         }
     }
 
@@ -1572,6 +1649,9 @@ impl CodeGenerator {
             Stmt::Return(Some(expr), _) => self.expr_contains_await(expr),
             Stmt::Return(None, _) => false,
             Stmt::Yield { value, .. } => self.expr_contains_await(value),
+            Stmt::Defer { body, .. } => match body {
+                DeferBody::Expr(expr) | DeferBody::Block(expr) => self.expr_contains_await(expr),
+            },
             Stmt::ImplBlock {
                 methods, operators, ..
             } => {
@@ -1768,6 +1848,11 @@ impl CodeGenerator {
             Stmt::Return(Some(expr), _) => self.collect_called_fns_expr(expr, names),
             Stmt::Return(None, _) => {}
             Stmt::Yield { value, .. } => self.collect_called_fns_expr(value, names),
+            Stmt::Defer { body, .. } => match body {
+                DeferBody::Expr(expr) | DeferBody::Block(expr) => {
+                    self.collect_called_fns_expr(expr, names)
+                }
+            },
             Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
                 for inner in body {
                     self.collect_called_fns_stmt(inner, names);
@@ -1911,6 +1996,7 @@ impl CodeGenerator {
                     || self.expr_calls_fn(index, fn_name)
                     || self.expr_calls_fn(value, fn_name)
             }
+            Expr::Pipeline { .. } => false,
         }
     }
 
@@ -1949,7 +2035,8 @@ impl CodeGenerator {
             | Stmt::DataDef { .. }
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
-            | Stmt::UseRaw { .. } => false,
+            | Stmt::UseRaw { .. }
+            | Stmt::Defer { .. } => false,
         }
     }
 
@@ -2044,14 +2131,18 @@ impl CodeGenerator {
                     _ => "let",
                 };
                 self.declare_var(name, false, type_ann.clone());
-                format!(
+                let mut stmt = format!(
                     "{}{} {}{} = {};\n",
                     self.indent_str(),
                     binding_kw,
                     name,
                     ty,
                     val
-                )
+                );
+                if let Some(guard) = self.maybe_generate_defer_guard(name, value) {
+                    stmt.push_str(&guard);
+                }
+                stmt
             }
             Stmt::State {
                 name,
@@ -2065,7 +2156,11 @@ impl CodeGenerator {
                     .unwrap_or_default();
                 let val = self.gen_expr(value, false);
                 self.declare_var(name, true, type_ann.clone());
-                format!("{}let mut {}{} = {};\n", self.indent_str(), name, ty, val)
+                let mut stmt = format!("{}let mut {}{} = {};\n", self.indent_str(), name, ty, val);
+                if let Some(guard) = self.maybe_generate_defer_guard(name, value) {
+                    stmt.push_str(&guard);
+                }
+                stmt
             }
             Stmt::Const {
                 name,
@@ -2080,14 +2175,18 @@ impl CodeGenerator {
                     .unwrap_or_default();
                 let val = self.gen_expr(value, false);
                 self.declare_var(name, false, type_ann.clone());
-                format!(
+                let mut stmt = format!(
                     "{}{}const {}{} = {};\n",
                     self.indent_str(),
                     Self::vis(*is_pub),
                     name,
                     ty,
                     val
-                )
+                );
+                if let Some(guard) = self.maybe_generate_defer_guard(name, value) {
+                    stmt.push_str(&guard);
+                }
+                stmt
             }
             Stmt::Fn {
                 name,
@@ -2097,10 +2196,15 @@ impl CodeGenerator {
                 body,
                 is_pub,
                 is_const,
+                annotations,
                 ..
             } => {
                 self.declare_var(name, false, None);
-                self.gen_fn(
+                let mut out = String::new();
+                for ann in annotations {
+                    out.push_str(&format!("{}// {}\n", self.indent_str(), ann));
+                }
+                out.push_str(&self.gen_fn(
                     name,
                     type_params,
                     params,
@@ -2108,7 +2212,8 @@ impl CodeGenerator {
                     body,
                     *is_pub,
                     *is_const,
-                )
+                ));
+                out
             }
             Stmt::Return(Some(expr), _) => {
                 format!(
@@ -2125,6 +2230,30 @@ impl CodeGenerator {
                     .to_string();
                 let value_str = self.gen_expr(value, false);
                 format!("{}{}.push({});\n", self.indent_str(), buf, value_str)
+            }
+            Stmt::Defer { body, .. } => {
+                let guard_name = self.next_defer_guard();
+                let stmt = match body {
+                    DeferBody::Expr(expr) => {
+                        let expr_str = self.gen_expr(expr, false);
+                        format!(
+                            "{}let {guard} = scopeguard::defer(|| {{ {expr}; }});\n",
+                            self.indent_str(),
+                            guard = guard_name,
+                            expr = expr_str
+                        )
+                    }
+                    DeferBody::Block(block) => {
+                        let block_str = self.gen_expr(block, false);
+                        format!(
+                            "{}let {guard} = scopeguard::defer(|| {block});\n",
+                            self.indent_str(),
+                            guard = guard_name,
+                            block = block_str
+                        )
+                    }
+                };
+                stmt
             }
             Stmt::Expr(expr) => format!("{}{};\n", self.indent_str(), self.gen_expr(expr, false)),
             Stmt::StructDef {
@@ -3473,12 +3602,14 @@ impl CodeGenerator {
             } => self.gen_match(scrutinee, arms),
             Expr::Block { stmts, tail, .. } => self.gen_block(stmts, tail),
             Expr::Call { callee, args, .. } => self.gen_call(callee, args),
+
             Expr::MethodCall {
                 object,
                 method,
                 args,
                 ..
             } => self.gen_method_call(object, method, args),
+            Expr::Pipeline { steps, .. } => self.gen_pipeline(steps),
             Expr::Field { object, field, .. } => {
                 format!("{}.{}", self.gen_expr(object, false), field)
             }
@@ -3639,6 +3770,242 @@ impl CodeGenerator {
                 self.gen_expr(value, false)
             ),
         }
+    }
+
+    fn gen_pipeline(&mut self, steps: &[PipelineStep]) -> String {
+        let source_expr = steps
+            .iter()
+            .find_map(|step| match step {
+                PipelineStep::Source(expr) => Some(expr),
+                _ => None,
+            })
+            .expect("pipeline block missing source");
+        let sink_expr = steps
+            .iter()
+            .rev()
+            .find_map(|step| match step {
+                PipelineStep::Sink(expr) => Some(expr),
+                _ => None,
+            })
+            .expect("pipeline block missing sink");
+
+        let dataset_var = self.next_pipeline_name("dataset");
+        let sink_var = self.next_pipeline_name("sink");
+
+        let mut out = String::new();
+        out.push_str("{\n");
+        self.indent += 1;
+        out.push_str(&format!(
+            "{}let mut {} = ({}).collect()?;\n",
+            self.indent_str(),
+            dataset_var,
+            self.gen_expr(source_expr, false)
+        ));
+
+        for step in steps {
+            match step {
+                PipelineStep::Source(_) | PipelineStep::Sink(_) => continue,
+                PipelineStep::Filter(expr) => {
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(expr, "filter");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}{} = {}.into_iter().filter({}).collect::<Vec<_>>();\n",
+                        self.indent_str(),
+                        dataset_var,
+                        dataset_var,
+                        closure_name
+                    ));
+                }
+                PipelineStep::Map(expr) => {
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(expr, "map");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}{} = {}.into_iter().map({}).collect::<Vec<_>>();\n",
+                        self.indent_str(),
+                        dataset_var,
+                        dataset_var,
+                        closure_name
+                    ));
+                }
+                PipelineStep::FlatMap(expr) => {
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(expr, "flat_map");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}let mut __pipeline_next = Vec::new();\n",
+                        self.indent_str()
+                    ));
+                    out.push_str(&format!(
+                        "{}for item in {} {{\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                    self.indent += 1;
+                    out.push_str(&format!(
+                        "{}let mapped = {}(item);\n",
+                        self.indent_str(),
+                        closure_name
+                    ));
+                    out.push_str(&format!(
+                        "{}__pipeline_next.extend(mapped.into_iter());\n",
+                        self.indent_str()
+                    ));
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}}\n", self.indent_str()));
+                    out.push_str(&format!(
+                        "{}{} = __pipeline_next;\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                }
+                PipelineStep::Group(expr) => {
+                    self.needs_hashmap_use = true;
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(expr, "group");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}let mut __pipeline_groups: HashMap<_, Vec<_>> = HashMap::new();\n",
+                        self.indent_str()
+                    ));
+                    out.push_str(&format!(
+                        "{}for item in {} {{\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                    self.indent += 1;
+                    out.push_str(&format!(
+                        "{}let key = {}(&item);\n",
+                        self.indent_str(),
+                        closure_name
+                    ));
+                    out.push_str(&format!(
+                        "{}__pipeline_groups.entry(key).or_insert_with(Vec::new).push(item);\n",
+                        self.indent_str()
+                    ));
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}}\n", self.indent_str()));
+                    out.push_str(&format!(
+                        "{}let mut __pipeline_next = Vec::with_capacity(__pipeline_groups.len());\n",
+                        self.indent_str()
+                    ));
+                    out.push_str(&format!(
+                        "{}for (key, values) in __pipeline_groups {{\n",
+                        self.indent_str()
+                    ));
+                    self.indent += 1;
+                    out.push_str(&format!(
+                        "{}__pipeline_next.push(forge_std::pipeline::Group {{ key, values }});\n",
+                        self.indent_str()
+                    ));
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}}\n", self.indent_str()));
+                    out.push_str(&format!(
+                        "{}{} = __pipeline_next;\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                }
+                PipelineStep::Sort { key, descending } => {
+                    self.needs_ordering_use = true;
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(key, "sort_key");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}{}.sort_by(|a, b| {{\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                    self.indent += 1;
+                    out.push_str(&format!(
+                        "{}let key_a = {}(a);\n",
+                        self.indent_str(),
+                        closure_name
+                    ));
+                    out.push_str(&format!(
+                        "{}let key_b = {}(b);\n",
+                        self.indent_str(),
+                        closure_name
+                    ));
+                    out.push_str(&format!(
+                        "{}let ordering = key_a.cmp(&key_b);\n",
+                        self.indent_str()
+                    ));
+                    if *descending {
+                        out.push_str(&format!("{}ordering.reverse()\n", self.indent_str()));
+                    } else {
+                        out.push_str(&format!("{}ordering\n", self.indent_str()));
+                    }
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}});\n", self.indent_str()));
+                }
+                PipelineStep::Take(expr) => {
+                    let expr_code = self.gen_expr(expr, false);
+                    out.push_str(&format!(
+                        "{}{} = {}.into_iter().take(({}) as usize).collect::<Vec<_>>();\n",
+                        self.indent_str(),
+                        dataset_var,
+                        dataset_var,
+                        expr_code
+                    ));
+                }
+                PipelineStep::Skip(expr) => {
+                    let expr_code = self.gen_expr(expr, false);
+                    out.push_str(&format!(
+                        "{}{} = {}.into_iter().skip(({}) as usize).collect::<Vec<_>>();\n",
+                        self.indent_str(),
+                        dataset_var,
+                        dataset_var,
+                        expr_code
+                    ));
+                }
+                PipelineStep::Each(expr) => {
+                    let (closure_name, closure_code) = self.gen_pipeline_closure(expr, "each");
+                    out.push_str(&closure_code);
+                    out.push_str(&format!(
+                        "{}for item in &{} {{\n",
+                        self.indent_str(),
+                        dataset_var
+                    ));
+                    self.indent += 1;
+                    out.push_str(&format!(
+                        "{}{}(item.clone());\n",
+                        self.indent_str(),
+                        closure_name
+                    ));
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}}\n", self.indent_str()));
+                }
+                PipelineStep::Parallel(expr) => {
+                    let expr_code = self.gen_expr(expr, false);
+                    out.push_str(&format!(
+                        "{}let _parallel_degree = {};\n",
+                        self.indent_str(),
+                        expr_code
+                    ));
+                }
+            }
+        }
+
+        out.push_str(&format!(
+            "{}let {} = {};\n",
+            self.indent_str(),
+            sink_var,
+            self.gen_expr(sink_expr, false)
+        ));
+        out.push_str(&format!(
+            "{}{}.run({})\n",
+            self.indent_str(),
+            sink_var,
+            dataset_var
+        ));
+
+        self.indent -= 1;
+        out.push_str(&format!("{}}}", self.indent_str()));
+        out
+    }
+
+    fn gen_pipeline_closure(&mut self, expr: &Expr, label: &str) -> (String, String) {
+        let name = self.next_pipeline_name(label);
+        let body = self.gen_expr(expr, false);
+        let code = format!("{}let {} = {};\n", self.indent_str(), name, body);
+        (name, code)
     }
 
     fn gen_if(&mut self, cond: &Expr, then_block: &Expr, else_block: &Option<Box<Expr>>) -> String {
@@ -4385,7 +4752,8 @@ impl CodeGenerator {
             | Stmt::DataDef { .. }
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
-            | Stmt::UseRaw { .. } => {}
+            | Stmt::UseRaw { .. }
+            | Stmt::Defer { .. } => {}
         }
     }
 
@@ -5501,6 +5869,7 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
         }
         Stmt::Yield { .. } => {}
         Stmt::Return(_, _) | Stmt::Expr(_) | Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
+        Stmt::Defer { .. } => {}
     }
 }
 

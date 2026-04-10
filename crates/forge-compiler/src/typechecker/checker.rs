@@ -203,6 +203,9 @@ impl TypeChecker {
                 }
             }
 
+            Stmt::Defer { body, .. } => {
+                self.check_defer_body(body);
+            }
             Stmt::Expr(expr) => {
                 self.infer_expr(expr);
             }
@@ -246,6 +249,14 @@ impl TypeChecker {
             );
         }
         self.define(name, final_ty);
+    }
+
+    fn check_defer_body(&mut self, body: &DeferBody) {
+        match body {
+            DeferBody::Expr(expr) | DeferBody::Block(expr) => {
+                self.infer_expr(expr);
+            }
+        }
     }
 
     // ── 式の型推論 ────────────────────────────────────────────────────────
@@ -379,6 +390,28 @@ impl TypeChecker {
             }
             Expr::Spawn { body, .. } => {
                 self.infer_expr(body);
+                Type::Unknown
+            }
+            Expr::Pipeline { steps, .. } => {
+                for step in steps {
+                    match step {
+                        PipelineStep::Source(e)
+                        | PipelineStep::Filter(e)
+                        | PipelineStep::Map(e)
+                        | PipelineStep::FlatMap(e)
+                        | PipelineStep::Group(e)
+                        | PipelineStep::Take(e)
+                        | PipelineStep::Skip(e)
+                        | PipelineStep::Each(e)
+                        | PipelineStep::Sink(e)
+                        | PipelineStep::Parallel(e) => {
+                            self.infer_expr(e);
+                        }
+                        PipelineStep::Sort { key, .. } => {
+                            self.infer_expr(key);
+                        }
+                    }
+                }
                 Type::Unknown
             }
             _ => Type::Unknown,

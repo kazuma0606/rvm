@@ -68,6 +68,7 @@ pub enum Value {
         body: Box<Expr>,
         env: CapturedEnv,
         return_type: Option<TypeAnn>,
+        defer_cleanup: Option<String>,
     },
     /// ネイティブ（Rust）関数
     NativeFunction(NativeFn),

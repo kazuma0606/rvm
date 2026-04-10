@@ -82,6 +82,8 @@ pub enum Stmt {
         body: Box<Expr>,
         is_pub: bool,
         is_const: bool,
+        defer_cleanup: Option<String>,
+        annotations: Vec<String>,
         span: Span,
     },
     /// return expr
@@ -182,6 +184,17 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// defer expr / defer { block } （E-7）
+    Defer { body: DeferBody, span: Span },
+}
+
+/// defer の本体種別（E-7）
+#[derive(Debug, Clone)]
+pub enum DeferBody {
+    /// defer expr
+    Expr(Box<Expr>),
+    /// defer { ... }
+    Block(Box<Expr>),
 }
 
 /// typestate の各状態定義（状態名とその状態で使えるメソッド）
@@ -395,6 +408,27 @@ pub enum Expr {
     },
     /// spawn { ... }
     Spawn { body: Box<Expr>, span: Span },
+    /// pipeline { source ... filter ... map ... sink ... } （S-5-B）
+    Pipeline {
+        steps: Vec<PipelineStep>,
+        span: Span,
+    },
+}
+
+/// pipeline ステップ（S-5-B）
+#[derive(Debug, Clone)]
+pub enum PipelineStep {
+    Source(Box<Expr>),
+    Filter(Box<Expr>),
+    Map(Box<Expr>),
+    FlatMap(Box<Expr>),
+    Group(Box<Expr>),
+    Sort { key: Box<Expr>, descending: bool },
+    Take(Box<Expr>),
+    Skip(Box<Expr>),
+    Each(Box<Expr>),
+    Sink(Box<Expr>),
+    Parallel(Box<Expr>),
 }
 
 /// オプショナルチェーンの種類

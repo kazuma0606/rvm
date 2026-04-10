@@ -194,6 +194,8 @@ pub struct Interpreter {
     loading_stack: Vec<String>,
     /// yield 値を蓄積するスタック
     generator_stack: Vec<Vec<Value>>,
+    /// defer スタック（LIFO で関数終了時に実行）（E-7）
+    defer_stack: Vec<Vec<DeferBody>>,
     /// テストモードフラグ（M-5-C）: `forge test` コマンドで true になる
     pub is_test_mode: bool,
     /// REPL でロード済みのモジュール情報（M-7-A）
@@ -211,6 +213,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
+            defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -228,6 +231,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
+            defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -245,6 +249,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
+            defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -269,6 +274,7 @@ impl Interpreter {
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
+            defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
         };
@@ -680,6 +686,7 @@ impl Interpreter {
                 params,
                 return_type,
                 body,
+                defer_cleanup,
                 ..
             } => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
@@ -689,6 +696,7 @@ impl Interpreter {
                     body: body.clone(),
                     env: Rc::clone(&captured),
                     return_type: return_type.clone(),
+                    defer_cleanup: defer_cleanup.clone(),
                 };
                 // 再帰呼び出しのために自己参照を captured env に追加
                 captured
@@ -779,6 +787,11 @@ impl Interpreter {
             Stmt::TestBlock { .. } => {
                 // `forge run` では TestBlock をスキップ（FT-1-D）
                 // `forge test` では run_tests() が直接処理する
+                Ok(Value::Unit)
+            }
+            Stmt::Defer { body, .. } => {
+                // defer は defer_stack に積む（実際の実行は関数終了時）
+                self.push_defer(body.clone());
                 Ok(Value::Unit)
             }
         }
@@ -1626,6 +1639,7 @@ impl Interpreter {
                 data,
                 ..
             } => self.eval_enum_init(enum_name, variant, data),
+            Expr::Pipeline { steps, .. } => self.eval_pipeline(steps),
         }
     }
 
@@ -1894,6 +1908,7 @@ impl Interpreter {
                 body,
                 env,
                 return_type,
+                ..
             } => self.call_closure(&params, &body, &env, return_type.clone(), arg_vals),
             Value::NativeFunction(NativeFn(f)) => f(arg_vals).map_err(|msg| {
                 if let Some(rest) = msg.strip_prefix("__tf__:") {
@@ -2670,6 +2685,7 @@ impl Interpreter {
                 body,
                 env,
                 return_type,
+                ..
             } => self.call_closure(&params, &body, &env, return_type.clone(), args),
             Value::NativeFunction(NativeFn(func)) => func(args).map_err(RuntimeError::Custom),
             v => Err(type_err("function", v.type_name())),
@@ -2683,6 +2699,7 @@ impl Interpreter {
             body: Box::new(body.clone()),
             env: captured,
             return_type: None,
+            defer_cleanup: None,
         })
     }
 
@@ -3861,6 +3878,180 @@ impl Interpreter {
                 other.type_name()
             ))),
         }
+    }
+
+    // ── defer（E-7）────────────────────────────────────────────────────────
+
+    fn push_defer(&mut self, body: DeferBody) {
+        if let Some(frame) = self.defer_stack.last_mut() {
+            frame.push(body);
+        }
+    }
+
+    fn run_defers(&mut self) {
+        if let Some(frame) = self.defer_stack.pop() {
+            // LIFO: 最後に登録されたものから実行
+            for body in frame.into_iter().rev() {
+                let expr = match body {
+                    DeferBody::Expr(e) | DeferBody::Block(e) => *e,
+                };
+                let _ = self.eval_expr(&expr);
+            }
+        }
+    }
+
+    // ── pipeline（S-5-B）──────────────────────────────────────────────────
+
+    fn eval_pipeline(&mut self, steps: &[PipelineStep]) -> Result<Value, RuntimeError> {
+        // source を評価してリストを取得
+        let source_expr = steps.iter().find_map(|s| {
+            if let PipelineStep::Source(e) = s {
+                Some(e.as_ref())
+            } else {
+                None
+            }
+        });
+
+        let mut items: Vec<Value> = match source_expr {
+            Some(e) => match self.eval_expr(e)? {
+                Value::List(rc) => rc.borrow().clone(),
+                other => {
+                    return Err(RuntimeError::Custom(format!(
+                        "pipeline source は list が必要です (got {})",
+                        other.type_name()
+                    )))
+                }
+            },
+            None => {
+                return Err(RuntimeError::Custom(
+                    "pipeline には source が必要です".to_string(),
+                ))
+            }
+        };
+
+        for step in steps {
+            match step {
+                PipelineStep::Source(_) => {} // already handled
+                PipelineStep::Filter(f) => {
+                    let func = self.eval_expr(f)?;
+                    let mut result = Vec::new();
+                    for item in items {
+                        let v = self.call_value(func.clone(), vec![item.clone()])?;
+                        if matches!(v, Value::Bool(true)) {
+                            result.push(item);
+                        }
+                    }
+                    items = result;
+                }
+                PipelineStep::Map(f) => {
+                    let func = self.eval_expr(f)?;
+                    let mut result = Vec::new();
+                    for item in items {
+                        let v = self.call_value(func.clone(), vec![item])?;
+                        result.push(v);
+                    }
+                    items = result;
+                }
+                PipelineStep::FlatMap(f) => {
+                    let func = self.eval_expr(f)?;
+                    let mut result = Vec::new();
+                    for item in items {
+                        let v = self.call_value(func.clone(), vec![item])?;
+                        match v {
+                            Value::List(rc) => result.extend(rc.borrow().clone()),
+                            other => result.push(other),
+                        }
+                    }
+                    items = result;
+                }
+                PipelineStep::Take(n_expr) => {
+                    let n = match self.eval_expr(n_expr)? {
+                        Value::Int(i) => i as usize,
+                        other => {
+                            return Err(RuntimeError::Custom(format!(
+                                "take には number が必要です (got {})",
+                                other.type_name()
+                            )))
+                        }
+                    };
+                    items.truncate(n);
+                }
+                PipelineStep::Skip(n_expr) => {
+                    let n = match self.eval_expr(n_expr)? {
+                        Value::Int(i) => i as usize,
+                        other => {
+                            return Err(RuntimeError::Custom(format!(
+                                "skip には number が必要です (got {})",
+                                other.type_name()
+                            )))
+                        }
+                    };
+                    if n < items.len() {
+                        items = items.into_iter().skip(n).collect();
+                    } else {
+                        items = Vec::new();
+                    }
+                }
+                PipelineStep::Each(f) => {
+                    let func = self.eval_expr(f)?;
+                    for item in &items {
+                        self.call_value(func.clone(), vec![item.clone()])?;
+                    }
+                }
+                PipelineStep::Sort { key, descending } => {
+                    let key_fn = self.eval_expr(key)?;
+                    let mut pairs: Vec<(Value, Value)> = Vec::new();
+                    for item in &items {
+                        let k = self.call_value(key_fn.clone(), vec![item.clone()])?;
+                        pairs.push((k, item.clone()));
+                    }
+                    let desc = *descending;
+                    pairs.sort_by(|(a, _), (b, _)| {
+                        let ord = match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                            (Value::Float(x), Value::Float(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (Value::String(x), Value::String(y)) => x.cmp(y),
+                            _ => std::cmp::Ordering::Equal,
+                        };
+                        if desc {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    });
+                    items = pairs.into_iter().map(|(_, v)| v).collect();
+                }
+                PipelineStep::Group(f) => {
+                    let key_fn = self.eval_expr(f)?;
+                    // グループは map<key, list> として返す
+                    let mut groups: Vec<(Value, Value)> = Vec::new();
+                    for item in items {
+                        let k = self.call_value(key_fn.clone(), vec![item.clone()])?;
+                        if let Some(pos) = groups.iter().position(|(gk, _)| gk == &k) {
+                            if let Value::List(rc) = &groups[pos].1 {
+                                rc.borrow_mut().push(item);
+                            }
+                        } else {
+                            let list = Value::List(Rc::new(RefCell::new(vec![item])));
+                            groups.push((k, list));
+                        }
+                    }
+                    return Ok(Value::Map(groups));
+                }
+                PipelineStep::Parallel(_) => {
+                    // 逐次実行（interpreter は同期のみ）
+                }
+                PipelineStep::Sink(sink_expr) => {
+                    let sink_fn = self.eval_expr(sink_expr)?;
+                    let list = Value::List(Rc::new(RefCell::new(items.clone())));
+                    self.call_value(sink_fn, vec![list])?;
+                }
+            }
+        }
+
+        Ok(Value::List(Rc::new(RefCell::new(items))))
     }
 
     fn eval_field_assign(

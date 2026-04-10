@@ -48,6 +48,7 @@ pub enum TokenKind {
     Data,
     Typestate,
     Operator,
+    Defer,
     Spawn,
     Yield,
     // ── モジュールキーワード (Phase M-0) ─────

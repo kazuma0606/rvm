@@ -243,7 +243,9 @@ impl Parser {
             TokenKind::Pub => self.parse_pub_stmt(),
             TokenKind::When => self.parse_when_stmt(),
             TokenKind::Test => self.parse_test_block(),
+            TokenKind::Defer => self.parse_defer(),
             _ => {
+                // pipeline { ... } is parsed as an expression statement
                 let expr = self.parse_expr()?;
                 self.skip_sep();
                 Ok(Stmt::Expr(expr))
@@ -288,32 +290,99 @@ impl Parser {
     }
 
     fn parse_annotated_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
-        let mut derives = Vec::new();
+        let mut derives: Vec<String> = Vec::new();
+        let mut defer_cleanup: Option<String> = None;
+        let mut annotations: Vec<String> = Vec::new();
         while matches!(self.peek_kind(), TokenKind::At) {
-            self.advance();
-            let (ann_name, ann_span) = self.expect_ident()?;
-            if ann_name != "derive" {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "@derive".to_string(),
-                    found: TokenKind::Ident(ann_name),
-                    span: ann_span,
-                });
-            }
-            self.expect_token(&TokenKind::LParen)?;
-            loop {
-                let (name, _) = self.expect_ident()?;
-                derives.push(name);
-                if matches!(self.peek_kind(), TokenKind::Comma) {
+            self.advance(); // consume '@'
+            let ann_name = match self.peek_kind().clone() {
+                TokenKind::Defer => {
                     self.advance();
-                    continue;
+                    "defer".to_string()
                 }
-                break;
+                _ => {
+                    let (name, _) = self.expect_ident()?;
+                    name
+                }
+            };
+            match ann_name.as_str() {
+                "derive" => {
+                    self.expect_token(&TokenKind::LParen)?;
+                    while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                        let (d, _) = self.expect_ident()?;
+                        derives.push(d);
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                }
+                "defer" => {
+                    self.expect_token(&TokenKind::LParen)?;
+                    while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                        let (key, _) = self.expect_ident()?;
+                        self.expect_token(&TokenKind::Colon)?;
+                        let val_tok = self.advance();
+                        if key == "cleanup" {
+                            if let TokenKind::Str(s) = val_tok.kind {
+                                defer_cleanup = Some(s);
+                            }
+                        }
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                }
+                _ => {
+                    let mut ann_text = format!("@{}", ann_name);
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        ann_text.push('(');
+                        self.advance();
+                        let mut depth = 1usize;
+                        while depth > 0 && !matches!(self.peek_kind(), TokenKind::Eof) {
+                            match self.peek_kind() {
+                                TokenKind::LParen => {
+                                    depth += 1;
+                                    ann_text.push('(');
+                                    self.advance();
+                                }
+                                TokenKind::RParen => {
+                                    depth -= 1;
+                                    if depth > 0 {
+                                        ann_text.push(')');
+                                    }
+                                    self.advance();
+                                }
+                                _ => {
+                                    self.advance();
+                                }
+                            }
+                        }
+                        ann_text.push(')');
+                    }
+                    annotations.push(ann_text);
+                }
             }
-            self.expect_token(&TokenKind::RParen)?;
             self.skip_sep();
         }
 
         match self.peek_kind().clone() {
+            TokenKind::Fn => {
+                let mut stmt = self.parse_fn_with_pub(is_pub)?;
+                if let Stmt::Fn {
+                    defer_cleanup: ref mut fn_dc,
+                    annotations: ref mut fn_anns,
+                    ..
+                } = stmt
+                {
+                    if defer_cleanup.is_some() {
+                        *fn_dc = defer_cleanup.clone();
+                    }
+                    *fn_anns = annotations.clone();
+                }
+                Ok(stmt)
+            }
             TokenKind::Struct => self.parse_struct_def_with_pub(derives, is_pub),
             TokenKind::Ident(ref name) if name == "enum" => {
                 self.advance();
@@ -323,7 +392,7 @@ impl Parser {
             _ => {
                 let tok = self.peek().clone();
                 Err(ParseError::UnexpectedToken {
-                    expected: "struct or enum or typestate after annotation".to_string(),
+                    expected: "struct or enum or typestate or fn after annotation".to_string(),
                     found: tok.kind,
                     span: tok.span,
                 })
@@ -456,9 +525,12 @@ impl Parser {
         // 標準ライブラリ: forge/std/io
         let path = self.parse_use_path()?;
 
-        // . の後にシンボルを読み取る（オプション: パスのみの場合もある）
+        // . または :: の後にシンボルを読み取る（オプション: パスのみの場合もある）
         let symbols = if matches!(self.peek_kind(), TokenKind::Dot) {
             self.advance(); // consume '.'
+            self.parse_use_symbols()?
+        } else if matches!(self.peek_kind(), TokenKind::ColonColon) {
+            self.advance(); // consume '::'
             self.parse_use_symbols()?
         } else {
             // シンボルなし → 外部クレート全体のインポート（符号なし）
@@ -725,7 +797,7 @@ impl Parser {
 
         let mut params = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
-            let (param_name, param_span) = self.expect_ident()?;
+            let (param_name, param_span) = self.expect_name()?;
             let type_ann = if matches!(self.peek_kind(), TokenKind::Colon) {
                 self.advance();
                 Some(self.parse_type_ann()?)
@@ -759,6 +831,8 @@ impl Parser {
             body: Box::new(body),
             is_pub,
             is_const,
+            defer_cleanup: None,
+            annotations: Vec::new(),
             span,
         })
     }
@@ -786,6 +860,127 @@ impl Parser {
             value: Box::new(value),
             span,
         })
+    }
+
+    // ── defer（E-7）──────────────────────────────────────────────────────
+
+    fn parse_defer(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Defer)?;
+        let body = if matches!(self.peek_kind(), TokenKind::LBrace) {
+            let block = self.parse_block()?;
+            DeferBody::Block(Box::new(block))
+        } else {
+            let expr = self.parse_expr()?;
+            DeferBody::Expr(Box::new(expr))
+        };
+        self.skip_sep();
+        Ok(Stmt::Defer { body, span })
+    }
+
+    // ── pipeline { ... }（S-5-B）──────────────────────────────────────────
+
+    /// Parse `pipeline { step ... }` — called when we encounter `Ident("pipeline") LBrace`
+    fn parse_pipeline_expr(&mut self, span: Span) -> Result<Expr, ParseError> {
+        // consume `{`
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut steps = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let step_name = match self.peek_kind().clone() {
+                TokenKind::Ident(name) => {
+                    self.advance();
+                    name
+                }
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "pipeline step name".to_string(),
+                        found: other,
+                        span: self.current_span(),
+                    })
+                }
+            };
+            let step = match step_name.as_str() {
+                "source" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Source(Box::new(expr))
+                }
+                "filter" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Filter(Box::new(expr))
+                }
+                "map" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Map(Box::new(expr))
+                }
+                "flat_map" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::FlatMap(Box::new(expr))
+                }
+                "group" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Group(Box::new(expr))
+                }
+                "sort" => {
+                    let key = self.parse_expr()?;
+                    // optional `desc: true`
+                    let descending = if let TokenKind::Ident(ref name) = self.peek_kind().clone() {
+                        if name == "desc" {
+                            self.advance(); // consume `desc`
+                            if matches!(self.peek_kind(), TokenKind::Colon) {
+                                self.advance(); // consume `:`
+                                let v = self.parse_expr()?;
+                                matches!(v, Expr::Literal(Literal::Bool(true), _))
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    PipelineStep::Sort {
+                        key: Box::new(key),
+                        descending,
+                    }
+                }
+                "take" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Take(Box::new(expr))
+                }
+                "skip" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Skip(Box::new(expr))
+                }
+                "each" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Each(Box::new(expr))
+                }
+                "sink" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Sink(Box::new(expr))
+                }
+                "parallel" => {
+                    let expr = self.parse_expr()?;
+                    PipelineStep::Parallel(Box::new(expr))
+                }
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "known pipeline step".to_string(),
+                        found: TokenKind::Ident(other.to_string()),
+                        span: self.current_span(),
+                    })
+                }
+            };
+            steps.push(step);
+            self.skip_sep();
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Expr::Pipeline { steps, span })
     }
 
     fn parse_type_ann(&mut self) -> Result<TypeAnn, ParseError> {
@@ -1434,6 +1629,10 @@ impl Parser {
                     self.parse_closure()
                 } else {
                     let (name, span) = self.expect_ident()?;
+                    // pipeline { ... } DSL ブロック
+                    if name == "pipeline" && matches!(self.peek_kind(), TokenKind::LBrace) {
+                        return self.parse_pipeline_expr(span);
+                    }
                     // StructInit: 大文字から始まる識別子の後に `{` が来る場合
                     // ただし `{` がブロックとして解釈される文脈とは区別できないため
                     // 大文字から始まる名前限定で試みる
@@ -1541,6 +1740,7 @@ impl Parser {
                 TokenKind::Data => stmts.push(self.parse_data_def()?),
                 TokenKind::Typestate => stmts.push(self.parse_typestate_def()?),
                 TokenKind::Yield => stmts.push(self.parse_yield()?),
+                TokenKind::Defer => stmts.push(self.parse_defer()?),
                 _ => {
                     let expr = self.parse_expr()?;
                     if matches!(self.peek_kind(), TokenKind::Semicolon) {
@@ -1910,25 +2110,104 @@ impl Parser {
 
     fn parse_annotated_stmt(&mut self) -> Result<Stmt, ParseError> {
         // @derive(...) などのアノテーションをパースし、直後の struct 定義に付与
+        // @defer(cleanup: "method") fn ... → Stmt::Fn に defer_cleanup を付与
         let mut derives: Vec<String> = Vec::new();
+        let mut defer_cleanup: Option<String> = None;
+        let mut annotations: Vec<String> = Vec::new();
         while matches!(self.peek_kind(), TokenKind::At) {
             self.advance(); // consume '@'
-            let (ann_name, _) = self.expect_ident()?;
-            if ann_name == "derive" {
-                self.expect_token(&TokenKind::LParen)?;
-                while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
-                    let (d, _) = self.expect_ident()?;
-                    derives.push(d);
-                    if matches!(self.peek_kind(), TokenKind::Comma) {
-                        self.advance();
-                    }
+                            // annotation name can be a keyword token like Defer
+            let ann_name = match self.peek_kind().clone() {
+                TokenKind::Defer => {
+                    self.advance();
+                    "defer".to_string()
                 }
-                self.expect_token(&TokenKind::RParen)?;
+                _ => {
+                    let (name, _) = self.expect_ident()?;
+                    name
+                }
+            };
+            match ann_name.as_str() {
+                "derive" => {
+                    self.expect_token(&TokenKind::LParen)?;
+                    while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                        let (d, _) = self.expect_ident()?;
+                        derives.push(d);
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                }
+                "defer" => {
+                    // @defer(cleanup: "method_name")
+                    self.expect_token(&TokenKind::LParen)?;
+                    // parse key: value pairs
+                    while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                        let (key, _) = self.expect_ident()?;
+                        self.expect_token(&TokenKind::Colon)?;
+                        let val_tok = self.advance();
+                        if key == "cleanup" {
+                            if let TokenKind::Str(s) = val_tok.kind {
+                                defer_cleanup = Some(s);
+                            }
+                        }
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect_token(&TokenKind::RParen)?;
+                }
+                _ => {
+                    // collect unknown annotation with optional argument list
+                    let mut ann_text = format!("@{}", ann_name);
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        ann_text.push('(');
+                        self.advance(); // consume '('
+                        let mut depth = 1usize;
+                        while depth > 0 && !matches!(self.peek_kind(), TokenKind::Eof) {
+                            match self.peek_kind() {
+                                TokenKind::LParen => {
+                                    depth += 1;
+                                    ann_text.push('(');
+                                    self.advance();
+                                }
+                                TokenKind::RParen => {
+                                    depth -= 1;
+                                    if depth > 0 {
+                                        ann_text.push(')');
+                                    }
+                                    self.advance();
+                                }
+                                _ => {
+                                    self.advance();
+                                }
+                            }
+                        }
+                        ann_text.push(')');
+                    }
+                    annotations.push(ann_text);
+                }
             }
             self.skip_sep();
         }
-        // アノテーションの直後に struct または enum が来ることを期待
+        // アノテーションの直後に来るものを判定
         match self.peek_kind().clone() {
+            TokenKind::Fn => {
+                let mut stmt = self.parse_fn()?;
+                if let Stmt::Fn {
+                    defer_cleanup: ref mut fn_dc,
+                    annotations: ref mut fn_anns,
+                    ..
+                } = stmt
+                {
+                    if defer_cleanup.is_some() {
+                        *fn_dc = defer_cleanup.clone();
+                    }
+                    *fn_anns = annotations.clone();
+                }
+                Ok(stmt)
+            }
             TokenKind::Struct => self.parse_struct_def(derives),
             TokenKind::Ident(ref name) if name == "enum" => {
                 self.advance(); // consume 'enum'
@@ -1938,7 +2217,7 @@ impl Parser {
             _ => {
                 let tok = self.peek().clone();
                 Err(ParseError::UnexpectedToken {
-                    expected: "struct or enum or typestate after annotation".to_string(),
+                    expected: "struct or enum or typestate or fn after annotation".to_string(),
                     found: tok.kind,
                     span: tok.span,
                 })
@@ -2457,6 +2736,11 @@ impl Parser {
             let (field_name, _) = self.expect_ident()?;
             self.expect_token(&TokenKind::Colon)?;
             let type_ann = self.parse_type_ann()?;
+            // skip optional default value: = expr
+            if matches!(self.peek_kind(), TokenKind::Eq) {
+                self.advance(); // consume '='
+                self.parse_expr()?; // consume and discard default value
+            }
             fields.push((field_name, type_ann));
             if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
                 self.advance();

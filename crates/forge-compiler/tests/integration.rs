@@ -287,6 +287,125 @@ fn spam() {
 }
 
 #[test]
+fn test_parse_pipeline_block() {
+    let src = r#"
+pipeline {
+    source ListSource::new([1, 2, 3])
+    filter item => item
+    sink CollectSink::new()
+}
+"#;
+    let module = parse_ok(src);
+    match &module.stmts[0] {
+        Stmt::Expr(Expr::Pipeline { steps, .. }) => {
+            assert_eq!(steps.len(), 3);
+            assert!(matches!(steps[0], PipelineStep::Source(_)));
+            assert!(matches!(steps[1], PipelineStep::Filter(_)));
+            assert!(matches!(steps[2], PipelineStep::Sink(_)));
+        }
+        other => panic!("expected Pipeline, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_pipeline_sort_desc() {
+    let src = r#"
+pipeline {
+    source ListSource::new([])
+    sort item => item.value desc: true
+    sink CollectSink::new()
+}
+"#;
+    let module = parse_ok(src);
+    match &module.stmts[0] {
+        Stmt::Expr(Expr::Pipeline { steps, .. }) => match &steps[1] {
+            PipelineStep::Sort { descending, .. } => {
+                assert!(*descending);
+            }
+            other => panic!("expected Sort step, got {:?}", other),
+        },
+        other => panic!("expected Pipeline, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_defer_expr() {
+    let src = r#"
+fn cleanup() -> unit {
+}
+
+fn work() {
+    defer cleanup()
+}
+"#;
+    let module = parse_ok(src);
+    match &module.stmts[1] {
+        Stmt::Fn { body, .. } => match body.as_ref() {
+            Expr::Block { stmts, .. } => match &stmts[0] {
+                Stmt::Defer { body, .. } => match body {
+                    DeferBody::Expr(expr) => {
+                        assert!(matches!(expr.as_ref(), Expr::Call { .. }));
+                    }
+                    other => panic!("expected Expr body, got {:?}", other),
+                },
+                other => panic!("expected Defer, got {:?}", other),
+            },
+            other => panic!("expected Block, got {:?}", other),
+        },
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_defer_block() {
+    let src = r#"
+fn work() {
+    defer {
+        let x = 1
+        x
+    }
+}
+"#;
+    let module = parse_ok(src);
+    match &module.stmts[0] {
+        Stmt::Fn { body, .. } => match body.as_ref() {
+            Expr::Block { stmts, .. } => match &stmts[0] {
+                Stmt::Defer { body, .. } => match body {
+                    DeferBody::Block(block) => {
+                        assert!(matches!(block.as_ref(), Expr::Block { .. }));
+                    }
+                    other => panic!("expected Block body, got {:?}", other),
+                },
+                other => panic!("expected Defer, got {:?}", other),
+            },
+            other => panic!("expected Block, got {:?}", other),
+        },
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_defer_decorator() {
+    let src = r#"
+        @defer(cleanup: "close")
+        fn open() -> unit {
+        }
+    "#;
+    let module = parse_ok(src);
+    match &module.stmts[0] {
+        Stmt::Fn {
+            name,
+            defer_cleanup,
+            ..
+        } => {
+            assert_eq!(name, "open");
+            assert_eq!(defer_cleanup.as_deref(), Some("close"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_parse_generate_return_type() {
     let src = r#"
 fn fibonacci() -> generate<number> {

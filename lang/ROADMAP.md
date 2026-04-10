@@ -134,62 +134,73 @@
 | E-4: 非同期クロージャ / `spawn` | `lang/extends/spec.md` | B-7 async/await の完成 |
 | E-5: `const fn` | `lang/extends/spec.md` | コンパイル時定数関数 |
 | E-6: ジェネレータ / `yield` | `lang/extends/spec.md` | E-4 完成後。`generate<T>` 型 |
+| E-7: `defer` | `lang/extends/spec.md` | スコープ終了保証。`scopeguard` クレートに変換 |
 | ジェネリクス `<T>` | `lang/generics/spec.md` | Anvil の前提。v0.3.0 |
 | `forge.toml` パッケージ管理（完全版） | `lang/package/spec.md` | レジストリ・バージョン解決・forge build 統合。v0.3.0（ローカルパス依存は ✅ 実装済み） |
 
 ## 設計中・方針確定 💭（標準ライブラリ拡充）
 
-現状の `forge/std` に不足している実用関数。`app_ideas.md` の素案を実現するために必要な最小セット。
-
 ### 第2層：実用ライン（近日対応）
 
-| モジュール | 追加する関数 | 必要な素案 |
-|---|---|---|
-| `forge/std/env` | `env(key)` / `env_or(key, default)` | forge-env・forge-cron・全 CLI ツール |
-| `forge/std/process` | `args()` / `exit(code)` / `run(cmd, args)` | forge-todo・forge-pipeline 等 CLI全般 |
-| `forge/std/json` | `stringify(value)` | forge-webhook・全 REST API（現状は文字列補間で代替） |
-| `forge/std/fs`（拡張） | `list_dir` / `delete_file` / `make_dir` / `path_join` | forge-migrate・forge-config |
-| `forge/std/string`（拡張） | `split` / `trim` / `starts_with` / `ends_with` / `replace` / `to_upper` / `to_lower` | 全般 |
-| 組み込み関数（時間計測） | `time_ms()` / `time_ns()` | ベンチマーク・パフォーマンス計測全般 |
+詳細仕様は `lang/std/v1/spec.md` を参照。
 
-### 第3層：パッケージとして切り出す（標準ライブラリには含めない）
+**第2層：実用ライン**
 
-| パッケージ | 内部実装 | 概要 |
+| モジュール | 概要 |
+|---|---|
+| `forge/std/env` | 環境変数 + dotenv 自動ロード（優先順位: system > .env.local > .env.{FORGE_ENV} > .env） |
+| `forge/std/log` | プラガブル Logger trait。ConsoleLogger / JsonLogger / SilentLogger + サードパーティ（Prometheus / Mongo） |
+| `forge/std/process` | `args()` / `exit()` / `run()` / `on_signal()` |
+| `forge/std/io` | `read_line()` / `read_stdin()` / `eprintln()` |
+| `forge/std/json` | `stringify()` / `parse()` |
+| `forge/std/fs`（拡張） | `list_dir` / `make_dir` / `delete_file` / `path_join` 等 |
+| `forge/std/string`（拡張） | `trim` / `split` / `replace` / `to_upper` / `pad_left` 等 |
+| `forge/std/regex` | `regex_match` / `regex_find_all` / `regex_replace` |
+| `forge/std/uuid` | `uuid_v4()` |
+| `forge/std/random` | `random_int` / `random_float` / `random_choice` / `shuffle` |
+| 組み込み関数 | `time_ms()` / `time_ns()`（`lang/extend_idea.md` §8） |
+
+**第3層：Rust にない高レベル抽象**
+
+| モジュール | 概要 |
+|---|---|
+| `forge/std/retry` | `@retry` デコレータ・指数バックオフ・サーキットブレーカー |
+| `forge/std/cache` | `@memoize` / `@cache(ttl)` デコレータ・LRU キャッシュ |
+| `forge/std/metrics` | プラガブル MetricsBackend。`@timed` デコレータ。Prometheus / StatsD 対応 |
+| `forge/std/event` | インプロセス・インメモリ Pub/Sub。`emit` / `on` / `@on` デコレータ |
+| `forge/std/config` | 多ソース統合型設定（env + toml + data デフォルト値） |
+| `forge/std/pipeline` | 宣言的 ETL パイプライン。Source / Transform / Sink + 並列実行 |
+
+> **`forge/std/event` と外部ブローカーの使い分け**: `forge/std/event` は同一プロセス内専用。
+> マイクロサービス間通信・永続キュー・ACK が必要な場合は別パッケージを使用する。
+>
+> | パッケージ | ブローカー | 仕様 |
+> |---|---|---|
+> | `forge-amqp` | RabbitMQ | `packages/forge-amqp/spec.md`（未作成） |
+> | `forge-kafka` | Apache Kafka | `packages/forge-kafka/spec.md`（未作成） |
+> | `forge-nats` | NATS | `packages/forge-nats/spec.md`（未作成） |
+>
+> いずれも `container { bind EventBus to AmqpEventBus::new(...) }` で差し替え可能な設計にする。
+
+### 第3層：パッケージとして切り出す
+
+| パッケージ | 概要 | 仕様 |
 |---|---|---|
-| **forge-http** | `reqwest` ラッパー | HTTP クライアント。`get` / `post` / `put` / `delete` / `request` + レスポンス型 |
-| forge-time | `chrono` ラッパー | `now()` / `format_date` / `parse_date` |
-| forge-crypto | `sha2` / `base64` ラッパー | `hash_sha256` / `base64_encode` / `base64_decode` |
+| **`forge/http`** | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 | `lang/packages/http/spec.md` |
+| `forge-time` | `now()` / `format_date` / `parse_date` / `duration` | `lang/packages/forge-time/spec.md` |
+| `forge-crypto` | `hash_sha256` / `hmac_sha256` / `base64_*` / `bcrypt_*` | `lang/packages/forge-crypto/spec.md` |
+| `forge-db` | `query` / `execute` / `transaction`。SQLite / Postgres（sqlx） | `lang/packages/forge-db/spec.md` |
+| **`forge/validator`** | クロスフィールド・全エラー収集・カスタムメッセージ・正規表現バリデーション | `lang/validator/spec.md` |
 
 > **設計方針**: `forge/std/net` はサーバー側 TCP（Anvil の土台）を担当。
-> クライアント側 HTTP は責務が異なるため `packages/forge-http` として独立させる。
-> Anvil（サーバー）と forge-http（クライアント）が対になる構造。
-
-### forge-http パッケージ API 案
-
-```forge
-use forge_http.{ get, post, put, delete, request, Response }
-
-// シンプルな GET
-let res = get("https://api.example.com/users")?
-
-// ヘッダー付き POST
-let res = post("https://api.example.com/orders")
-    .header("Authorization", "Bearer {token}")
-    .json(payload)
-    .send()?
-
-// レスポンス操作
-let body   = res.text()
-let parsed = res.json()?
-let status = res.status          // number
-let ok     = res.ok              // bool (2xx)
-```
+> クライアント側 HTTP は責務が異なるため `forge/http` として独立させる。
+> Anvil（サーバー）と `forge/http`（クライアント）が対になる構造。
 
 ## 設計済み・未実装 📐（パッケージ）
 
 | パッケージ | 仕様 | 概要 |
 |---|---|---|
-| **forge-http** | `packages/forge-http/spec.md`（未作成） | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 |
+| **`forge/http`** | `lang/packages/http/spec.md` | HTTP クライアント（reqwest ラッパー） |
 | forge-grpc | `packages/forge-grpc/spec.md`（未作成） | gRPC サービス定義 DSL（tonic ラッパー） |
 | forge-graphql | `packages/forge-graphql/spec.md`（未作成） | GraphQL スキーマ DSL（async-graphql ラッパー） |
 
@@ -331,10 +342,19 @@ lang/                           ← 言語仕様・ドキュメント
   app_ideas.md                  ← ForgeScript で作ると有用なアプリケーション素案集
   extend_idea.md                ← 他言語から取り込みたい言語拡張アイデア集
   transpiler_perf.md            ← トランスパイラ最適化アイデア（イテレータ融合・with_capacity 等）
+  architecture.md               ← クリーンアーキテクチャ / DI 設計方針（A+B+C ハイブリッド）
   extends/
     spec.md                     ← E-1〜E-6 言語拡張仕様（|> / ?. / operator / spawn / const fn / yield）
     plan.md                     ← E-1〜E-6 実装計画・フェーズ構成
-    tasks.md                    ← E-1〜E-6 タスク一覧（全 84 タスク・未着手）
+    tasks.md                    ← E-1〜E-6 タスク一覧（全 84 タスク・完了済み）
+  std/
+    v1/spec.md                  ← forge/std 第2層 全モジュール仕様（env/log/process/io/json/fs/string/regex/uuid/random）
+  validator/spec.md             ← forge/validator バリデーション DSL
+  packages/
+    http/spec.md                ← forge/http HTTP クライアント
+    forge-time/spec.md          ← 日時操作
+    forge-crypto/spec.md        ← ハッシュ・暗号化
+    forge-db/spec.md            ← DB クライアント抽象
 
 crates/                         ← RVM 実装（Rust クレート群）
   forge-compiler/

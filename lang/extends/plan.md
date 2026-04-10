@@ -280,22 +280,79 @@ E-4（`spawn` 完成）後に着手。
 
 ---
 
+## Phase E-7: `defer`
+
+### 目標
+
+`defer expr` / `defer { block }` がスコープ終了時（正常・エラー問わず）に確実に実行されること。
+LIFO 順保証・`forge run` と `forge build` 両対応。
+
+### 実装ステップ
+
+1. **Lexer 拡張**
+   - `defer` を `TokenKind::Defer` キーワードとして追加
+
+2. **AST 拡張**
+   ```rust
+   Stmt::Defer { body: DeferBody }
+
+   enum DeferBody {
+       Expr(Box<Expr>),
+       Block(Block),
+   }
+   ```
+
+3. **パーサー拡張**
+   - `defer expr` → `Stmt::Defer { body: Expr(...) }`
+   - `defer { ... }` → `Stmt::Defer { body: Block(...) }`
+
+4. **インタープリタ拡張**
+   - 関数スコープ（またはブロックスコープ）に `defer_stack: Vec<DeferBody>` を追加
+   - `Stmt::Defer` 評価時: 実行せず `defer_stack` に積む（LIFO）
+   - スコープ終了時（正常・`?` による早期リターン・エラー）: `defer_stack` を逆順で実行
+   - `defer` ブロック内のエラーは無視する（ログ出力のみ）
+
+5. **トランスパイラ拡張**
+   - `defer expr` → `let _guard = scopeguard::defer(|| { expr; });`
+   - `defer { block }` → `let _guard = scopeguard::defer(|| { block });`
+   - `scopeguard` クレートを `forge-transpiler` の依存に追加
+   - 複数の `defer` は LIFO になるよう連番で変数名を生成（`_guard_1`, `_guard_2`, ...）
+
+6. **`@defer` デコレータ（トランスパイラのみ）**
+   - `@defer(cleanup: "method_name")` 付きの関数呼び出しに自動で `defer` を挿入
+   - `forge run` では通常の `defer` と同様に動作
+
+7. **テスト**
+   - `test_defer_runs_on_normal_exit`: 正常終了時に実行されること
+   - `test_defer_runs_on_early_return`: `?` による早期リターン時にも実行されること
+   - `test_defer_lifo_order`: 複数 `defer` が LIFO 順で実行されること
+   - `test_defer_block_syntax`: `defer { }` ブロック形式の動作
+   - `test_defer_error_in_defer_ignored`: `defer` 内のエラーが無視されること
+   - Snapshot: `test_transpile_defer_single`
+   - Snapshot: `test_transpile_defer_multiple_lifo`
+
+---
+
 ## 実装順序の推奨
 
 ```
 ┌─────────────────────────────────────────┐
 │ 並走可能（依存なし）                     │
-│   E-1  |> パイプ演算子                  │ ← 最優先・Lexer+Parser のみ
-│   E-2  ?. / ??                          │ ← 優先度高・使用頻度高
-│   E-3  演算子オーバーロード              │ ← 優先度高
-│   E-5  const fn                         │ ← 実装コスト低
+│   E-1  |> パイプ演算子                  │ ← ✅ 完了
+│   E-2  ?. / ??                          │ ← ✅ 完了
+│   E-3  演算子オーバーロード              │ ← ✅ 完了
+│   E-5  const fn                         │ ← ✅ 完了
 └─────────────────────────────────────────┘
            ↓
 ┌─────────────────────────────────────────┐
-│ E-4  非同期クロージャ / spawn            │
+│ E-4  非同期クロージャ / spawn            │ ← ✅ 完了
 └─────────────────────────────────────────┘
            ↓
 ┌─────────────────────────────────────────┐
-│ E-6  ジェネレータ / yield               │
+│ E-6  ジェネレータ / yield               │ ← ✅ 完了
+└─────────────────────────────────────────┘
+           ↓
+┌─────────────────────────────────────────┐
+│ E-7  defer                              │ ← 独立・今すぐ実装可能
 └─────────────────────────────────────────┘
 ```

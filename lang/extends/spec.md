@@ -387,14 +387,94 @@ fn fibonacci() -> impl Iterator<Item = i64> {
 
 ---
 
+## E-7: `defer` — スコープ終了時の確実な実行
+
+### 背景
+
+Rust の RAII（Drop trait）はリソース解放を保証するが、暗黙的で読みにくい。
+Go の `defer` は「ここで後片付けを宣言する」という意図を明示できる。
+ForgeScript では言語キーワードとして `defer` を追加し、ファイル・DB 接続・ロック等のクリーンアップを明示的に書けるようにする。
+
+### 構文
+
+```forge
+defer expr
+defer { block }
+```
+
+`defer` はスコープ（関数・ブロック）終了時に実行される。
+複数の `defer` がある場合は LIFO（後入れ先出し）順で実行される。
+正常終了・エラー終了（`?` による早期リターン）どちらでも実行が保証される。
+
+### 使用例
+
+```forge
+fn process_file(path: string) -> unit! {
+    let f = open_file(path)?
+    defer f.close()               // スコープ終了時に必ず実行
+
+    let data = f.read_all()?
+    transform(data)?
+    // f.close() はここで自動実行（エラーで抜けても）
+}
+
+fn with_transaction(db: DbConnection) -> unit! {
+    db.begin()?
+    defer db.rollback()           // コミット前にエラーが起きたら rollback
+
+    db.execute("INSERT ...")?
+    db.execute("UPDATE ...")?
+    db.commit()?                  // 成功時は commit → defer の rollback は no-op
+}
+
+fn acquire_locks() -> unit! {
+    lock_a.acquire()?
+    defer lock_a.release()        // 後入れ先出しで解放される順序が明確
+
+    lock_b.acquire()?
+    defer lock_b.release()        // lock_b → lock_a の順で解放
+}
+```
+
+### Rust 変換
+
+```rust
+// defer f.close()  →  let _guard = scopeguard::defer(|| f.close());
+```
+
+内部実装は `scopeguard` クレートの `defer!` マクロに変換する。
+`forge build` では `scopeguard::defer` を使用。`forge run` ではインタープリタがスコープ終了フックとして管理する。
+
+### `@defer` デコレータ（メソッドへの自動適用）
+
+```forge
+// メソッド呼び出し後に自動で cleanup を defer する
+@defer(cleanup: "close")
+fn open_file(path: string) -> File! { ... }
+
+// 使う側は defer 不要
+fn read_config(path: string) -> Config! {
+    let f = open_file(path)?   // close() が自動 defer される
+    parse_config(f.read_all()?)
+}
+```
+
+### 制約
+
+- `defer` はブロック内の式のみ（`defer let x = ...` は不可）
+- `defer` ブロック内でエラーが発生した場合は無視される（ログ出力推奨）
+- `defer` は関数スコープではなくブロックスコープで有効（`if` ブロック内の `defer` はそのブロック終了時に実行）
+
+---
+
 ## 付録: 実装の依存関係
 
 ```
 E-1 |> パイプ演算子
-    └─ 独立（今すぐ実装可能）
+    └─ 独立（✅ 実装済み）
 
 E-2 ?. / ??
-    └─ 独立（今すぐ実装可能）
+    └─ 独立（✅ 実装済み）
 
 E-3 演算子オーバーロード
     └─ struct / impl（✅ 実装済み）
@@ -403,8 +483,11 @@ E-4 非同期クロージャ / spawn
     └─ B-7 async/await（✅ 実装済み）
 
 E-5 const fn
-    └─ 独立（今すぐ実装可能）
+    └─ 独立（✅ 実装済み）
 
 E-6 ジェネレータ / yield
-    └─ E-4（spawn 完成後）
+    └─ E-4（✅ 実装済み）
+
+E-7 defer
+    └─ 独立（今すぐ実装可能）
 ```

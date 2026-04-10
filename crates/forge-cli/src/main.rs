@@ -1156,6 +1156,9 @@ fn collect_codegen_deps(rust_code: &str, deps: &mut DepsManager) {
     if rust_code.contains("tokio::") || rust_code.contains(".await") {
         deps.add("tokio");
     }
+    if rust_code.contains("scopeguard::defer") {
+        deps.add("scopeguard");
+    }
 }
 
 fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Result<(), String> {
@@ -1172,6 +1175,9 @@ fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Re
     }
     if crates.contains("tokio") && !content.contains("\ntokio = ") {
         extra_lines.push("tokio = { version = \"1\", features = [\"full\"] }".to_string());
+    }
+    if crates.contains("scopeguard") && !content.contains("\nscopeguard = ") {
+        extra_lines.push("scopeguard = \"1\"".to_string());
     }
 
     let mut others = crates
@@ -1331,5 +1337,37 @@ mod tests {
         let output = PathBuf::from("target/demo");
         let src = PathBuf::from("tmp/target/release/demo");
         assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
+    }
+
+    #[test]
+    fn test_collect_codegen_deps_scopeguard() {
+        let mut deps = DepsManager::new();
+        collect_codegen_deps("scopeguard::defer(|| {});", &mut deps);
+        assert!(deps.crates().contains("scopeguard"));
+    }
+
+    #[test]
+    fn test_update_generated_cargo_toml_scopeguard() {
+        let content = r#"[package]
+name = "test"
+version = "0.1.0"
+
+[dependencies]
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(content.as_bytes()).expect("write");
+        let path = tmp.path().to_path_buf();
+
+        let mut deps = DepsManager::new();
+        deps.add("scopeguard");
+
+        update_generated_cargo_toml(&path, &deps).expect("update");
+
+        let updated = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            updated.contains("scopeguard = \"1\""),
+            "scopeguard not added: {}",
+            updated
+        );
     }
 }
