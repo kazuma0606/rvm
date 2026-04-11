@@ -1,0 +1,13 @@
+[package]
+name = "crucible-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for crucible — PostgreSQL ORM and migration toolkit"
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"] }

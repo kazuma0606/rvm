@@ -3,6 +3,123 @@ use std::future::Future;
 use std::io::Read;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ── TcpConn グローバルレジストリ ─────────────────────────────────────────────
+//
+// Value に Native バリアントがないため、TcpConn の実体（tokio::net::TcpStream）は
+// グローバルな HashMap で管理する。ForgeScript 側には conn_id (u64) を
+// Value::Struct { type_name: "TcpConn", fields: { id: Value::Int(conn_id) } }
+// として渡す。
+//
+// async block 内で await を使うため std::sync::Mutex ではなく
+// tokio::sync::Mutex を使う（Guard を await をまたいで保持するため）。
+
+static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+// tokio の TcpStream は Sync でないため OwnedWriteHalf/OwnedReadHalf に分割して保持する
+struct TcpConnInner {
+    write_half: tokio::net::tcp::OwnedWriteHalf,
+    read_half: tokio::net::tcp::OwnedReadHalf,
+}
+
+// Send を実装しないフィールドを持つため unsafe impl が必要だが、
+// グローバルレジストリは tokio::sync::Mutex で保護されているので安全。
+unsafe impl Send for TcpConnInner {}
+
+static CONN_REGISTRY: Lazy<tokio::sync::Mutex<HashMap<u64, TcpConnInner>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+fn next_conn_id() -> u64 {
+    CONN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn make_rt() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Runtime::new().map_err(|e| format!("tokio runtime error: {}", e))
+}
+
+/// TCP 接続を確立して接続 ID を返す（`tcp_connect` の同期ラッパー）
+pub fn tcp_connect(host: &str, port: i64) -> Result<u64, String> {
+    let port = u16::try_from(port).map_err(|_| format!("invalid port: {}", port))?;
+    let addr = format!("{}:{}", host, port);
+    let rt = make_rt()?;
+    rt.block_on(async {
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| format!("tcp_connect failed ({}): {}", addr, e))?;
+        let id = next_conn_id();
+        let (read_half, write_half) = stream.into_split();
+        let mut registry = CONN_REGISTRY.lock().await;
+        registry.insert(id, TcpConnInner { write_half, read_half });
+        Ok(id)
+    })
+}
+
+/// バイト列を送信する
+pub fn tcp_write(conn_id: u64, data: Vec<i64>) -> Result<(), String> {
+    let bytes: Vec<u8> = data
+        .iter()
+        .map(|&b| (b & 0xFF) as u8)
+        .collect();
+    let rt = make_rt()?;
+    rt.block_on(async {
+        let mut registry = CONN_REGISTRY.lock().await;
+        let inner = registry
+            .get_mut(&conn_id)
+            .ok_or_else(|| format!("tcp_write: unknown conn_id {}", conn_id))?;
+        inner
+            .write_half
+            .write_all(&bytes)
+            .await
+            .map_err(|e| format!("tcp_write failed: {}", e))
+    })
+}
+
+/// n バイト必ず受信する
+pub fn tcp_read_exact(conn_id: u64, n: i64) -> Result<Vec<i64>, String> {
+    let n = usize::try_from(n).map_err(|_| format!("invalid byte count: {}", n))?;
+    let rt = make_rt()?;
+    rt.block_on(async {
+        let mut buf = vec![0u8; n];
+        let mut registry = CONN_REGISTRY.lock().await;
+        let inner = registry
+            .get_mut(&conn_id)
+            .ok_or_else(|| format!("tcp_read_exact: unknown conn_id {}", conn_id))?;
+        inner
+            .read_half
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| format!("tcp_read_exact failed: {}", e))?;
+        Ok(buf.into_iter().map(|b| b as i64).collect())
+    })
+}
+
+/// 受信可能なバイトを全部読む（1 read 分のデータを返す）
+pub fn tcp_read_available(conn_id: u64) -> Result<Vec<i64>, String> {
+    let rt = make_rt()?;
+    rt.block_on(async {
+        let mut chunk = [0u8; 4096];
+        let mut registry = CONN_REGISTRY.lock().await;
+        let inner = registry
+            .get_mut(&conn_id)
+            .ok_or_else(|| format!("tcp_read_available: unknown conn_id {}", conn_id))?;
+        let n = inner
+            .read_half
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("tcp_read_available failed: {}", e))?;
+        Ok(chunk[..n].iter().map(|&b| b as i64).collect())
+    })
+}
+
+/// 接続を閉じてレジストリから削除する
+pub fn tcp_close(conn_id: u64) {
+    // close は同期で呼ばれる想定だが tokio::sync::Mutex は async context が必要。
+    // blocking_lock で安全にロックする。
+    let mut registry = CONN_REGISTRY.blocking_lock();
+    registry.remove(&conn_id);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRequest {
@@ -376,6 +493,20 @@ fn reason_phrase(status: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tcp_connect が接続できないアドレスに対して Err を返すことを確認する
+    #[test]
+    fn tcp_connect_returns_err_on_refused() {
+        // ポート 1 は通常 listen されていないため接続拒否される
+        let result = tcp_connect("127.0.0.1", 1);
+        assert!(result.is_err(), "接続拒否された場合は Err を返すこと");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("tcp_connect failed"),
+            "エラーメッセージに tcp_connect failed が含まれること: {}",
+            msg
+        );
+    }
 
     #[test]
     fn parses_request_line_headers_and_body() {

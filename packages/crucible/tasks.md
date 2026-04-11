@@ -9,29 +9,29 @@
 
 ### C-0-A: TCP クライアント追加（forge-stdlib）
 
-- [ ] `crates/forge-stdlib/src/net.rs` に `TcpConn` 型を追加する（`Arc<Mutex<TcpStream>>` をラップした Native 値）
-- [ ] `tcp_connect(host: string, port: number) -> TcpConn!` を実装する
-- [ ] `tcp_write(conn: TcpConn, data: list<number>) -> unit!` を実装する（バイト列送信）
-- [ ] `tcp_read_exact(conn: TcpConn, n: number) -> list<number>!` を実装する（n バイト必ず受信）
-- [ ] `tcp_read_available(conn: TcpConn) -> list<number>!` を実装する（受信可能バイトを全部読む）
-- [ ] `tcp_close(conn: TcpConn) -> unit` を実装する
-- [ ] `forge/std/net` モジュールに上記関数を登録する（`forge-vm/src/interpreter.rs` または `forge-stdlib/src/lib.rs`）
-- [ ] 単体テスト: `tcp_connect` が接続できない場合に `Err` を返すことを確認する
+- [x] `crates/forge-stdlib/src/net.rs` に `TcpConn` 型を追加する（`Arc<Mutex<TcpStream>>` をラップした Native 値）
+- [x] `tcp_connect(host: string, port: number) -> TcpConn!` を実装する
+- [x] `tcp_write(conn: TcpConn, data: list<number>) -> unit!` を実装する（バイト列送信）
+- [x] `tcp_read_exact(conn: TcpConn, n: number) -> list<number>!` を実装する（n バイト必ず受信）
+- [x] `tcp_read_available(conn: TcpConn) -> list<number>!` を実装する（受信可能バイトを全部読む）
+- [x] `tcp_close(conn: TcpConn) -> unit` を実装する
+- [x] `forge/std/net` モジュールに上記関数を登録する（`forge-vm/src/interpreter.rs` または `forge-stdlib/src/lib.rs`）
+- [x] 単体テスト: `tcp_connect` が接続できない場合に `Err` を返すことを確認する
 
 ### C-0-B: パッケージ・クレートのセットアップ
 
-- [ ] `packages/crucible/forge.toml` を作成する（name = "crucible", version = "0.1.0"）
-- [ ] `packages/crucible/src/` ディレクトリを作成する
-- [ ] `packages/crucible/src/mod.forge` を作成する（スタブ）
-- [ ] `crates/crucible-cli/Cargo.toml` を作成する（バイナリクレート）
-- [ ] `crates/crucible-cli/src/main.rs` を作成する（スタブ: `fn main() { println!("crucible") }`）
-- [ ] `Cargo.toml`（workspace）に `crates/crucible-cli` を追加する
-- [ ] `cargo build --bin crucible-cli` が通ることを確認する
+- [x] `packages/crucible/forge.toml` を作成する（name = "crucible", version = "0.1.0"）
+- [x] `packages/crucible/src/` ディレクトリを作成する
+- [x] `packages/crucible/src/mod.forge` を作成する（スタブ）
+- [x] `crates/crucible-cli/Cargo.toml` を作成する（バイナリクレート）
+- [x] `crates/crucible-cli/src/main.rs` を作成する（スタブ: `fn main() { println!("crucible") }`）
+- [x] `Cargo.toml`（workspace）に `crates/crucible-cli` を追加する
+- [x] `cargo build --bin crucible-cli` が通ることを確認する
 
 ### C-0-C: テスト用 Docker Compose
 
-- [ ] `docker/docker-compose.test.yml` を作成する（postgres:16, POSTGRES_DB=crucible_test, port 5432）
-- [ ] `docker/crucible_test_setup.sql` を作成する（テスト用テーブル: `users`, `posts`）
+- [x] `docker/docker-compose.test.yml` を作成する（postgres:16, POSTGRES_DB=crucible_test, port 5432）
+- [x] `docker/crucible_test_setup.sql` を作成する（テスト用テーブル: `users`, `posts`）
 
 ---
 
@@ -292,7 +292,7 @@ C-4（マイグレーション CLI）完了後に実施する。
 
 | Phase | タスク数 | 完了数 | 進捗 |
 |---|---:|---:|---:|
-| C-0 基盤整備 | 15 | 0 | 0% |
+| C-0 基盤整備 | 15 | 15 | 100% |
 | C-1 wire protocol + 認証 | 25 | 0 | 0% |
 | C-2 クエリ + 型マッピング | 11 | 0 | 0% |
 | C-3 ORM 層 | 24 | 0 | 0% |

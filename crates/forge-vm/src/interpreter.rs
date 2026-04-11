@@ -1900,6 +1900,21 @@ impl Interpreter {
                     .collect::<Result<_, _>>()?;
                 return self.eval_tcp_listen(arg_vals);
             }
+            // TCP クライアント関数
+            if matches!(
+                name.as_str(),
+                "tcp_connect"
+                    | "tcp_write"
+                    | "tcp_read_exact"
+                    | "tcp_read_available"
+                    | "tcp_close"
+            ) {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return eval_tcp_client(name, arg_vals);
+            }
         }
         let callee_val = self.eval_expr(callee)?;
         let arg_vals: Vec<Value> = args
@@ -5837,6 +5852,242 @@ fn rewrite_local_use_paths(stmts: &[Stmt], dep_name: &str) -> Vec<Stmt> {
             other => other.clone(),
         })
         .collect()
+}
+
+// ── TCP クライアント関数（forge/std/net） ─────────────────────────────────
+//
+// tcp_connect / tcp_write / tcp_read_exact / tcp_read_available / tcp_close
+//
+// グローバルレジストリで TcpStream を管理し、conn_id を
+// Value::Struct { type_name: "TcpConn", id: Value::Int(conn_id) } として
+// ForgeScript 側に渡す。
+
+fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    use std::collections::HashMap as StdMap;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // レジストリ: conn_id → Arc<Mutex<std::net::TcpStream>>
+    static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
+    static CONN_REGISTRY: OnceLock<Mutex<StdMap<u64, Arc<Mutex<std::net::TcpStream>>>>> =
+        OnceLock::new();
+
+    fn get_registry() -> &'static Mutex<StdMap<u64, Arc<Mutex<std::net::TcpStream>>>> {
+        CONN_REGISTRY.get_or_init(|| Mutex::new(StdMap::new()))
+    }
+
+    fn next_id() -> u64 {
+        CONN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn lock_registry(
+    ) -> Result<std::sync::MutexGuard<'static, StdMap<u64, Arc<Mutex<std::net::TcpStream>>>>, RuntimeError>
+    {
+        get_registry()
+            .lock()
+            .map_err(|_| RuntimeError::Custom("tcp conn registry lock poisoned".to_string()))
+    }
+
+    fn get_conn_id(v: &Value) -> Result<u64, RuntimeError> {
+        match v {
+            Value::Struct { fields, .. } => {
+                let f = fields.borrow();
+                match f.get("id") {
+                    Some(Value::Int(n)) => u64::try_from(*n)
+                        .map_err(|_| RuntimeError::Custom(format!("invalid conn id: {}", n))),
+                    _ => Err(RuntimeError::Custom(
+                        "TcpConn struct missing 'id' field".to_string(),
+                    )),
+                }
+            }
+            _ => Err(RuntimeError::Custom(format!(
+                "expected TcpConn struct, got {}",
+                v.type_name()
+            ))),
+        }
+    }
+
+    fn make_conn_struct(conn_id: u64) -> Value {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::Int(conn_id as i64));
+        Value::Struct {
+            type_name: "TcpConn".to_string(),
+            fields: Rc::new(RefCell::new(fields)),
+        }
+    }
+
+    match name {
+        "tcp_connect" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "tcp_connect(host, port) takes 2 arguments".to_string(),
+                ));
+            }
+            let host = match &args[0] {
+                Value::String(s) => s.clone(),
+                v => {
+                    return Err(RuntimeError::Custom(format!(
+                        "tcp_connect: host must be string, got {}",
+                        v.type_name()
+                    )))
+                }
+            };
+            let port: u16 = match &args[1] {
+                Value::Int(n) => u16::try_from(*n)
+                    .map_err(|_| RuntimeError::Custom(format!("invalid port: {}", n)))?,
+                Value::Float(n) => *n as u16,
+                v => {
+                    return Err(RuntimeError::Custom(format!(
+                        "tcp_connect: port must be number, got {}",
+                        v.type_name()
+                    )))
+                }
+            };
+            let addr = format!("{}:{}", host, port);
+            let stream = std::net::TcpStream::connect(&addr).map_err(|e| {
+                RuntimeError::Custom(format!("tcp_connect failed ({}): {}", addr, e))
+            })?;
+            let id = next_id();
+            let mut registry = lock_registry()?;
+            registry.insert(id, Arc::new(Mutex::new(stream)));
+            Ok(Value::Result(Ok(Box::new(make_conn_struct(id)))))
+        }
+        "tcp_write" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "tcp_write(conn, data) takes 2 arguments".to_string(),
+                ));
+            }
+            let conn_id = get_conn_id(&args[0])?;
+            let bytes: Vec<u8> = match &args[1] {
+                Value::List(items) => items
+                    .borrow()
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => Ok((*n & 0xFF) as u8),
+                        Value::Float(n) => Ok(*n as u8),
+                        other => Err(RuntimeError::Custom(format!(
+                            "tcp_write: data element must be number, got {}",
+                            other.type_name()
+                        ))),
+                    })
+                    .collect::<Result<_, _>>()?,
+                v => {
+                    return Err(RuntimeError::Custom(format!(
+                        "tcp_write: data must be list, got {}",
+                        v.type_name()
+                    )))
+                }
+            };
+            let registry = lock_registry()?;
+            let stream_arc = registry
+                .get(&conn_id)
+                .ok_or_else(|| {
+                    RuntimeError::Custom(format!("tcp_write: unknown conn_id {}", conn_id))
+                })?
+                .clone();
+            drop(registry);
+            let mut stream = stream_arc
+                .lock()
+                .map_err(|_| RuntimeError::Custom("tcp stream lock poisoned".to_string()))?;
+            use std::io::Write;
+            stream
+                .write_all(&bytes)
+                .map_err(|e| RuntimeError::Custom(format!("tcp_write failed: {}", e)))?;
+            Ok(Value::Result(Ok(Box::new(Value::Unit))))
+        }
+        "tcp_read_exact" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "tcp_read_exact(conn, n) takes 2 arguments".to_string(),
+                ));
+            }
+            let conn_id = get_conn_id(&args[0])?;
+            let n: usize = match &args[1] {
+                Value::Int(n) => usize::try_from(*n)
+                    .map_err(|_| RuntimeError::Custom(format!("invalid byte count: {}", n)))?,
+                Value::Float(n) => *n as usize,
+                v => {
+                    return Err(RuntimeError::Custom(format!(
+                        "tcp_read_exact: n must be number, got {}",
+                        v.type_name()
+                    )))
+                }
+            };
+            let registry = lock_registry()?;
+            let stream_arc = registry
+                .get(&conn_id)
+                .ok_or_else(|| {
+                    RuntimeError::Custom(format!("tcp_read_exact: unknown conn_id {}", conn_id))
+                })?
+                .clone();
+            drop(registry);
+            let mut stream = stream_arc
+                .lock()
+                .map_err(|_| RuntimeError::Custom("tcp stream lock poisoned".to_string()))?;
+            let mut buf = vec![0u8; n];
+            use std::io::Read;
+            stream
+                .read_exact(&mut buf)
+                .map_err(|e| RuntimeError::Custom(format!("tcp_read_exact failed: {}", e)))?;
+            let list = Rc::new(std::cell::RefCell::new(
+                buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+            ));
+            Ok(Value::Result(Ok(Box::new(Value::List(list)))))
+        }
+        "tcp_read_available" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "tcp_read_available(conn) takes 1 argument".to_string(),
+                ));
+            }
+            let conn_id = get_conn_id(&args[0])?;
+            let registry = lock_registry()?;
+            let stream_arc = registry
+                .get(&conn_id)
+                .ok_or_else(|| {
+                    RuntimeError::Custom(format!(
+                        "tcp_read_available: unknown conn_id {}",
+                        conn_id
+                    ))
+                })?
+                .clone();
+            drop(registry);
+            let mut stream = stream_arc
+                .lock()
+                .map_err(|_| RuntimeError::Custom("tcp stream lock poisoned".to_string()))?;
+            let mut chunk = [0u8; 4096];
+            use std::io::Read;
+            let n = stream
+                .read(&mut chunk)
+                .map_err(|e| RuntimeError::Custom(format!("tcp_read_available failed: {}", e)))?;
+            let list = Rc::new(std::cell::RefCell::new(
+                chunk[..n]
+                    .iter()
+                    .map(|&b| Value::Int(b as i64))
+                    .collect(),
+            ));
+            Ok(Value::Result(Ok(Box::new(Value::List(list)))))
+        }
+        "tcp_close" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "tcp_close(conn) takes 1 argument".to_string(),
+                ));
+            }
+            let conn_id = get_conn_id(&args[0])?;
+            let mut registry = lock_registry()?;
+            registry.remove(&conn_id);
+            Ok(Value::Unit)
+        }
+        _ => Err(RuntimeError::Custom(format!(
+            "unknown tcp client function: {}",
+            name
+        ))),
+    }
 }
 
 // ── テスト ────────────────────────────────────────────────────────────────

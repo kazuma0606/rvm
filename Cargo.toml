@@ -7,6 +7,7 @@ members = [
     "crates/forge-cli",
     "crates/forge-transpiler",
     "crates/forge-mcp",
+    "crates/crucible-cli",
 ]
 
 [workspace.package]
