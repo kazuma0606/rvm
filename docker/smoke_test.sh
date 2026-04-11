@@ -27,20 +27,16 @@ echo ""
 # 1. バージョン確認
 check "version" "forge --version" "forge"
 
-# 2. Hello World
+# 2. Hello World（トップレベル文を直接実行）
 cat > /tmp/hello.fg <<'EOF'
-fn main() {
-    println("Hello, ForgeScript!")
-}
+println("Hello, ForgeScript!")
 EOF
 check "hello world" "forge run /tmp/hello.fg" "Hello, ForgeScript!"
 
 # 3. forge build
 cat > /tmp/build_test.fg <<'EOF'
-fn main() {
-    let x = 42
-    println(x)
-}
+let x = 42
+println(x)
 EOF
 forge build /tmp/build_test.fg -o /tmp/forge_out 2>/dev/null
 check "build" "/tmp/forge_out" "42"
@@ -49,11 +45,9 @@ check "build" "/tmp/forge_out" "42"
 if curl -sf --max-time 3 https://httpbin.org/get > /dev/null 2>&1; then
     cat > /tmp/http_test.fg <<'EOF'
 use forge/http.{ get }
-fn main() {
-    let res = get("https://httpbin.org/get").send()
-    println(res.status)
-    println(res.ok)
-}
+let res = get("https://httpbin.org/get").send()
+println(res.status)
+println(res.ok)
 EOF
     check "http get" "forge run /tmp/http_test.fg" "200"
 else

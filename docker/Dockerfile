@@ -21,8 +21,5 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 RUN cargo install --git https://github.com/kazuma0606/rvm.git --bin forge-new --locked && \
     ln -s /root/.cargo/bin/forge-new /usr/local/bin/forge
 
-# バージョン確認（ビルド時に動作確認）
-RUN forge --version
-
 WORKDIR /workspace
 CMD ["bash"]
