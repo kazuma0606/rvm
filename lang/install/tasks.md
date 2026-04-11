@@ -8,12 +8,13 @@
 ## Phase I-1: Docker 検証環境
 
 ### I-1-A: Dockerfile 作成
-- [ ] `docker/Dockerfile` を作成
+- [x] `docker/Dockerfile` を作成
   - ベース: `ubuntu:22.04`
   - `apt-get`: curl / ca-certificates / build-essential
   - rustup 非対話インストール（stable・`--no-modify-path`）
   - `ENV PATH="/root/.cargo/bin:${PATH}"` を設定
-  - `cargo install --git <repo> --bin forge --locked`
+  - `cargo install --git https://github.com/kazuma0606/rvm.git --bin forge-new --locked`
+  - `forge-new` → `forge` シンボリックリンク作成（`/usr/local/bin/forge`）
 
 ### I-1-B: docker-compose.yml 作成
 - [ ] `docker/docker-compose.yml` を作成
@@ -134,9 +135,9 @@
 
 | Phase | タスク数 | 完了 |
 |---|---|---|
-| I-1 | 6 | 0 |
+| I-1 | 6 | 1 |
 | I-2 | 4 | 0 |
 | M-1 | 15 | 0 |
 | M-2 | 7 | 0 |
 | I-3 | 4 | 0 |
-| **合計** | **36** | **0** |
+| **合計** | **36** | **1** |
