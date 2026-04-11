@@ -227,6 +227,67 @@
 
 ---
 
+## Phase C-E2E: ユーザースキーマ書き込み E2E テスト
+
+spec.md のユーザースキーマが実際に PostgreSQL に書き込まれることを確認する最終検証フェーズ。
+C-4（マイグレーション CLI）完了後に実施する。
+
+### C-E2E-A: テスト環境のセットアップ
+
+- [ ] `docker/docker-compose.test.yml` に `postgres:16` サービスを定義する（POSTGRES_PASSWORD=test / POSTGRES_DB=crucible_test / port 5432）
+- [ ] `packages/crucible/crucible.toml` にテスト用 DB 設定を記載する（host=localhost, port=5432, name=crucible_test, user=postgres, password=test）
+- [ ] `packages/crucible/migrations/001_create_users.sql` を spec.md の定義通りに作成する:
+  ```sql
+  -- +migrate Up
+  CREATE TABLE users (
+      id         SERIAL       PRIMARY KEY,
+      name       VARCHAR(255) NOT NULL,
+      email      VARCHAR(255) NOT NULL UNIQUE,
+      password   VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP    NOT NULL DEFAULT now(),
+      updated_at TIMESTAMP    NOT NULL DEFAULT now()
+  );
+
+  -- +migrate Down
+  DROP TABLE users;
+  ```
+- [ ] `docker compose -f docker/docker-compose.test.yml up -d` で PostgreSQL が起動することを確認する
+
+### C-E2E-B: マイグレーション実行と書き込み確認
+
+- [ ] `crucible migrate` を実行して `001_create_users.sql` が適用されることを確認する
+- [ ] `crucible migrate:status` で `001_create_users.sql` が `✅ applied` と表示されることを確認する
+- [ ] PostgreSQL に接続して `\dt` または `SELECT * FROM information_schema.tables WHERE table_name = 'users'` で `users` テーブルが存在することを確認する
+- [ ] `users` テーブルのカラム定義が spec と一致することを確認する（`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'users'`）
+
+### C-E2E-C: ロールバック確認
+
+- [ ] `crucible migrate:rollback` を実行して `users` テーブルが削除されることを確認する
+- [ ] `crucible migrate:status` で `001_create_users.sql` が `⬜ pending` に戻ることを確認する
+- [ ] 再度 `crucible migrate` を実行してテーブルが再作成されることを確認する
+
+### C-E2E-D: INSERT / SELECT による書き込み確認
+
+- [ ] ForgeScript コード (`packages/crucible/examples/insert_user.forge`) を作成する:
+  ```forge
+  use crucible.{ connect }
+
+  connect("postgres://postgres:test@localhost/crucible_test").await?
+  let user = User::insert(User {
+      name:     "Alice"
+      email:    "alice@example.com"
+      password: "hashed_pw"
+  }).await?
+  println("inserted: ${user.id}")
+
+  let found = User::find(user.id).await?
+  println("found: ${found.name}")
+  ```
+- [ ] `forge run packages/crucible/examples/insert_user.forge` が `inserted: 1` と `found: Alice` を出力することを確認する
+- [ ] PostgreSQL 上で `SELECT * FROM users` によりレコードが存在することを確認する
+
+---
+
 ## 進捗サマリ
 
 | Phase | タスク数 | 完了数 | 進捗 |
@@ -237,4 +298,5 @@
 | C-3 ORM 層 | 24 | 0 | 0% |
 | C-4 マイグレーション + CLI | 17 | 0 | 0% |
 | C-5 スキーマ + プール + TX | 14 | 0 | 0% |
-| **合計** | **106** | **0** | **0%** |
+| C-E2E ユーザースキーマ書き込み | 12 | 0 | 0% |
+| **合計** | **118** | **0** | **0%** |
