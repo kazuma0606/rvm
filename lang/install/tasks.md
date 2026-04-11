@@ -54,7 +54,7 @@
 
 ### I-2-C: Dockerfile 切り替え
 - [x] `docker/Dockerfile` に Phase I-2 切り替えコメントを記載
-- [ ] GitHub Releases 公開後に `install.sh` 方式に切り替えてスモークテスト再 PASS 確認（タグ切り後）
+- [x] GitHub Releases 公開後に `install.sh` 方式に切り替えてスモークテスト再 PASS 確認（v0.1.2 タグ: 7 passed, 0 failed）
 
 ---
 
@@ -136,8 +136,8 @@
 | Phase | タスク数 | 完了 |
 |---|---|---|
 | I-1 | 6 | 6 |
-| I-2 | 4 | 3 |
+| I-2 | 4 | 4 |
 | M-1 | 15 | 15 |
 | M-2 | 7 | 7 |
 | I-3 | 4 | 4 |
-| **合計** | **36** | **35** |
+| **合計** | **36** | **36** |

@@ -33,23 +33,27 @@ println("Hello, ForgeScript!")
 EOF
 check "hello world" "forge run /tmp/hello.fg" "Hello, ForgeScript!"
 
-# 3. forge build（初回はRust依存のコンパイルが発生するため最大5分）
+# 3. forge build（cargo が存在する場合のみ実行）
 cat > /tmp/build_test.fg <<'EOF'
 let x = 42
 println(x)
 EOF
-echo "  [INFO] forge build を実行中（初回は数分かかる場合があります）..."
-if timeout 300 forge build /tmp/build_test.fg -o /tmp/forge_out > /tmp/build_out.txt 2>&1; then
-    check "build" "/tmp/forge_out" "42"
-else
-    build_exit=$?
-    if [ "$build_exit" -eq 124 ]; then
-        echo "  [SKIP] build (timeout after 300s — cargo compile cache なし)"
+if command -v cargo > /dev/null 2>&1; then
+    echo "  [INFO] forge build を実行中（初回は数分かかる場合があります）..."
+    if timeout 300 forge build /tmp/build_test.fg -o /tmp/forge_out > /tmp/build_out.txt 2>&1; then
+        check "build" "/tmp/forge_out" "42"
     else
-        echo "  [FAIL] build (exit $build_exit)"
-        cat /tmp/build_out.txt | tail -5
-        FAIL=$((FAIL + 1))
+        build_exit=$?
+        if [ "$build_exit" -eq 124 ]; then
+            echo "  [SKIP] build (timeout after 300s — cargo compile cache なし)"
+        else
+            echo "  [FAIL] build (exit $build_exit)"
+            cat /tmp/build_out.txt | tail -5
+            FAIL=$((FAIL + 1))
+        fi
     fi
+else
+    echo "  [SKIP] build (cargo not installed — pre-built binary environment)"
 fi
 
 # 4. HTTP（インターネット到達可能時のみ）
