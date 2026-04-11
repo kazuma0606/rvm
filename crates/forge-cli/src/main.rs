@@ -97,6 +97,9 @@ fn main() {
         Some("repl") => {
             run_repl();
         }
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("forge {}", env!("CARGO_PKG_VERSION"));
+        }
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
         }
@@ -1258,6 +1261,7 @@ fn print_help() {
     println!("  forge build <file.forge>            単一ファイルからバイナリを生成");
     println!("  forge build <file.forge> -o myapp   出力バイナリ名を指定");
     println!("  forge repl                          対話型 REPL を起動");
+    println!("  forge version                       バージョンを表示");
     println!("  forge help                          このヘルプを表示");
 }
 
