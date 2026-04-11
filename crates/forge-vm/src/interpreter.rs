@@ -1001,6 +1001,11 @@ impl Interpreter {
 
                     self.loading_stack.pop();
                     result
+                } else if crate_name == "forge/http" {
+                    // forge/http は組み込み HTTP モジュールとして処理する
+                    self.register_http_module(symbols)
+                        .map_err(RuntimeError::Custom)?;
+                    Ok(Value::Unit)
                 } else {
                     // forge run では外部クレートのインポートをスキップ（警告なし）
                     // クレート名を DepsManager に記録して forge build 連携に備える
@@ -5097,6 +5102,542 @@ impl Interpreter {
             let _ = write_http_response(&stream, status, &headers, &body);
         }
     }
+
+    // ── forge/http モジュール ─────────────────────────────────────────────
+
+    /// `use forge/http.{ get, post, ... }` を処理して HTTP 関数をスコープに登録する
+    fn register_http_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
+        // 型レジストリに HttpRequest / HttpResponse がなければ初回登録
+        if !self.type_registry.structs.contains_key("HttpRequest") {
+            self.setup_http_types();
+        }
+
+        // 全 HTTP 関数: (名前, メソッド文字列)
+        let all: &[(&str, &str)] = &[
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("patch", "PATCH"),
+            ("delete", "DELETE"),
+        ];
+
+        for (fname, method_str) in all {
+            let should_bind = match symbols {
+                UseSymbols::All => true,
+                UseSymbols::Single(name, _) => name == fname,
+                UseSymbols::Multiple(pairs) => pairs.iter().any(|(n, _)| n == fname),
+            };
+            if !should_bind {
+                continue;
+            }
+            let bind_name = match symbols {
+                UseSymbols::Single(_, Some(alias)) => alias.clone(),
+                UseSymbols::Multiple(pairs) => pairs
+                    .iter()
+                    .find(|(n, _)| n == fname)
+                    .and_then(|(_, alias)| alias.clone())
+                    .unwrap_or_else(|| fname.to_string()),
+                _ => fname.to_string(),
+            };
+
+            let ms = method_str.to_string();
+            let func = Value::NativeFunction(NativeFn(Rc::new(move |args: Vec<Value>| {
+                let url = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => {
+                        return Err(format!("HTTP url must be string, got {}", v.type_name()))
+                    }
+                    None => return Err("HTTP function requires a URL argument".to_string()),
+                };
+                Ok(http_request_new(&ms, &url))
+            })));
+            self.define(&bind_name, func, false);
+        }
+        Ok(())
+    }
+
+    /// HttpRequest / HttpResponse の型レジストリ登録
+    fn setup_http_types(&mut self) {
+        // ── HttpRequest メソッド ──
+        let mut req_methods: HashMap<String, MethodImpl> = HashMap::new();
+
+        // .header(key, value) → new HttpRequest
+        req_methods.insert(
+            "header".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let key = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err("header key must be string".to_string()),
+                };
+                let val = if args.len() > 1 {
+                    match &args[1] {
+                        Value::String(s) => s.clone(),
+                        _ => return Err("header value must be string".to_string()),
+                    }
+                } else {
+                    return Err("header() requires (key, value)".to_string());
+                };
+                let mut fields = req_clone_map(&self_val)?;
+                let headers = map_vec_push(
+                    fields.get("headers"),
+                    (Value::String(key), Value::String(val)),
+                );
+                fields.insert("headers".to_string(), Value::Map(headers));
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .query(map) → new HttpRequest
+        req_methods.insert(
+            "query".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let params = match args.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => return Err("query() requires a map argument".to_string()),
+                };
+                let mut fields = req_clone_map(&self_val)?;
+                let existing = map_vec_from_field(fields.get("query"));
+                let mut combined = existing;
+                combined.extend(params);
+                fields.insert("query".to_string(), Value::Map(combined));
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .json(value) → new HttpRequest
+        req_methods.insert(
+            "json".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let body_val = args.into_iter().next().unwrap_or(Value::Unit);
+                let body_str = value_to_json_string(&body_val)?;
+                let mut fields = req_clone_map(&self_val)?;
+                fields.insert("body".to_string(), Value::String(body_str));
+                fields.insert(
+                    "content_type".to_string(),
+                    Value::String("application/json".to_string()),
+                );
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .form(map) → new HttpRequest
+        req_methods.insert(
+            "form".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let params = match args.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => return Err("form() requires a map argument".to_string()),
+                };
+                // URL-encode form
+                let body = params
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if let (Value::String(k), Value::String(v)) = (k, v) {
+                            Some(format!("{}={}", k, v))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&");
+                let mut fields = req_clone_map(&self_val)?;
+                fields.insert("body".to_string(), Value::String(body));
+                fields.insert(
+                    "content_type".to_string(),
+                    Value::String("application/x-www-form-urlencoded".to_string()),
+                );
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .timeout(ms) → new HttpRequest
+        req_methods.insert(
+            "timeout".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let ms = match args.first() {
+                    Some(Value::Int(n)) => *n,
+                    Some(Value::Float(f)) => *f as i64,
+                    _ => return Err("timeout() requires a number (milliseconds)".to_string()),
+                };
+                let mut fields = req_clone_map(&self_val)?;
+                fields.insert("timeout_ms".to_string(), Value::Int(ms));
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .retry(n) → new HttpRequest
+        req_methods.insert(
+            "retry".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let n = match args.first() {
+                    Some(Value::Int(n)) => *n,
+                    Some(Value::Float(f)) => *f as i64,
+                    _ => return Err("retry() requires a number".to_string()),
+                };
+                let mut fields = req_clone_map(&self_val)?;
+                fields.insert("retry_count".to_string(), Value::Int(n));
+                Ok(http_req_from_map(fields))
+            }))),
+        );
+
+        // .send() → Result<HttpResponse, String>
+        req_methods.insert(
+            "send".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let fields = req_clone_map(&self_val)?;
+
+                let method = match fields.get("method") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err("invalid HttpRequest: missing method".to_string()),
+                };
+                let base_url = match fields.get("url") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err("invalid HttpRequest: missing url".to_string()),
+                };
+                let timeout_ms = match fields.get("timeout_ms") {
+                    Some(Value::Int(n)) if *n > 0 => Some(*n as u64),
+                    _ => None,
+                };
+                let retry_count = match fields.get("retry_count") {
+                    Some(Value::Int(n)) => *n as u32,
+                    _ => 0,
+                };
+                let body = match fields.get("body") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let content_type = match fields.get("content_type") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+
+                // クエリパラメータ付き URL を構築
+                let url = if let Some(Value::Map(q)) = fields.get("query") {
+                    if q.is_empty() {
+                        base_url.clone()
+                    } else {
+                        let qs = q
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                if let (Value::String(k), Value::String(v)) = (k, v) {
+                                    Some(format!("{}={}", k, v))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("&");
+                        let sep = if base_url.contains('?') { '&' } else { '?' };
+                        format!("{}{}{}", base_url, sep, qs)
+                    }
+                } else {
+                    base_url.clone()
+                };
+
+                let max_attempts = retry_count + 1;
+                let mut last_err = String::new();
+
+                for attempt in 0..max_attempts {
+                    if attempt > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                    }
+
+                    match http_send_once(&method, &url, &fields, &body, &content_type, timeout_ms) {
+                        Ok(resp) => {
+                            // 5xx はリトライ対象
+                            if resp.status >= 500 && attempt + 1 < max_attempts {
+                                last_err = format!("server error: {}", resp.status);
+                                continue;
+                            }
+                            return Ok(Value::Result(Ok(Box::new(resp.into_value()))));
+                        }
+                        Err(e) => {
+                            last_err = e;
+                        }
+                    }
+                }
+
+                Ok(Value::Result(Err(last_err)))
+            }))),
+        );
+
+        self.type_registry.structs.insert(
+            "HttpRequest".to_string(),
+            StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: req_methods,
+                operators: HashMap::new(),
+            },
+        );
+
+        // ── HttpResponse メソッド ──
+        let mut resp_methods: HashMap<String, MethodImpl> = HashMap::new();
+
+        // .text() → Result<string, string>
+        resp_methods.insert(
+            "text".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                match self_val {
+                    Value::Struct { ref fields, .. } => {
+                        let body = fields
+                            .borrow()
+                            .get("body")
+                            .cloned()
+                            .unwrap_or(Value::String(String::new()));
+                        Ok(Value::Result(Ok(Box::new(body))))
+                    }
+                    _ => Err("text() called on non-HttpResponse".to_string()),
+                }
+            }))),
+        );
+
+        // .json() → Result<map, string>
+        resp_methods.insert(
+            "json".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                match self_val {
+                    Value::Struct { ref fields, .. } => {
+                        let body = match fields.borrow().get("body").cloned() {
+                            Some(Value::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let jv: serde_json::Value = serde_json::from_str(&body)
+                            .map_err(|e| format!("json parse error: {}", e))?;
+                        Ok(Value::Result(Ok(Box::new(json_to_value(jv)))))
+                    }
+                    _ => Err("json() called on non-HttpResponse".to_string()),
+                }
+            }))),
+        );
+
+        // .bytes() → Result<list<number>, string>
+        resp_methods.insert(
+            "bytes".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                match self_val {
+                    Value::Struct { ref fields, .. } => {
+                        let body = match fields.borrow().get("body").cloned() {
+                            Some(Value::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let bytes: Vec<Value> = body
+                            .into_bytes()
+                            .into_iter()
+                            .map(|b| Value::Int(b as i64))
+                            .collect();
+                        Ok(Value::Result(Ok(Box::new(Value::List(Rc::new(
+                            RefCell::new(bytes),
+                        ))))))
+                    }
+                    _ => Err("bytes() called on non-HttpResponse".to_string()),
+                }
+            }))),
+        );
+
+        self.type_registry.structs.insert(
+            "HttpResponse".to_string(),
+            StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: resp_methods,
+                operators: HashMap::new(),
+            },
+        );
+    }
+}
+
+/// forge/http: 新しい HttpRequest Value を生成する
+fn http_request_new(method: &str, url: &str) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("method".to_string(), Value::String(method.to_string()));
+    fields.insert("url".to_string(), Value::String(url.to_string()));
+    fields.insert("headers".to_string(), Value::Map(vec![]));
+    fields.insert("query".to_string(), Value::Map(vec![]));
+    fields.insert("body".to_string(), Value::String(String::new()));
+    fields.insert("content_type".to_string(), Value::String(String::new()));
+    fields.insert("timeout_ms".to_string(), Value::Int(0));
+    fields.insert("retry_count".to_string(), Value::Int(0));
+    Value::Struct {
+        type_name: "HttpRequest".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+/// HttpRequest struct の fields を HashMap にクローンして返す
+fn req_clone_map(val: &Value) -> Result<HashMap<String, Value>, String> {
+    match val {
+        Value::Struct { type_name, fields } if type_name == "HttpRequest" => {
+            Ok(fields.borrow().clone())
+        }
+        _ => Err(format!("expected HttpRequest, got {}", val.type_name())),
+    }
+}
+
+/// fields HashMap から HttpRequest Value を作る
+fn http_req_from_map(fields: HashMap<String, Value>) -> Value {
+    Value::Struct {
+        type_name: "HttpRequest".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+/// Value::Map(Vec) フィールドの末尾にエントリを追加して新しい Vec を返す
+fn map_vec_push(field: Option<&Value>, entry: (Value, Value)) -> Vec<(Value, Value)> {
+    let mut v = map_vec_from_field(field);
+    v.push(entry);
+    v
+}
+
+fn map_vec_from_field(field: Option<&Value>) -> Vec<(Value, Value)> {
+    match field {
+        Some(Value::Map(m)) => m.clone(),
+        _ => vec![],
+    }
+}
+
+/// Value を JSON 文字列にシリアライズする
+fn value_to_json_string(val: &Value) -> Result<String, String> {
+    fn to_json(v: &Value) -> Result<serde_json::Value, String> {
+        match v {
+            Value::Int(n) => Ok(serde_json::Value::Number((*n).into())),
+            Value::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| format!("float {} is not JSON representable", f)),
+            Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+            Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+            Value::Option(None) => Ok(serde_json::Value::Null),
+            Value::Option(Some(inner)) => to_json(inner),
+            Value::List(items) => {
+                let arr: Result<Vec<_>, _> = items.borrow().iter().map(to_json).collect();
+                Ok(serde_json::Value::Array(arr?))
+            }
+            Value::Map(pairs) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in pairs {
+                    if let Value::String(key) = k {
+                        obj.insert(key.clone(), to_json(v)?);
+                    }
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
+            Value::Struct { fields, .. } => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in fields.borrow().iter() {
+                    obj.insert(k.clone(), to_json(v)?);
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
+            _ => Ok(serde_json::Value::Null),
+        }
+    }
+    serde_json::to_string(&to_json(val)?).map_err(|e| e.to_string())
+}
+
+/// HTTP レスポンスの中間表現
+struct HttpRespData {
+    status: u16,
+    ok: bool,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl HttpRespData {
+    fn into_value(self) -> Value {
+        let header_pairs: Vec<(Value, Value)> = self
+            .headers
+            .into_iter()
+            .map(|(k, v)| (Value::String(k), Value::String(v)))
+            .collect();
+        let mut fields = HashMap::new();
+        fields.insert("status".to_string(), Value::Int(self.status as i64));
+        fields.insert("ok".to_string(), Value::Bool(self.ok));
+        fields.insert("headers".to_string(), Value::Map(header_pairs));
+        fields.insert("body".to_string(), Value::String(self.body));
+        Value::Struct {
+            type_name: "HttpResponse".to_string(),
+            fields: Rc::new(RefCell::new(fields)),
+        }
+    }
+}
+
+/// 1回分の HTTP リクエスト送信（reqwest::blocking 使用）
+fn http_send_once(
+    method: &str,
+    url: &str,
+    fields: &HashMap<String, Value>,
+    body: &str,
+    content_type: &str,
+    timeout_ms: Option<u64>,
+) -> Result<HttpRespData, String> {
+    let mut cb = reqwest::blocking::ClientBuilder::new();
+    if let Some(ms) = timeout_ms {
+        cb = cb.timeout(std::time::Duration::from_millis(ms));
+    }
+    let client = cb
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let req = match method {
+        "GET" => client.get(url),
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "PATCH" => client.patch(url),
+        "DELETE" => client.delete(url),
+        _ => return Err(format!("unknown HTTP method: {}", method)),
+    };
+
+    // ヘッダーを追加
+    let mut req = req;
+    if let Some(Value::Map(hdrs)) = fields.get("headers") {
+        for (k, v) in hdrs {
+            if let (Value::String(k), Value::String(v)) = (k, v) {
+                req = req.header(k.as_str(), v.as_str());
+            }
+        }
+    }
+
+    // Content-Type ヘッダー
+    if !content_type.is_empty() {
+        req = req.header("Content-Type", content_type);
+    }
+
+    // ボディ
+    let req = if !body.is_empty() {
+        req.body(body.to_string())
+    } else {
+        req
+    };
+
+    let resp = req
+        .send()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+    let status = resp.status().as_u16();
+    let ok = status >= 200 && status < 300;
+    let mut headers = vec![];
+    for (k, v) in resp.headers() {
+        if let Ok(val) = v.to_str() {
+            headers.push((k.as_str().to_string(), val.to_string()));
+        }
+    }
+    let body_text = resp.text().unwrap_or_default();
+
+    Ok(HttpRespData {
+        status,
+        ok,
+        headers,
+        body: body_text,
+    })
 }
 
 /// HTTP リクエストを std::net::TcpStream からパースする（同期版）
@@ -7606,5 +8147,53 @@ test "should be skipped" {
             result.is_ok(),
             "eval should succeed when skipping test blocks"
         );
+    }
+
+    #[test]
+    fn test_http_get_via_interpreter() {
+        use mockito::Server;
+        let mut server = Server::new();
+        let mock = server
+            .mock("GET", "/hello")
+            .with_status(200)
+            .with_header("content-type", "text/plain")
+            .with_body("world")
+            .create();
+
+        let base_url = server.url();
+        let src = format!(
+            r#"
+use forge/http.{{ get }}
+let res = get("{}/hello").send()
+res
+"#,
+            base_url
+        );
+
+        let module = parse_source(&src).expect("parse failed");
+        let mut interp = Interpreter::new();
+        let result = interp.eval(&module).expect("eval failed");
+
+        // .send() returns Value::Result(Ok(HttpResponse struct))
+        match result {
+            Value::Result(Ok(resp_box)) => {
+                let resp = *resp_box;
+                match resp {
+                    Value::Struct { ref fields, .. } => {
+                        let f = fields.borrow();
+                        assert_eq!(
+                            f.get("status"),
+                            Some(&Value::Int(200)),
+                            "status should be 200"
+                        );
+                        assert_eq!(f.get("ok"), Some(&Value::Bool(true)), "ok should be true");
+                    }
+                    other => panic!("expected Struct, got {:?}", other),
+                }
+            }
+            other => panic!("expected Result(Ok(_)), got {:?}", other),
+        }
+
+        mock.assert();
     }
 }

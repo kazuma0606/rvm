@@ -9,6 +9,7 @@ pub mod config;
 pub mod env;
 pub mod event;
 pub mod fs;
+pub mod http;
 pub mod io;
 pub mod json;
 pub mod log;

@@ -32,6 +32,8 @@ pub struct CodeGenerator {
     typestate_state_names: HashMap<String, HashSet<String>>,
     fn_cleanup: HashMap<String, String>,
     pipeline_counter: usize,
+    /// `use forge/http` が宣言されているかどうか
+    http_imported: bool,
 }
 
 #[derive(Clone, Default)]
@@ -71,6 +73,7 @@ impl CodeGenerator {
             typestate_state_names: HashMap::new(),
             fn_cleanup: HashMap::new(),
             pipeline_counter: 0,
+            http_imported: false,
         }
     }
 
@@ -651,6 +654,7 @@ impl CodeGenerator {
         self.fn_cleanup.clear();
         self.defer_counter = 0;
         self.pipeline_counter = 0;
+        self.analyze_http(module);
         self.analyze_async(module)?;
         self.analyze_typestates(module)?;
         self.analyze_generic_types(module);
@@ -774,6 +778,19 @@ impl CodeGenerator {
 
     fn indent_str(&self) -> String {
         "    ".repeat(self.indent)
+    }
+
+    /// `use forge/http` が宣言されているかどうかを検出する
+    fn analyze_http(&mut self, module: &Module) {
+        self.http_imported = module.stmts.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::UseDecl {
+                    path: UsePath::External(p),
+                    ..
+                } if p == "forge/http"
+            )
+        });
     }
 
     fn analyze_async(&mut self, module: &Module) -> Result<(), TranspileError> {
@@ -1578,7 +1595,23 @@ impl CodeGenerator {
                 self.expr_contains_await(callee)
                     || args.iter().any(|arg| self.expr_contains_await(arg))
             }
-            Expr::MethodCall { object, args, .. } => {
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                // forge/http の .send() / .text() / .json() / .bytes() は async
+                if self.http_imported
+                    && matches!(method.as_str(), "send" | "text" | "bytes")
+                    && args.is_empty()
+                {
+                    return true;
+                }
+                // .json() 引数なし = レスポンスから JSON を取得 → async
+                if self.http_imported && method == "json" && args.is_empty() {
+                    return true;
+                }
                 self.expr_contains_await(object)
                     || args.iter().any(|arg| self.expr_contains_await(arg))
             }
@@ -3432,6 +3465,13 @@ impl CodeGenerator {
     }
 
     fn gen_use_decl(&mut self, path: &UsePath, symbols: &UseSymbols, is_pub: bool) -> String {
+        // forge/http → reqwest に変換
+        if let UsePath::External(p) = path {
+            if p == "forge/http" {
+                return format!("{}use reqwest;\n", Self::vis(is_pub));
+            }
+        }
+
         let prefix = Self::vis(is_pub);
         let base = match path {
             UsePath::Local(path) => format!("crate::{}", path.replace('/', "::")),
@@ -4120,6 +4160,22 @@ impl CodeGenerator {
         let arg_strs: Vec<String> = args.iter().map(|arg| self.gen_expr(arg, false)).collect();
 
         if let Expr::Ident(name, _) = callee {
+            // forge/http コンストラクタ → reqwest::Client::new().METHOD(url)
+            if self.http_imported {
+                let method = match name.as_str() {
+                    "get" => Some("get"),
+                    "post" => Some("post"),
+                    "put" => Some("put"),
+                    "patch" => Some("patch"),
+                    "delete" => Some("delete"),
+                    _ => None,
+                };
+                if let Some(m) = method {
+                    let url = arg_strs.first().cloned().unwrap_or_default();
+                    return format!("reqwest::Client::new().{}({})", m, url);
+                }
+            }
+
             if let Some(rendered) = try_builtin_call(name, &arg_strs) {
                 return rendered;
             }
@@ -4165,6 +4221,58 @@ impl CodeGenerator {
                     return format!("Response::<()>::empty({})", args.join(", "));
                 }
                 return format!("{}::{}({})", type_name, rust_method, args.join(", "));
+            }
+        }
+
+        // ── forge/http メソッド変換 ──
+        if self.http_imported {
+            let obj_str = self.gen_expr(object, false);
+            let args: Vec<String> = args.iter().map(|a| self.gen_expr(a, false)).collect();
+            match method {
+                // .send() → .send().await
+                "send" if args.is_empty() => {
+                    return format!("{}.send().await", obj_str);
+                }
+                // .query(map) → .query(&map)
+                "query" if args.len() == 1 => {
+                    return format!("{}.query(&{})", obj_str, args[0]);
+                }
+                // .json(v) (RequestBuilder) → .json(&v)
+                "json" if args.len() == 1 => {
+                    return format!("{}.json(&{})", obj_str, args[0]);
+                }
+                // .json() (Response) → .json::<serde_json::Value>().await
+                "json" if args.is_empty() => {
+                    return format!("{}.json::<serde_json::Value>().await", obj_str);
+                }
+                // .form(map) → .form(&map)
+                "form" if args.len() == 1 => {
+                    return format!("{}.form(&{})", obj_str, args[0]);
+                }
+                // .text() → .text().await
+                "text" if args.is_empty() => {
+                    return format!("{}.text().await", obj_str);
+                }
+                // .bytes() → .bytes().await
+                "bytes" if args.is_empty() => {
+                    return format!("{}.bytes().await", obj_str);
+                }
+                // .header(k, v) → .header(k, v)  (同じ形式)
+                "header" if args.len() == 2 => {
+                    return format!("{}.header({}, {})", obj_str, args[0], args[1]);
+                }
+                // .timeout(ms) → .timeout(std::time::Duration::from_millis(ms))
+                "timeout" if args.len() == 1 => {
+                    return format!(
+                        "{}.timeout(std::time::Duration::from_millis({}))",
+                        obj_str, args[0]
+                    );
+                }
+                // .retry(n) → (reqwest に組み込みリトライなし: コメントとして残す)
+                "retry" => {
+                    return format!("{} /* .retry({}) */", obj_str, args.join(", "));
+                }
+                _ => {}
             }
         }
 

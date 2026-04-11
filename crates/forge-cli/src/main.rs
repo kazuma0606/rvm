@@ -1179,6 +1179,9 @@ fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Re
     if crates.contains("scopeguard") && !content.contains("\nscopeguard = ") {
         extra_lines.push("scopeguard = \"1\"".to_string());
     }
+    if crates.contains("reqwest") && !content.contains("\nreqwest = ") {
+        extra_lines.push("reqwest = { version = \"0.12\", features = [\"json\"] }".to_string());
+    }
 
     let mut others = crates
         .iter()
