@@ -45,9 +45,10 @@ pub fn stop() -> Result<(), String> {
     let pid = read_pid().ok_or_else(|| "forge-mcp は起動していません".to_string())?;
 
     if !is_running(pid) {
-        // PID ファイルが残っているが プロセスは存在しない
+        // PID ファイルが残っているがプロセスは既に終了済み — クリーンアップして正常終了
         let _ = fs::remove_file(pid_file());
-        return Err("forge-mcp は起動していません（PID ファイルを削除しました）".to_string());
+        println!("forge-mcp を停止しました (pid {} — 既に終了済み)", pid);
+        return Ok(());
     }
 
     kill_process(pid)?;
