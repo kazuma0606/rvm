@@ -653,13 +653,7 @@ fn build_generated_project(
     };
 
     let status = Command::new("cargo")
-        .args([
-            "build",
-            "--offline",
-            "--release",
-            "--manifest-path",
-            &manifest_path,
-        ])
+        .args(["build", "--release", "--manifest-path", &manifest_path])
         .status();
 
     match status {

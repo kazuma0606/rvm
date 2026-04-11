@@ -5356,7 +5356,7 @@ impl Interpreter {
                                 last_err = format!("server error: {}", resp.status);
                                 continue;
                             }
-                            return Ok(Value::Result(Ok(Box::new(resp.into_value()))));
+                            return Ok(resp.into_value());
                         }
                         Err(e) => {
                             last_err = e;
@@ -5364,7 +5364,7 @@ impl Interpreter {
                     }
                 }
 
-                Ok(Value::Result(Err(last_err)))
+                Err(RuntimeError::Custom(last_err).to_string())
             }))),
         );
 
@@ -8174,24 +8174,18 @@ res
         let mut interp = Interpreter::new();
         let result = interp.eval(&module).expect("eval failed");
 
-        // .send() returns Value::Result(Ok(HttpResponse struct))
+        // .send() returns HttpResponse struct directly (errors become RuntimeError)
         match result {
-            Value::Result(Ok(resp_box)) => {
-                let resp = *resp_box;
-                match resp {
-                    Value::Struct { ref fields, .. } => {
-                        let f = fields.borrow();
-                        assert_eq!(
-                            f.get("status"),
-                            Some(&Value::Int(200)),
-                            "status should be 200"
-                        );
-                        assert_eq!(f.get("ok"), Some(&Value::Bool(true)), "ok should be true");
-                    }
-                    other => panic!("expected Struct, got {:?}", other),
-                }
+            Value::Struct { ref fields, .. } => {
+                let f = fields.borrow();
+                assert_eq!(
+                    f.get("status"),
+                    Some(&Value::Int(200)),
+                    "status should be 200"
+                );
+                assert_eq!(f.get("ok"), Some(&Value::Bool(true)), "ok should be true");
             }
-            other => panic!("expected Result(Ok(_)), got {:?}", other),
+            other => panic!("expected Struct, got {:?}", other),
         }
 
         mock.assert();
