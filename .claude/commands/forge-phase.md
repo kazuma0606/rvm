@@ -1,29 +1,45 @@
 ---
 name: forge-phase
-description: 引数で指定したPhaseの全タスクを順番に実装する。例: /forge-phase 0 でPhase 0を全て実装する。
+description: 引数で指定したエリアの全タスクを順番に実装する。例: /forge-phase lang/syntax でsyntaxタスクを全て実装する。
 ---
 
-forge/tasks.md と forge/plan.md を読んで、**Phase $ARGUMENTS** の全タスクを実装してください。
+`$ARGUMENTS` で指定されたエリアの全タスクを実装してください。
 
 ## 手順
 
-1. `forge/tasks.md` から `## Phase $ARGUMENTS` セクションの全 `[ ]` タスクを抽出する
-2. `forge/plan.md` で Phase $ARGUMENTS の実装計画を確認する
-3. `forge/spec_v0.0.1.md` で該当する仕様を確認する
-4. 依存関係順に実装する（例: トークン定義 → Lexer → テスト）
-5. 各タスク実装後に `cargo test` を実行して確認する
-6. 全タスク完了後に `forge/tasks.md` を一括更新する
-7. 最終的に `/forge-status` 相当の報告を行う
+### 1. タスクファイルを特定する
 
-## フェーズ別の実装順序の目安
+引数の形式に応じて対象ファイルを特定する:
+- `lang/syntax` → `lang/syntax/tasks.md`
+- `lang/tests` → `lang/tests/tasks.md`
+- `lang/transpiler` → `lang/transpiler/tasks.md`
+- `packages/anvil` → `packages/anvil/tasks.md`
+- `lang/packages/forge-time` → `lang/packages/forge-time/tasks.md`
+- 数字のみ（例: `0`）→ 後方互換として `lang/v0.1.0/tasks.md` の Phase 0 セクション
 
-- Phase 0: ディレクトリ・Cargo.toml → テスト基盤
-- Phase 1: tokens.rs → ast/mod.rs → parser/mod.rs → テスト
-- Phase 2: value.rs → interpreter/mod.rs → stdlib → forge-cli
-- Phase 3: collections/ の各メソッド → テスト
-- Phase 4: typechecker/types.rs → 型推論 → forge check コマンド
+### 2. コンテキストを読む
 
-## 重要なルール
+- 対象 `tasks.md` を全文読む
+- 同ディレクトリの `spec.md` / `plan.md` を読む（存在する場合）
+- `dev/design-v3.md` で設計方針を確認する
+
+### 3. 依存関係順に実装する
+
+- 未完了 `[ ]` タスクを上から順に処理する
+- 各タスクの実装後、`cargo test` を実行して確認する
+- 失敗したら修正してから次へ進む
+
+### 4. 一括更新する
+
+全タスク完了後、`tasks.md` の `[ ]` を `[x]` に一括更新する。
+進捗サマリーテーブルも更新する。
+
+### 5. 完了レポートを出力する
+
+- 完了タスク数 / 総タスク数
+- `cargo test --workspace` の結果サマリー
+
+## 絶対に守ること
 
 - `Value::Nil` は使わない（`Value::Unit`）
 - `unwrap()` は使わない
