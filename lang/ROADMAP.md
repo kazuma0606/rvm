@@ -193,7 +193,7 @@
 
 | パッケージ | 概要 | 仕様 |
 |---|---|---|
-| **`forge/http`** | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 | `lang/packages/http/spec.md`（📐 plan + tasks 作成済み）|
+| **`forge/http`** | HTTP クライアント（reqwest ラッパー）。get / post / put / delete + Response 型 | `lang/packages/http/spec.md`（✅ 実装完了・43タスク）|
 | `forge-time` | `now()` / `format_date` / `parse_date` / `duration` | `lang/packages/forge-time/spec.md` |
 | `forge-crypto` | `hash_sha256` / `hmac_sha256` / `base64_*` / `bcrypt_*` | `lang/packages/forge-crypto/spec.md` |
 | **`crucible`** | ForgeScript-native PostgreSQL ドライバ。wire protocol を ForgeScript で実装。sqlx 不要 | `packages/crucible/spec.md`（設計中）|
@@ -207,7 +207,6 @@
 
 | パッケージ | 仕様 | 概要 |
 |---|---|---|
-| **`forge/http`** | `lang/packages/http/spec.md` / `plan.md` / `tasks.md` | HTTP クライアント（reqwest ラッパー）43タスク |
 | forge-grpc | `packages/forge-grpc/spec.md`（未作成） | gRPC サービス定義 DSL（tonic ラッパー） |
 | forge-graphql | `packages/forge-graphql/spec.md`（未作成） | GraphQL スキーマ DSL（async-graphql ラッパー） |
 
