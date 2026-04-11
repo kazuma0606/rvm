@@ -14,13 +14,15 @@ RUN apt-get update -qq && \
         libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Rust インストール（非対話モード・stable）
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --no-modify-path
-
 # forge インストール
-# バイナリ名は forge-new のため forge としてシンボリックリンクを作成
-RUN cargo install --git https://github.com/kazuma0606/rvm.git --bin forge-new --locked && \
+# Phase I-2 (GitHub Releases 公開後):
+#   RUN curl -sSf https://raw.githubusercontent.com/kazuma0606/rvm/master/install.sh | sh
+#   → build-essential / Rust 不要になる
+#
+# Phase I-1 (現在): ソースからビルド
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --no-modify-path && \
+    cargo install --git https://github.com/kazuma0606/rvm.git --bin forge-new --locked && \
     ln -s /root/.cargo/bin/forge-new /usr/local/bin/forge
 
 WORKDIR /workspace

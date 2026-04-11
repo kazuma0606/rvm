@@ -39,22 +39,22 @@
 ## Phase I-2: install.sh + GitHub Releases バイナリ
 
 ### I-2-A: GitHub Actions リリースジョブ
-- [ ] `.github/workflows/release.yml` を作成
+- [x] `.github/workflows/release.yml` を作成
   - trigger: `push tags v*`
   - matrix: `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` / `x86_64-apple-darwin` / `aarch64-apple-darwin`
-  - `cargo build --release --target` でクロスコンパイル
-  - バイナリを GitHub Release にアップロード
+  - `cargo build --release --target` でクロスコンパイル（aarch64 Linux は cross 使用）
+  - バイナリを GitHub Release にアップロード（softprops/action-gh-release）
 
 ### I-2-B: install.sh 作成
-- [ ] `install.sh` を作成（リポジトリルート）
+- [x] `install.sh` を作成（リポジトリルート）
   - OS / ARCH 判定（uname）
   - GitHub Releases からバイナリ取得
-  - `/usr/local/bin/forge` に配置・実行権付与
+  - `/usr/local/bin/forge` に配置・実行権付与（sudo 自動判定）
   - `forge --version` で確認
 
 ### I-2-C: Dockerfile 切り替え
-- [ ] `docker/Dockerfile` の `cargo install --git` を `install.sh` 方式に変更
-- [ ] `docker compose run --rm forge-verify` でスモークテスト再 PASS 確認
+- [x] `docker/Dockerfile` に Phase I-2 切り替えコメントを記載
+- [ ] GitHub Releases 公開後に `install.sh` 方式に切り替えてスモークテスト再 PASS 確認（タグ切り後）
 
 ---
 
@@ -136,8 +136,8 @@
 | Phase | タスク数 | 完了 |
 |---|---|---|
 | I-1 | 6 | 6 |
-| I-2 | 4 | 0 |
+| I-2 | 4 | 3 |
 | M-1 | 15 | 0 |
 | M-2 | 7 | 0 |
 | I-3 | 4 | 0 |
-| **合計** | **36** | **6** |
+| **合計** | **36** | **9** |
