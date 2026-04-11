@@ -1,6 +1,6 @@
 # Rust
 /target/
-Cargo.lock
+# Cargo.lock はバイナリクレート (forge-cli) があるためコミットする
 **/*.rs.bk
 *.pdb
 
