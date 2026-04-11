@@ -17,7 +17,7 @@
   - `forge-new` → `forge` シンボリックリンク作成（`/usr/local/bin/forge`）
 
 ### I-1-B: docker-compose.yml 作成
-- [ ] `docker/docker-compose.yml` を作成
+- [x] `docker/docker-compose.yml` を作成
   - service: `forge-verify`
   - `smoke_test.sh` を read-only volume でマウント
   - `command: bash /workspace/smoke_test.sh`
@@ -135,9 +135,9 @@
 
 | Phase | タスク数 | 完了 |
 |---|---|---|
-| I-1 | 6 | 1 |
+| I-1 | 6 | 2 |
 | I-2 | 4 | 0 |
 | M-1 | 15 | 0 |
 | M-2 | 7 | 0 |
 | I-3 | 4 | 0 |
-| **合計** | **36** | **1** |
+| **合計** | **36** | **2** |

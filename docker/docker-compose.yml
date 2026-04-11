@@ -1,0 +1,8 @@
+services:
+  forge-verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./smoke_test.sh:/workspace/smoke_test.sh:ro
+    command: bash /workspace/smoke_test.sh
