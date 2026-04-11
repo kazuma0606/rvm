@@ -23,7 +23,7 @@
   - `command: bash /workspace/smoke_test.sh`
 
 ### I-1-C: smoke_test.sh 作成
-- [ ] `docker/smoke_test.sh` を作成
+- [x] `docker/smoke_test.sh` を作成
   - `forge --version` — exit 0・"forge" 文字列を含む
   - `forge run /tmp/hello.fg` — "Hello, ForgeScript!" を出力
   - `forge build /tmp/build_test.fg -o /tmp/out && /tmp/out` — "42" を出力
@@ -135,9 +135,9 @@
 
 | Phase | タスク数 | 完了 |
 |---|---|---|
-| I-1 | 6 | 2 |
+| I-1 | 6 | 3 |
 | I-2 | 4 | 0 |
 | M-1 | 15 | 0 |
 | M-2 | 7 | 0 |
 | I-3 | 4 | 0 |
-| **合計** | **36** | **2** |
+| **合計** | **36** | **3** |
