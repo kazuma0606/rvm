@@ -1,105 +1,137 @@
-# forge インストール仕様
+# forge インストール・MCP サーバ仕様
 
-> ROADMAP [11] DX強化 — Linux インストール対応
+> ROADMAP [11] Linux インストール対応 / [15] forge-mcp（MCP サーバ）
 
 ---
 
 ## 概要
 
-ForgeScript を Linux 環境にインストールし動作確認するための仕様。
-Vagrant による最小構成の仮想サーバを使い、Rust のインストールから
-`forge` コマンドの動作確認まで一貫して検証する。
+1. **Docker 検証環境**（Phase I-1）: Linux クリーン環境で Rust + forge のインストールをローカルで検証する
+2. **install.sh + GitHub Releases**（Phase I-2）: ビルド不要の 1 行インストール
+3. **forge-mcp 実装**（Phase M-1〜M-2）: `forge mcp` サブコマンド群。`forge` バイナリに同梱。Windows / Linux 両対応
 
 ---
 
-## Phase I-1: Vagrant 検証環境
+## Phase I-1: Docker 検証環境
 
 ### 目的
 
-- Windows ホストから Linux 環境を即座に再現・破棄できる
-- CI 相当の「クリーンな Linux」で forge のインストールを検証する
-- 将来の `install.sh` / GitHub Releases バイナリのテスト基盤にする
+- Windows / Linux どちらのホストでも同じ手順で検証できる
+- VirtualBox 不要（Docker Desktop のみ）
+- レイヤーキャッシュで 2 回目以降は高速
+- 将来 CI（GitHub Actions）にそのまま流用できる
 
-### Vagrant VM 最小スペック
+### Dockerfile
 
-| 項目 | 値 | 備考 |
-|---|---|---|
-| Box | `ubuntu/jammy64` | Ubuntu 22.04 LTS |
-| CPU | 1 vCPU | |
-| Memory | 2048 MB | Rust コンパイルに必要な最低ライン |
-| Disk | デフォルト（20 GB） | |
-| ネットワーク | NAT（デフォルト） | `vagrant ssh` で接続 |
-| GUI | なし | headless |
-| Synced folder | 無効（`disabled: true`） | 検証は VM 内で完結 |
+```dockerfile
+# docker/Dockerfile
+FROM ubuntu:22.04
 
-### Vagrantfile
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-```ruby
-Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/jammy64"
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    curl ca-certificates build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-  config.vm.provider "virtualbox" do |vb|
-    vb.name   = "forge-verify"
-    vb.cpus   = 1
-    vb.memory = 2048
-    vb.gui    = false
-  end
+# Rust インストール（non-interactive）
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --no-modify-path
 
-  # synced folder 無効（プロジェクトファイルは VM 内に持ち込まない）
-  config.vm.synced_folder ".", "/vagrant", disabled: true
+# forge インストール（cargo install --git）
+# Phase I-2 で install.sh + リリースバイナリに切り替え
+RUN cargo install --git https://github.com/<owner>/rvm --bin forge --locked
 
-  config.vm.provision "shell", path: "provision.sh"
-end
+WORKDIR /workspace
+CMD ["bash"]
 ```
 
-### provision.sh（プロビジョニングスクリプト）
+### docker-compose.yml
 
-VM 初回起動時に自動実行。
+```yaml
+# docker/docker-compose.yml
+services:
+  forge-verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./smoke_test.sh:/workspace/smoke_test.sh:ro
+    command: bash /workspace/smoke_test.sh
+```
+
+### smoke_test.sh
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- パッケージ更新 ---
-apt-get update -qq
+PASS=0; FAIL=0
 
-# --- Rust インストール（rustup） ---
-# 非対話モードで stable toolchain をインストール
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y --default-toolchain stable --no-modify-path
+check() {
+    local name="$1"; local cmd="$2"; local expect="$3"
+    actual=$(eval "$cmd" 2>&1) || true
+    if echo "$actual" | grep -q "$expect"; then
+        echo "  [PASS] $name"; PASS=$((PASS+1))
+    else
+        echo "  [FAIL] $name (expected: '$expect', got: '$actual')"; FAIL=$((FAIL+1))
+    fi
+}
 
-# PATH を通す（このスクリプト内 + vagrant ユーザー用）
-export PATH="$HOME/.cargo/bin:$PATH"
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /home/vagrant/.bashrc
+echo "=== forge smoke test ==="
 
-# Rust バージョン確認
-rustc --version
-cargo --version
+# 1. バージョン確認
+check "version" "forge --version" "forge"
 
-# --- forge インストール ---
-# TODO: Phase I-2 で GitHub Releases バイナリに切り替え
-# 現状は cargo install --git でビルドインストール
-cargo install --git https://github.com/<owner>/rvm --bin forge --locked
+# 2. Hello World
+cat > /tmp/hello.fg <<'EOF'
+fn main() { println("Hello, ForgeScript!") }
+EOF
+check "hello world" "forge run /tmp/hello.fg" "Hello, ForgeScript!"
 
-# forge バージョン確認
-forge --version
+# 3. forge build
+cat > /tmp/build_test.fg <<'EOF'
+fn main() { let x = 42; println(x) }
+EOF
+forge build /tmp/build_test.fg -o /tmp/forge_out 2>/dev/null
+check "build" "/tmp/forge_out" "42"
+
+# 4. HTTP（httpbin.org が到達可能な場合のみ）
+if curl -sf --max-time 3 https://httpbin.org/get > /dev/null 2>&1; then
+    cat > /tmp/http_test.fg <<'EOF'
+use forge/http.{ get }
+fn main() {
+    let res = get("https://httpbin.org/get").send()
+    println(res.status)
+    println(res.ok)
+}
+EOF
+    check "http get" "forge run /tmp/http_test.fg" "200"
+else
+    echo "  [SKIP] http get (no internet)"
+fi
+
+echo ""
+echo "=== result: ${PASS} passed, ${FAIL} failed ==="
+[ "$FAIL" -eq 0 ]
 ```
 
-> **注意**: `cargo install --git` は初回ビルドに 5〜10 分かかる。
-> Phase I-2 でプリビルドバイナリ配布に切り替えることで解消する。
+### 実行方法
+
+```bash
+# ビルド＆スモークテスト
+cd docker
+docker compose run --rm forge-verify
+
+# 対話シェル
+docker compose run --rm forge-verify bash
+```
 
 ---
 
-## Phase I-2: インストール方式
+## Phase I-2: install.sh + GitHub Releases バイナリ
 
-### フェーズ別インストール方式
-
-| フェーズ | 方式 | 状態 |
-|---|---|---|
-| I-1（現在） | `cargo install --git` | ソースからビルド。検証用 |
-| I-2 | `install.sh` + GitHub Releases バイナリ | ビルド不要。本番向け |
-
-### install.sh（I-2 向け設計）
+### install.sh
 
 ```bash
 #!/usr/bin/env bash
@@ -108,22 +140,20 @@ forge --version
 set -euo pipefail
 
 VERSION="${FORGE_VERSION:-latest}"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # linux / darwin
-ARCH="$(uname -m)"                               # x86_64 / aarch64
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
 
-# GitHub Releases から対応バイナリを取得
-BASE_URL="https://github.com/<owner>/rvm/releases/download/${VERSION}"
+BASE="https://github.com/<owner>/rvm/releases/download/${VERSION}"
 BINARY="forge-${OS}-${ARCH}"
 
-curl -sSfL "${BASE_URL}/${BINARY}" -o /tmp/forge
+curl -sSfL "${BASE}/${BINARY}" -o /tmp/forge
 chmod +x /tmp/forge
 mv /tmp/forge /usr/local/bin/forge
-
 forge --version
-echo "ForgeScript installed successfully."
+echo "ForgeScript installed."
 ```
 
-対応プラットフォーム（リリースバイナリ）：
+### 対応プラットフォーム
 
 | OS | アーキテクチャ | バイナリ名 |
 |---|---|---|
@@ -132,88 +162,181 @@ echo "ForgeScript installed successfully."
 | macOS | x86_64 | `forge-darwin-x86_64` |
 | macOS | arm64 | `forge-darwin-aarch64` |
 
-> Windows は MSI インストーラまたは `winget` を別途検討。
+> Windows は MSI / winget を別途検討。
+
+### GitHub Actions（クロスコンパイル）
+
+```yaml
+# .github/workflows/release.yml（概略）
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest; target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest; target: aarch64-unknown-linux-gnu
+          - os: macos-latest;  target: x86_64-apple-darwin
+          - os: macos-latest;  target: aarch64-apple-darwin
+    steps:
+      - cargo build --release --target ${{ matrix.target }}
+      - upload-artifact → GitHub Release
+```
 
 ---
 
-## Phase I-3: 動作確認（スモークテスト）
+## Phase M-1: forge-mcp 実装
 
-プロビジョニング完了後または手動で実行。
+### 概要
 
-### テスト手順
+`forge mcp` は `forge` バイナリのサブコマンドとして実装し、インストール時に一緒に使えるようになる。**別パッケージ・別インストール不要**。
 
-#### 1. バージョン確認
+### 2 つの動作モード
 
-```bash
-forge --version
-# 期待出力例: forge 0.1.0
+| モード | コマンド | 用途 |
+|---|---|---|
+| stdio | `forge mcp` | Claude Code が直接 spawn。JSON-RPC over stdin/stdout |
+| daemon | `forge mcp start` | バックグラウンド常駐。HTTP/SSE で接続 |
+
+### Claude Code 設定例
+
+```json
+// stdio モード（シンプル）
+{ "command": "forge", "args": ["mcp"] }
+
+// daemon モード（ログ・状態管理付き）
+{ "command": "forge", "args": ["mcp", "connect"] }
 ```
 
-#### 2. Hello World（`forge run`）
+### MCP ツール一覧
 
-```bash
-cat <<'EOF' > /tmp/hello.fg
-fn main() {
-    println("Hello, ForgeScript!")
+| ツール | 引数 | 概要 |
+|---|---|---|
+| `parse_file` | `path: string` | ForgeScript ファイルを AST にパース。構文エラーを返す |
+| `type_check` | `path: string` | 型エラー・未使用変数を報告 |
+| `run_snippet` | `code: string` | コードスニペットをインタープリタで実行し結果を返す |
+| `search_symbol` | `name: string, kind?: string` | 関数・型の定義を探す |
+| `get_spec_section` | `section: string` | 仕様書の該当セクションを返す |
+
+### 管理コマンド
+
+```
+forge mcp             # stdio モードで起動（Claude Code 用）
+forge mcp start       # デーモン起動
+forge mcp stop        # デーモン停止
+forge mcp restart     # stop → start
+forge mcp status      # 生死・統計表示
+forge mcp connect     # 起動中デーモンへ接続（MCP クライアント向け）
+forge mcp logs        # ログ表示
+forge mcp logs -f     # tail -f 相当
+forge mcp logs --errors   # エラーのみ
+forge mcp logs --clear    # ログ削除
+```
+
+### Rust モジュール構成
+
+```
+crates/forge-mcp/
+  src/
+    lib.rs            # pub fn run_stdio() / pub fn run_daemon()
+    server.rs         # MCP JSON-RPC ハンドラ
+    tools/
+      mod.rs
+      parse_file.rs
+      type_check.rs
+      run_snippet.rs
+      search_symbol.rs
+      get_spec_section.rs
+    daemon.rs         # start/stop/restart/status
+    log.rs            # JSON Lines ロギング・ローリング
+    state.rs          # McpSessionState（揮発・メモリ内）
+```
+
+`forge-cli` の `main.rs` から呼び出す：
+
+```rust
+match subcommand {
+    "mcp" => forge_mcp::run_stdio(),
+    "mcp" if args.contains("start") => forge_mcp::daemon::start(),
+    "mcp" if args.contains("stop")  => forge_mcp::daemon::stop(),
+    // ...
 }
-EOF
-
-forge run /tmp/hello.fg
-# 期待出力: Hello, ForgeScript!
 ```
 
-#### 3. HTTP リクエスト（`forge run` + `forge/http`）
+---
 
-```bash
-cat <<'EOF' > /tmp/http_test.fg
-use forge/http.{ get }
+## Phase M-2: ログ・状態管理
 
-fn main() {
-    let res = get("https://httpbin.org/get").send()
-    println(res.status)
-    println(res.ok)
-}
-EOF
+### ファイル構成
 
-forge run /tmp/http_test.fg
-# 期待出力:
-# 200
-# true
+```
+~/.forge/mcp/
+  forge-mcp.pid       # 実行中 PID（daemon モード）
+  forge-mcp.log       # ローリングログ（JSON Lines）
+  forge-mcp.log.1     # ローテート済み（最大 3 世代）
 ```
 
-#### 4. ビルド確認（`forge build`）
+### ログエントリ形式（JSON Lines）
 
-```bash
-cat <<'EOF' > /tmp/build_test.fg
-fn main() {
-    let x = 42
-    println(x)
-}
-EOF
-
-forge build /tmp/build_test.fg -o /tmp/build_out
-/tmp/build_out
-# 期待出力: 42
+```json
+{"ts":"2026-04-11T10:00:00Z","level":"INFO","tool":"run_snippet","req_id":"abc123","elapsed_ms":12}
+{"ts":"2026-04-11T10:00:01Z","level":"ERROR","tool":"run_snippet","req_id":"def456","msg":"parse error","detail":"line 3: unexpected '}'"}
 ```
 
-#### 5. MCP サーバ起動確認（forge-mcp 実装後）
+### ローリングログ設定
 
-```bash
-forge mcp start
-forge mcp status
-# 期待出力: forge-mcp: running (pid XXXX)
-forge mcp stop
-```
-
-### 合否判定
-
-| テスト | 合格条件 |
+| 項目 | 値 |
 |---|---|
-| バージョン確認 | exit code 0、バージョン文字列が出力される |
-| Hello World | 標準出力に `Hello, ForgeScript!` が含まれる |
-| HTTP リクエスト | `200` と `true` が出力される |
-| ビルド確認 | バイナリが生成され、実行結果が `42` |
-| MCP 起動確認 | status が `running` になる |
+| 上限サイズ | 10 MB（設定可能） |
+| 世代数 | 3 |
+| ローテートタイミング | 書き込み時にサイズ超過を検知 |
+
+### セッション状態（メモリ内・stop で消える）
+
+```rust
+struct McpSessionState {
+    started_at: Instant,
+    request_count: u64,
+    error_count: u64,
+    last_error: Option<String>,
+    tool_counts: HashMap<String, u64>,
+}
+```
+
+`forge mcp status` 表示例：
+
+```
+forge-mcp: running (pid 12345)
+uptime:    2h 14m
+requests:  342  (errors: 3)
+last error: [10:45:12] run_snippet — parse error at line 3
+log:       ~/.forge/mcp/forge-mcp.log (1.2 MB)
+```
+
+### クロスプラットフォーム対応
+
+```rust
+#[cfg(unix)]
+fn spawn_daemon() { /* fork/detach */ }
+
+#[cfg(windows)]
+fn spawn_daemon() {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    Command::new("forge").args(["mcp", "--daemon-inner"])
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+}
+
+#[cfg(unix)]
+fn is_running(pid: u32) -> bool { unsafe { libc::kill(pid as i32, 0) == 0 } }
+
+#[cfg(windows)]
+fn is_running(pid: u32) -> bool { /* OpenProcess で確認 */ }
+```
 
 ---
 
@@ -221,29 +344,18 @@ forge mcp stop
 
 ```
 lang/install/
-  spec.md         ← 本ファイル
-  plan.md         ← 実装計画（未作成）
-  tasks.md        ← タスク一覧（未作成）
+  spec.md             ← 本ファイル（install + forge-mcp 統合）
+  plan.md
+  tasks.md
 
-vagrant/          ← リポジトリルートに配置
-  Vagrantfile
-  provision.sh
+docker/               ← リポジトリルートに配置
+  Dockerfile
+  docker-compose.yml
+  smoke_test.sh
+
+install.sh            ← リポジトリルートに配置（Phase I-2）
+
+crates/forge-mcp/     ← forge-mcp Rust クレート（Phase M-1）
+  Cargo.toml
+  src/...
 ```
-
----
-
-## 前提条件（ホスト側）
-
-- VirtualBox インストール済み
-- Vagrant インストール済み
-- インターネット接続あり（box ダウンロード・cargo install 用）
-
----
-
-## 制約・注意事項
-
-- `ubuntu/jammy64` box の初回ダウンロードは約 500 MB
-- `cargo install --git`（I-1）は初回ビルドに 5〜10 分かかる
-- VM メモリ 2048 MB 未満だとリンク時に OOM になる可能性がある
-- `provision.sh` は root で実行されるため、`forge` は `/root/.cargo/bin/` にインストールされる
-  → `vagrant ssh` 後は `vagrant` ユーザーの PATH に追加が必要（`provision.sh` で対応）

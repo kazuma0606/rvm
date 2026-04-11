@@ -286,11 +286,16 @@
   │
   DX 強化
   │
-  ├─ [11] Linux インストール対応
-  │        I-1: Vagrant 検証環境（ubuntu/jammy64・provision.sh・smoke_test.sh）
+  ├─ [11] Linux インストール対応 + forge-mcp（MCP サーバ）
+  │        I-1: Docker 検証環境（ubuntu:22.04・Dockerfile・smoke_test.sh）
   │        I-2: GitHub Releases バイナリ + install.sh
-  │        I-3: MCP サーバ動作確認（forge-mcp 実装後）
-  │        仕様: lang/install/spec.md（📐 plan + tasks 作成済み）
+  │        M-1: forge mcp 実装（stdio / daemon・Windows+Linux 対応）
+  │             ツール: parse_file / type_check / run_snippet / search_symbol / get_spec_section
+  │             管理: start / stop / restart / status / connect / logs
+  │        M-2: ログ管理（JSON Lines・10MB ローリング・セッション状態）
+  │        I-3: MCP 動作確認（Docker）
+  │        → forge インストールで MCP サーバも一緒に使えるようになる
+  │        仕様: lang/install/spec.md（📐 plan + tasks 作成済み・36タスク）
   │
   ├─ [12] forge build: Rust コード保存（target/forge_rs/）
   │        build 時にデフォルトで target/forge_rs/ にコピーを残す
@@ -303,24 +308,20 @@
   ├─ [14] forge check 強化
   │        未使用変数・到達不能コード・詳細エラー表示
   │
-  ├─ [15] forge-mcp（MCP サーバ）
-  │        parse_file / type_check / run_snippet / search_symbol / get_spec_section
-  │        → AI コーディング支援の不確実性を低減
-  │
   言語仕様安定後
   │
-  ├─ [16] LSP（言語サーバー）
+  ├─ [15] LSP（言語サーバー）
   │        forge check の型チェッカーを転用
   │        ホバー・補完・定義ジャンプ
   │
-  ├─ [17] ノートブック `.fnb` + VS Code Notebook 拡張
+  ├─ [16] ノートブック `.fnb` + VS Code Notebook 拡張
   │        forge notebook コマンド・display() 組み込み
   │        後から Jupyter 互換（.ipynb エクスポート）を追加可能
   │
-  ├─ [18] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
-  ├─ [19] forge-grpc / forge-graphql
-  ├─ [20] Playground（WASM）
-  └─ [21] セルフホスティング
+  ├─ [17] forge.toml 完全版（レジストリ・バージョン解決・forge build 統合）
+  ├─ [18] forge-grpc / forge-graphql
+  ├─ [19] Playground（WASM）
+  └─ [20] セルフホスティング
 ```
 
 ---
