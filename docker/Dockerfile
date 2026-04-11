@@ -9,9 +9,7 @@ RUN apt-get update -qq && \
         curl \
         ca-certificates \
         build-essential \
-        git \
-        pkg-config \
-        libssl-dev && \
+        git && \
     rm -rf /var/lib/apt/lists/*
 
 # forge インストール
