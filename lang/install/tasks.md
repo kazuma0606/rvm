@@ -124,10 +124,10 @@
 ## Phase I-3: MCP 動作確認（Docker）
 
 ### I-3-A: smoke_test.sh に MCP テスト追加
-- [ ] `forge mcp start` が成功する（exit 0）
-- [ ] `forge mcp status` が "running" を出力する
-- [ ] `forge mcp stop` が成功する（exit 0）
-- [ ] `docker compose run --rm forge-verify` でスモークテスト全 PASS 確認
+- [x] `forge mcp start` が成功する（exit 0）
+- [x] `forge mcp status` が "running" を出力する
+- [x] `forge mcp stop` が成功する（exit 0）
+- [x] `docker compose run --rm forge-verify` でスモークテスト全 PASS 確認（8 passed, 0 failed）
 
 ---
 
@@ -139,5 +139,5 @@
 | I-2 | 4 | 3 |
 | M-1 | 15 | 15 |
 | M-2 | 7 | 7 |
-| I-3 | 4 | 0 |
-| **合計** | **36** | **31** |
+| I-3 | 4 | 4 |
+| **合計** | **36** | **35** |
