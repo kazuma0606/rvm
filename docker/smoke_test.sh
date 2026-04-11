@@ -65,6 +65,12 @@ else
     echo "  [SKIP] http get (no internet access)"
 fi
 
+# 5. forge mcp start / status / stop
+check "mcp start"  "forge mcp start"  "起動"
+check "mcp status" "forge mcp status" "running"
+check "mcp stop"   "forge mcp stop"   "停止"
+check "mcp status after stop" "forge mcp status" "not running"
+
 echo ""
 echo "=== result: ${PASS} passed, ${FAIL} failed ==="
 
