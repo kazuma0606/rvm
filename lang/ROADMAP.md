@@ -287,7 +287,10 @@
   DX 強化
   │
   ├─ [11] Linux インストール対応
-  │        cargo install --git 対応 → GitHub Releases バイナリ → install.sh
+  │        I-1: Vagrant 検証環境（ubuntu/jammy64・provision.sh・smoke_test.sh）
+  │        I-2: GitHub Releases バイナリ + install.sh
+  │        I-3: MCP サーバ動作確認（forge-mcp 実装後）
+  │        仕様: lang/install/spec.md（📐 plan + tasks 作成済み）
   │
   ├─ [12] forge build: Rust コード保存（target/forge_rs/）
   │        build 時にデフォルトで target/forge_rs/ にコピーを残す
