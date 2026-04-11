@@ -100,6 +100,54 @@ fn main() {
         Some("version") | Some("--version") | Some("-V") => {
             println!("forge {}", env!("CARGO_PKG_VERSION"));
         }
+        Some("mcp") => match args.get(2).map(|s| s.as_str()) {
+            None | Some("--stdio") => forge_mcp::run_stdio(),
+            Some("--daemon-inner") => forge_mcp::run_daemon_inner(),
+            Some("start") => {
+                if let Err(e) = forge_mcp::daemon::start() {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            Some("stop") => {
+                if let Err(e) = forge_mcp::daemon::stop() {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            Some("restart") => {
+                if let Err(e) = forge_mcp::daemon::restart() {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            Some("status") => {
+                if let Err(e) = forge_mcp::daemon::status() {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            Some("connect") => forge_mcp::run_stdio(),
+            Some("logs") => {
+                let follow = args.iter().any(|a| a == "-f");
+                let errors_only = args.iter().any(|a| a == "--errors");
+                let clear = args.iter().any(|a| a == "--clear");
+                if clear {
+                    if let Err(e) = forge_mcp::clear_logs() {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                } else if let Err(e) = forge_mcp::show_logs(follow, errors_only) {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            Some(sub) => {
+                eprintln!("エラー: 不明な mcp サブコマンド '{}'", sub);
+                eprintln!("使用可能: forge mcp [start|stop|restart|status|connect|logs]");
+                std::process::exit(1);
+            }
+        },
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
         }
@@ -1255,6 +1303,10 @@ fn print_help() {
     println!("  forge build <file.forge>            単一ファイルからバイナリを生成");
     println!("  forge build <file.forge> -o myapp   出力バイナリ名を指定");
     println!("  forge repl                          対話型 REPL を起動");
+    println!("  forge mcp                           MCP サーバをstdioモードで起動");
+    println!("  forge mcp start|stop|restart        MCP デーモンを管理");
+    println!("  forge mcp status                    MCP デーモンの状態を表示");
+    println!("  forge mcp logs [-f] [--errors]      MCP ログを表示");
     println!("  forge version                       バージョンを表示");
     println!("  forge help                          このヘルプを表示");
 }

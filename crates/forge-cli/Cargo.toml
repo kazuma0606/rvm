@@ -12,6 +12,7 @@ forge-compiler = { path = "../forge-compiler" }
 forge-vm = { path = "../forge-vm" }
 forge-stdlib = { path = "../forge-stdlib" }
 forge-transpiler = { path = "../forge-transpiler" }
+forge-mcp = { path = "../forge-mcp" }
 toml = "0.8"
 
 tempfile = "3"
