@@ -9,7 +9,9 @@ RUN apt-get update -qq && \
         curl \
         ca-certificates \
         build-essential \
-        git && \
+        git \
+        pkg-config \
+        libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Rust インストール（非対話モード・stable）
