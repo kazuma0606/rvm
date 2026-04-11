@@ -31,8 +31,8 @@
   - 最終的に `FAIL > 0` なら exit 1
 
 ### I-1-D: 動作確認
-- [ ] `docker compose run --rm forge-verify` が正常完了する
-- [ ] スモークテスト全項目 PASS する
+- [x] `docker compose build --no-cache` が正常完了する
+- [x] `docker compose run --rm forge-verify` がスモークテスト全 PASS する（4 passed, 0 failed）
 
 ---
 
@@ -135,9 +135,9 @@
 
 | Phase | タスク数 | 完了 |
 |---|---|---|
-| I-1 | 6 | 3 |
+| I-1 | 6 | 6 |
 | I-2 | 4 | 0 |
 | M-1 | 15 | 0 |
 | M-2 | 7 | 0 |
 | I-3 | 4 | 0 |
-| **合計** | **36** | **3** |
+| **合計** | **36** | **6** |
