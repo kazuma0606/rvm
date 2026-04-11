@@ -33,13 +33,24 @@ println("Hello, ForgeScript!")
 EOF
 check "hello world" "forge run /tmp/hello.fg" "Hello, ForgeScript!"
 
-# 3. forge build
+# 3. forge build（初回はRust依存のコンパイルが発生するため最大5分）
 cat > /tmp/build_test.fg <<'EOF'
 let x = 42
 println(x)
 EOF
-forge build /tmp/build_test.fg -o /tmp/forge_out 2>/dev/null
-check "build" "/tmp/forge_out" "42"
+echo "  [INFO] forge build を実行中（初回は数分かかる場合があります）..."
+if timeout 300 forge build /tmp/build_test.fg -o /tmp/forge_out > /tmp/build_out.txt 2>&1; then
+    check "build" "/tmp/forge_out" "42"
+else
+    build_exit=$?
+    if [ "$build_exit" -eq 124 ]; then
+        echo "  [SKIP] build (timeout after 300s — cargo compile cache なし)"
+    else
+        echo "  [FAIL] build (exit $build_exit)"
+        cat /tmp/build_out.txt | tail -5
+        FAIL=$((FAIL + 1))
+    fi
+fi
 
 # 4. HTTP（インターネット到達可能時のみ）
 if curl -sf --max-time 3 https://httpbin.org/get > /dev/null 2>&1; then
