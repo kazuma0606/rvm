@@ -1,0 +1,380 @@
+// crucible/wire.forge — PostgreSQL wire protocol エンコード/デコード
+// Phase C-1-A: メッセージ encode
+// Phase C-1-B: メッセージ decode
+
+// ── ヘルパー関数 ──────────────────────────────────────────────────────────
+
+// encode_int32(n) -> list<number>
+// n を big-endian 4 バイトにエンコードする
+pub fn encode_int32(n: number) -> list<number> {
+    let b0 = (n / 16777216) % 256
+    let b1 = (n / 65536) % 256
+    let b2 = (n / 256) % 256
+    let b3 = n % 256
+    let out = [b0, b1, b2, b3]
+    out
+}
+
+// encode_int16(n) -> list<number>
+// n を big-endian 2 バイトにエンコードする
+pub fn encode_int16(n: number) -> list<number> {
+    let b0 = (n / 256) % 256
+    let b1 = n % 256
+    let out = [b0, b1]
+    out
+}
+
+// encode_string(s) -> list<number>
+// s の各バイトをエンコードし、末尾に null バイト (0) を追加する
+pub fn encode_string(s: string) -> list<number> {
+    let raw = string_to_bytes(s)
+    let result = []
+    state i = 0
+    let len = raw.len()
+    while i < len {
+        result.push(raw[i])
+        i = i + 1
+    }
+    result.push(0)
+    result
+}
+
+// encode_bytes(s) -> list<number>
+// s の各バイトをエンコードする（null終端なし）
+pub fn encode_bytes(s: string) -> list<number> {
+    let raw = string_to_bytes(s)
+    let result = []
+    let len = raw.len()
+    state i = 0
+    while i < len {
+        result.push(raw[i])
+        i = i + 1
+    }
+    result
+}
+
+// list_concat(a, b) -> list<number>
+// 2つのリストを結合する
+pub fn list_concat(a: list<number>, b: list<number>) -> list<number> {
+    let result = []
+    state i = 0
+    let alen = a.len()
+    while i < alen {
+        result.push(a[i])
+        i = i + 1
+    }
+    state j = 0
+    let blen = b.len()
+    while j < blen {
+        result.push(b[j])
+        j = j + 1
+    }
+    result
+}
+
+// decode_int32(bytes, offset) -> number
+// bytes[offset..offset+3] を big-endian int32 としてデコードする
+pub fn decode_int32(bytes: list<number>, offset: number) -> number {
+    bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3]
+}
+
+// decode_int16(bytes, offset) -> number
+// bytes[offset..offset+1] を big-endian int16 としてデコードする
+pub fn decode_int16(bytes: list<number>, offset: number) -> number {
+    bytes[offset] * 256 + bytes[offset + 1]
+}
+
+// ── encode 関数 ──────────────────────────────────────────────────────────
+
+// encode_startup_message(user, database) -> list<number>
+// PostgreSQL StartupMessage: int32(length) + int32(protocol) + "user\0{user}\0database\0{database}\0\0"
+pub fn encode_startup_message(user: string, database: string) -> list<number> {
+    // protocol version: 3.0 = 0x00030000 = 196608
+    let protocol = encode_int32(196608)
+    let user_key = encode_string("user")
+    let user_val = encode_string(user)
+    let db_key = encode_string("database")
+    let db_val = encode_string(database)
+    let terminator = [0]
+
+    let body = list_concat(protocol, user_key)
+    let body = list_concat(body, user_val)
+    let body = list_concat(body, db_key)
+    let body = list_concat(body, db_val)
+    let body = list_concat(body, terminator)
+
+    // length = 4 (length field itself) + body.len()
+    let total_len = 4 + body.len()
+    let len_bytes = encode_int32(total_len)
+    list_concat(len_bytes, body)
+}
+
+// encode_query(sql) -> list<number>
+// Simple Query Protocol: 'Q' (0x51) + int32(len) + sql + \0
+pub fn encode_query(sql: string) -> list<number> {
+    let sql_bytes = encode_string(sql)
+    // length = 4 (length field) + sql_bytes.len()
+    let msg_len = 4 + sql_bytes.len()
+    let len_bytes = encode_int32(msg_len)
+    let type_byte = [81]  // 'Q' = 0x51 = 81
+    let result = list_concat(type_byte, len_bytes)
+    list_concat(result, sql_bytes)
+}
+
+// encode_sasl_initial_response(mechanism, payload) -> list<number>
+// SASLInitialResponse: 'p' (0x70) + int32(len) + mechanism + \0 + int32(payload_len) + payload
+pub fn encode_sasl_initial_response(mechanism: string, payload: string) -> list<number> {
+    let mech_bytes = encode_string(mechanism)
+    let payload_bytes = encode_bytes(payload)
+    let payload_len_bytes = encode_int32(payload_bytes.len())
+
+    let body = list_concat(mech_bytes, payload_len_bytes)
+    let body = list_concat(body, payload_bytes)
+
+    let msg_len = 4 + body.len()
+    let len_bytes = encode_int32(msg_len)
+    let type_byte = [112]  // 'p' = 0x70 = 112
+    let result = list_concat(type_byte, len_bytes)
+    list_concat(result, body)
+}
+
+// encode_sasl_response(payload) -> list<number>
+// SASLResponse: 'p' (0x70) + int32(len) + payload
+pub fn encode_sasl_response(payload: string) -> list<number> {
+    let payload_bytes = encode_bytes(payload)
+    let msg_len = 4 + payload_bytes.len()
+    let len_bytes = encode_int32(msg_len)
+    let type_byte = [112]  // 'p' = 0x70 = 112
+    let result = list_concat(type_byte, len_bytes)
+    list_concat(result, payload_bytes)
+}
+
+// encode_terminate() -> list<number>
+// Terminate: 'X' (0x58) + int32(4)
+pub fn encode_terminate() -> list<number> {
+    let out = [88, 0, 0, 0, 4]
+    out
+}
+
+// ── decode 関数 ──────────────────────────────────────────────────────────
+
+// make_backend_message(t, body) -> map
+// BackendMessage マップを構築するヘルパー
+pub fn make_backend_message(t: number, body: list<number>) -> map {
+    { "type_byte": t, "body": body }
+}
+
+// decode_backend_message(bytes) -> map
+// bytes[0] = type_byte, bytes[1..4] = length, bytes[5..] = body
+pub fn decode_backend_message(bytes: list<number>) -> map {
+    let t = bytes[0]
+    let msg_len = decode_int32(bytes, 1)
+    let body_len = msg_len - 4
+    let body = []
+    state i = 0
+    while i < body_len {
+        body.push(bytes[5 + i])
+        i = i + 1
+    }
+    make_backend_message(t, body)
+}
+
+// read_backend_message(conn) -> map!
+// TCP接続から1バイト種別 + 4バイト長を読み込み、body を読み込んで BackendMessage を返す
+pub fn read_backend_message(conn: map) -> map! {
+    let header = tcp_read_exact(conn, 5)?
+    let t = header[0]
+    let msg_len = decode_int32(header, 1)
+    let body_len = msg_len - 4
+    let body = []
+    if body_len > 0 {
+        let raw = tcp_read_exact(conn, body_len)?
+        state j = 0
+        while j < body_len {
+            body.push(raw[j])
+            j = j + 1
+        }
+    }
+    ok(make_backend_message(t, body))
+}
+
+// read_cstring_at(bytes, offset) -> { value: string, next_offset: number }
+// bytes[offset..] から null 終端文字列を読む
+pub fn read_cstring_at(bytes: list<number>, offset: number) -> map {
+    let result_bytes = []
+    state i = offset
+    let total = bytes.len()
+    while i < total {
+        let b = bytes[i]
+        if b == 0 {
+            let s = bytes_to_str(result_bytes)
+            return { "value": s, "next_offset": i + 1 }
+        }
+        result_bytes.push(b)
+        i = i + 1
+    }
+    let s = bytes_to_str(result_bytes)
+    { "value": s, "next_offset": total }
+}
+
+// parse_row_description(body) -> list<map>
+// RowDescription メッセージのボディをパースしてカラム情報リストを返す
+// 各カラム: { "name": string, "oid": number }
+pub fn parse_row_description(body: list<number>) -> list<map> {
+    let num_fields = decode_int16(body, 0)
+    let cols = []
+    state offset = 2
+    state i = 0
+    while i < num_fields {
+        // カラム名 (null終端文字列)
+        let name_result = read_cstring_at(body, offset)
+        let col_name = name_result["value"]
+        offset = name_result["next_offset"]
+        // table OID (4 bytes) + column attribute number (2 bytes) + data type OID (4 bytes)
+        // type_size (2 bytes) + type_modifier (4 bytes) + format (2 bytes) = 18 bytes total
+        let type_oid = decode_int32(body, offset + 6)
+        offset = offset + 18
+        cols.push({ "name": col_name, "oid": type_oid })
+        i = i + 1
+    }
+    cols
+}
+
+// parse_data_row_raw(body, cols) -> map
+// DataRow メッセージのボディをパースして { col_name: value } のマップを返す
+pub fn parse_data_row(body: list<number>, cols: list<map>) -> map {
+    let num_cols = decode_int16(body, 0)
+    state row = {}
+    state offset = 2
+    state i = 0
+    while i < num_cols {
+        let col = cols[i]
+        let col_name = col["name"]
+        // 各カラム値: int32(length) + data (-1 = NULL)
+        let raw_len0 = body[offset]
+        let raw_len1 = body[offset + 1]
+        let raw_len2 = body[offset + 2]
+        let raw_len3 = body[offset + 3]
+        offset = offset + 4
+        // NULL の場合: 0xFF = 255, 255*16777216+255*65536+255*256+255 = 4294967295
+        if (raw_len0 == 255) && (raw_len1 == 255) && (raw_len2 == 255) && (raw_len3 == 255) {
+            // NULL値: row にキーを追加しない
+        } else {
+            let val_len = raw_len0 * 16777216 + raw_len1 * 65536 + raw_len2 * 256 + raw_len3
+            let val_bytes = []
+            state j = 0
+            while j < val_len {
+                val_bytes.push(body[offset + j])
+                j = j + 1
+            }
+            let val_str = bytes_to_str(val_bytes)
+            row.insert(col_name, val_str)
+            offset = offset + val_len
+        }
+        i = i + 1
+    }
+    row
+}
+
+// parse_error_response(body) -> string
+// ErrorResponse メッセージのボディから 'M' フィールド（メッセージ）を取得する
+pub fn parse_error_response(body: list<number>) -> string {
+    state i = 0
+    let total = body.len()
+    state msg = "unknown error"
+    while i < total {
+        let field_type = body[i]
+        if field_type == 0 {
+            return msg
+        }
+        i = i + 1
+        // フィールド値を読む (null終端)
+        let field_bytes = []
+        while i < total {
+            let b = body[i]
+            if b == 0 {
+                i = i + 1
+                // i は whileの外の i を変更できないので別変数で管理
+                // ここで break できないため return を使う形に書き換える
+                if field_type == 77 {
+                    msg = bytes_to_str(field_bytes)
+                }
+                // 次のフィールドへ
+                let field_bytes = []  // リセット
+                while i < total {
+                    let field_type2 = body[i]
+                    if field_type2 == 0 {
+                        return msg
+                    }
+                    i = i + 1
+                    let fb2 = []
+                    while i < total {
+                        let b2 = body[i]
+                        if b2 == 0 {
+                            i = i + 1
+                            if field_type2 == 77 {
+                                msg = bytes_to_str(fb2)
+                            }
+                            let fb2 = []
+                            let total2 = total  // 無限ループ防止
+                            let total2 = 0  // ループを抜ける
+                        } else {
+                            fb2.push(b2)
+                            i = i + 1
+                        }
+                    }
+                    let total2 = 0
+                }
+                let total = 0  // ループを抜ける（強制終了）
+            } else {
+                field_bytes.push(b)
+                i = i + 1
+            }
+        }
+    }
+    msg
+}
+
+// ── テスト ──────────────────────────────────────────────────────────────
+
+test "encode_terminate が [88, 0, 0, 0, 4] を返す" {
+    let result = encode_terminate()
+    assert_eq(result.len(), 5)
+    assert_eq(result[0], 88)
+    assert_eq(result[1], 0)
+    assert_eq(result[2], 0)
+    assert_eq(result[3], 0)
+    assert_eq(result[4], 4)
+}
+
+test "encode_query('SELECT 1') のバイト列が正しい" {
+    let result = encode_query("SELECT 1")
+    // 'Q' (1) + int32(13) (4) + "SELECT 1\0" (9) = 14 bytes
+    // msg_len = 4 + 9 = 13
+    assert_eq(result[0], 81)   // 'Q'
+    assert_eq(result[1], 0)    // length[0]
+    assert_eq(result[2], 0)    // length[1]
+    assert_eq(result[3], 0)    // length[2]
+    assert_eq(result[4], 13)   // length[3] = 13
+    assert_eq(result[5], 83)   // 'S'
+    assert_eq(result[6], 69)   // 'E'
+    assert_eq(result.len(), 14)
+}
+
+test "ReadyForQuery を正しく decode できる" {
+    // 'Z' (0x5A=90) + 0x00000005 + 'I' (0x49=73)
+    let bytes = [90, 0, 0, 0, 5, 73]
+    let msg = decode_backend_message(bytes)
+    assert_eq(msg["type_byte"], 90)
+    let body = msg["body"]
+    assert_eq(body.len(), 1)
+    assert_eq(body[0], 73)
+}
+
+test "encode_int32 がビッグエンディアン変換する" {
+    let result = encode_int32(256)
+    assert_eq(result[0], 0)
+    assert_eq(result[1], 0)
+    assert_eq(result[2], 1)
+    assert_eq(result[3], 0)
+}

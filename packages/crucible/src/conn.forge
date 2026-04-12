@@ -1,0 +1,393 @@
+// crucible/conn.forge — PostgreSQL 単一接続管理
+// Phase C-1-D
+//
+// 依存: wire.forge, auth.forge
+use ./wire.*
+use ./auth.*
+
+// ── Conn 型 ──────────────────────────────────────────────────────────────
+//
+// ForgeScript では struct を使って接続情報を保持する。
+// tcp_conn は TcpConn struct (id フィールドを持つ)。
+// state は "idle" | "closed" の文字列。
+
+pub struct Conn {
+    tcp_conn: map
+    status: string
+    host: string
+    port: number
+    user: string
+    database: string
+}
+
+// ── 内部ヘルパー ──────────────────────────────────────────────────────────
+
+// handle_auth_request(conn_struct, password, auth_body) -> unit!
+// 認証リクエストを処理する
+pub fn handle_auth_request(tcp_conn: map, password: string, auth_type: number, auth_body: list<number>) -> unit! {
+    // auth_type: 0 = OK, 10 = SASL, 11 = SASLContinue, 12 = SASLFinal, 3 = cleartext, 5 = MD5
+    if auth_type == 0 {
+        // 認証成功
+        return ok(unit)
+    }
+    if auth_type == 10 {
+        // SASL 認証 — SCRAM-SHA-256 を使用する
+        // auth_body には利用可能なメカニズムのリスト (null 終端文字列)
+        // "SCRAM-SHA-256\0SCRAM-SHA-256-PLUS\0\0" など
+        // ここでは SCRAM-SHA-256 を選択して応答する
+        return err("SASL auth requires external call - use do_scram_auth")
+    }
+    if auth_type == 3 {
+        // cleartext password
+        // 'p' + int32(4 + password_len + 1) + password + \0
+        let pw_bytes = encode_bytes(password)
+        let msg_len = 4 + pw_bytes.len() + 1
+        let len_bytes = encode_int32(msg_len)
+        let msg = list_concat([112], len_bytes)
+        let msg = list_concat(msg, pw_bytes)
+        let msg = list_concat(msg, [0])
+        tcp_write(tcp_conn, msg)?
+        return ok(unit)
+    }
+    err("unsupported auth type: {auth_type}")
+}
+
+// wait_for_ready(tcp_conn) -> unit!
+// ReadyForQuery ('Z') が届くまでメッセージを読み続ける
+pub fn wait_for_ready(tcp_conn: map) -> unit! {
+    loop {
+        let msg = read_backend_message(tcp_conn)?
+        let t = msg["type_byte"]
+        // 'Z' = 90: ReadyForQuery
+        if t == 90 { return ok(unit) }
+        // 'E' = 69: ErrorResponse
+        if t == 69 {
+            let err_msg = parse_error_response(msg["body"])
+            return err(err_msg)
+        }
+        // 'N' = 78: NoticeResponse — 無視して続行
+        // 'K' = 75: BackendKeyData — 無視
+        // 'S' = 83: ParameterStatus — 無視
+    }
+}
+
+// do_scram_auth(tcp_conn, user, password) -> unit!
+// SCRAM-SHA-256 認証を実行する
+pub fn do_scram_auth(tcp_conn: map, user: string, password: string) -> unit! {
+    // クライアントの最初のメッセージを送信する
+    let nonce = scram_generate_nonce()
+    let client_first_bare_str = "n={user},r={nonce}"
+    let client_first = "n,,{client_first_bare_str}"
+
+    // SASLInitialResponse: mechanism + payload
+    let init_msg = encode_sasl_initial_response("SCRAM-SHA-256", client_first)
+    tcp_write(tcp_conn, init_msg)?
+
+    // AuthenticationSASLContinue を受信する
+    let msg = read_backend_message(tcp_conn)?
+    let t = msg["type_byte"]
+    // 'R' = 82: Authentication
+    if t != 82 {
+        return err("expected Authentication message, got type {t}")
+    }
+    let body = msg["body"]
+    let auth_type = decode_int32(body, 0)
+    // 11 = SASLContinue
+    if auth_type != 11 {
+        return err("expected SASLContinue (11), got {auth_type}")
+    }
+    // body[4..] = server-first-message
+    let server_first_bytes = []
+    state i = 4
+    let body_len = body.len()
+    loop {
+        if i >= body_len { break }
+        server_first_bytes.push(body[i])
+        i = i + 1
+    }
+    let server_first = bytes_to_str(server_first_bytes)
+
+    // step2: クライアントの最終メッセージを計算する
+    let step2_result = scram_auth_step2(password, server_first, client_first_bare_str, nonce)?
+    let client_final = step2_result["client_final"]
+    let server_key = step2_result["server_key"]
+
+    // SASLResponse を送信する
+    let resp_msg = encode_sasl_response(client_final)
+    tcp_write(tcp_conn, resp_msg)?
+
+    // AuthenticationSASLFinal を受信する
+    let msg2 = read_backend_message(tcp_conn)?
+    let t2 = msg2["type_byte"]
+    if t2 != 82 {
+        return err("expected Authentication message, got type {t2}")
+    }
+    let body2 = msg2["body"]
+    let auth_type2 = decode_int32(body2, 0)
+    // 12 = SASLFinal
+    if auth_type2 != 12 {
+        return err("expected SASLFinal (12), got {auth_type2}")
+    }
+    // body2[4..] = server-final-message
+    let server_final_bytes = []
+    state k = 4
+    let body2_len = body2.len()
+    loop {
+        if k >= body2_len { break }
+        server_final_bytes.push(body2[k])
+        k = k + 1
+    }
+    let server_final = bytes_to_str(server_final_bytes)
+
+    // サーバー署名の検証
+    let verified = scram_verify_server_signature(server_final, server_key)?
+    if !verified {
+        return err("SCRAM server signature verification failed")
+    }
+
+    // AuthenticationOK を受信する
+    let msg3 = read_backend_message(tcp_conn)?
+    let t3 = msg3["type_byte"]
+    if t3 != 82 {
+        return err("expected AuthenticationOK, got type {t3}")
+    }
+    let body3 = msg3["body"]
+    let auth_ok = decode_int32(body3, 0)
+    if auth_ok != 0 {
+        return err("expected AuthenticationOK (0), got {auth_ok}")
+    }
+    ok(unit)
+}
+
+// ── 公開 API ────────────────────────────────────────────────────────────
+
+// connect(host, port, user, password, database) -> Conn!
+// TCP 接続 → StartupMessage 送信 → 認証フロー → ReadyForQuery 待機
+pub fn connect(host: string, port: number, user: string, password: string, database: string) -> Conn! {
+    let tcp_conn = tcp_connect(host, port)?
+
+    // StartupMessage を送信する
+    let startup = encode_startup_message(user, database)
+    tcp_write(tcp_conn, startup)?
+
+    // 認証開始メッセージを受信する
+    let msg = read_backend_message(tcp_conn)?
+    let t = msg["type_byte"]
+    if t != 82 {
+        tcp_close(tcp_conn)
+        return err("expected Authentication message, got type {t}")
+    }
+    let body = msg["body"]
+    let auth_type = decode_int32(body, 0)
+
+    // 認証タイプに応じて処理する
+    if auth_type == 0 {
+        // 認証不要 — ReadyForQuery まで待つ
+        wait_for_ready(tcp_conn)?
+    } else {
+        if auth_type == 10 {
+            // SCRAM-SHA-256
+            do_scram_auth(tcp_conn, user, password)?
+            wait_for_ready(tcp_conn)?
+        } else {
+            tcp_close(tcp_conn)
+            return err("unsupported auth type: {auth_type}")
+        }
+    }
+
+    let conn = Conn {
+        tcp_conn: tcp_conn
+        status: "idle"
+        host: host
+        port: port
+        user: user
+        database: database
+    }
+    ok(conn)
+}
+
+// query_raw(conn, sql) -> list<map>!
+// Simple Query を実行してRowリストを返す
+pub fn query_raw(conn: Conn, sql: string) -> list<map>! {
+    let tcp = conn.tcp_conn
+    let q_msg = encode_query(sql)
+    tcp_write(tcp, q_msg)?
+
+    let rows = []
+    state cols = []
+    state done = false
+
+    loop {
+        if done { break }
+        let msg = read_backend_message(tcp)?
+        let t = msg["type_byte"]
+        let body = msg["body"]
+
+        // 'T' = 84: RowDescription
+        if t == 84 {
+            cols = parse_row_description(body)
+        }
+        // 'D' = 68: DataRow
+        if t == 68 {
+            let row = parse_data_row(body, cols)
+            rows.push(row)
+        }
+        // 'C' = 67: CommandComplete
+        if t == 67 {
+            // 次に ReadyForQuery が来るので wait する
+        }
+        // 'Z' = 90: ReadyForQuery
+        if t == 90 {
+            done = true
+        }
+        // 'E' = 69: ErrorResponse
+        if t == 69 {
+            let err_msg = parse_error_response(body)
+            return err(err_msg)
+        }
+    }
+
+    ok(rows)
+}
+
+// close(conn) -> unit
+// Terminate メッセージを送信してTCP接続を閉じる
+pub fn close(conn: Conn) -> unit {
+    let term = encode_terminate()
+    // エラーは無視する（ベストエフォート）
+    tcp_write(conn.tcp_conn, term)
+    tcp_close(conn.tcp_conn)
+}
+
+// ── 接続プール (C-5-B) ───────────────────────────────────────────────────
+
+pub struct ConnPoolConfig {
+    host: string
+    port: number
+    user: string
+    password: string
+    database: string
+    max_connections: number
+    connect_timeout_ms: number
+}
+
+pub struct ConnPool {
+    config: ConnPoolConfig
+    connections: list<map>
+    states: list<string>
+}
+
+// new_pool_config(host, port, user, password, database) -> ConnPoolConfig
+// デフォルト値付きの ConnPoolConfig を作成する
+pub fn new_pool_config(host: string, port: number, user: string, password: string, database: string) -> ConnPoolConfig {
+    ConnPoolConfig {
+        host: host
+        port: port
+        user: user
+        password: password
+        database: database
+        max_connections: 10
+        connect_timeout_ms: 5000
+    }
+}
+
+// pool_connect(config) -> ConnPool!
+// ConnPool を初期化する（接続はオンデマンドで作成する）
+pub fn pool_connect(config: ConnPoolConfig) -> ConnPool! {
+    // 空のプールを作成する。接続は pool_acquire 時にオンデマンドで作成する
+    let pool = ConnPool {
+        config: config
+        connections: []
+        states: []
+    }
+    ok(pool)
+}
+
+// pool_acquire(pool) -> Conn!
+// 空き接続を返す。なければ新規作成する（max_connections 未満の場合）
+pub fn pool_acquire(pool: ConnPool) -> Conn! {
+    // 空き接続を探す
+    state i = 0
+    let count = pool.states.len()
+    while i < count {
+        if pool.states[i] == "idle" {
+            // 空き接続を見つけた — busy にして返す
+            pool.states[i] = "busy"
+            let conn_map = pool.connections[i]
+            let conn = Conn {
+                tcp_conn: conn_map["tcp_conn"]
+                status: "idle"
+                host: pool.config.host
+                port: pool.config.port
+                user: pool.config.user
+                database: pool.config.database
+            }
+            return ok(conn)
+        }
+        i = i + 1
+    }
+
+    // 空き接続がなければ新規作成する
+    if count >= pool.config.max_connections {
+        return err("connection pool exhausted: max_connections = {pool.config.max_connections}")
+    }
+
+    let conn = connect(
+        pool.config.host,
+        pool.config.port,
+        pool.config.user,
+        pool.config.password,
+        pool.config.database
+    )?
+
+    // プールに追加する
+    let conn_map = {}
+    conn_map["tcp_conn"] = conn.tcp_conn
+    pool.connections.push(conn_map)
+    pool.states.push("busy")
+
+    ok(conn)
+}
+
+// pool_release(pool, conn) -> ConnPool
+// 接続をプールに返却する（busy -> idle）
+pub fn pool_release(pool: ConnPool, conn: Conn) -> ConnPool {
+    // tcp_conn id で一致する接続を探して idle に戻す
+    state i = 0
+    let count = pool.connections.len()
+    while i < count {
+        if pool.states[i] == "busy" {
+            // 接続を idle に戻す（全 busy 接続を対象にする単純実装）
+            pool.states[i] = "idle"
+            i = count
+        } else {
+            i = i + 1
+        }
+    }
+    pool
+}
+
+// ── テスト ──────────────────────────────────────────────────────────────
+
+// 統合テストは PostgreSQL が起動している環境でのみ実行可能
+// docker compose -f docker/docker-compose.test.yml up -d 後に実行
+
+// Note: 単体テストは wire.forge と auth.forge のテストで検証済み
+// connect() 自体の単体テストは PostgreSQL 不要部分のみ確認
+
+test "encode_startup_message は正しい形式を返す" {
+    let msg = encode_startup_message("postgres", "crucible_test")
+    // 最初の 4 バイトが length
+    // 次の 4 バイトが protocol version (196608 = 0x00030000)
+    assert(msg.len() > 8)
+    // protocol version check: bytes[4..7]
+    let pv = msg[4] * 16777216 + msg[5] * 65536 + msg[6] * 256 + msg[7]
+    assert_eq(pv, 196608)
+}
+
+test "encode_terminate は終了メッセージを返す" {
+    let term = encode_terminate()
+    assert_eq(term.len(), 5)
+    assert_eq(term[0], 88)
+    assert_eq(term[4], 4)
+}

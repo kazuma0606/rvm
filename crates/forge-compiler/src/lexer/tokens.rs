@@ -51,6 +51,8 @@ pub enum TokenKind {
     Defer,
     Spawn,
     Yield,
+    Loop,  // loop
+    Break, // break
     // ── モジュールキーワード (Phase M-0) ─────
     Use,  // use
     Pub,  // pub

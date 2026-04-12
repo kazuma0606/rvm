@@ -290,6 +290,10 @@ pub enum Expr {
         body: Box<Expr>,
         span: Span,
     },
+    /// loop 文 (break で脱出可能)
+    Loop { body: Box<Expr>, span: Span },
+    /// break 文 (loop の脱出)
+    Break { span: Span },
     /// for 式
     For {
         var: String,

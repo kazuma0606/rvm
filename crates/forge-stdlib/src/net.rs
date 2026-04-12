@@ -1,10 +1,10 @@
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── TcpConn グローバルレジストリ ─────────────────────────────────────────────
 //
@@ -51,17 +51,20 @@ pub fn tcp_connect(host: &str, port: i64) -> Result<u64, String> {
         let id = next_conn_id();
         let (read_half, write_half) = stream.into_split();
         let mut registry = CONN_REGISTRY.lock().await;
-        registry.insert(id, TcpConnInner { write_half, read_half });
+        registry.insert(
+            id,
+            TcpConnInner {
+                write_half,
+                read_half,
+            },
+        );
         Ok(id)
     })
 }
 
 /// バイト列を送信する
 pub fn tcp_write(conn_id: u64, data: Vec<i64>) -> Result<(), String> {
-    let bytes: Vec<u8> = data
-        .iter()
-        .map(|&b| (b & 0xFF) as u8)
-        .collect();
+    let bytes: Vec<u8> = data.iter().map(|&b| (b & 0xFF) as u8).collect();
     let rt = make_rt()?;
     rt.block_on(async {
         let mut registry = CONN_REGISTRY.lock().await;

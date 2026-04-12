@@ -1,0 +1,437 @@
+// crucible/builder.forge — QueryBuilder DSL
+// Phase C-3-B
+//
+// 依存: query.forge (execute, execute_one, execute_count)
+
+// ── QueryBuilder 型 ───────────────────────────────────────────────────────
+//
+// ForgeScript の struct にはデフォルト値を設定できないため、
+// new_query() コンストラクタ関数で初期値を設定する。
+
+pub struct QueryBuilder {
+    table: string
+    conditions: list<string>
+    order_col: string
+    order_asc: bool
+    limit_val: number
+    offset_val: number
+    selects: list<string>
+    joins: list<string>
+    params: list
+}
+
+// new_query(table) -> QueryBuilder
+// 指定テーブルに対する空のクエリビルダーを作成する。
+pub fn new_query(table: string) -> QueryBuilder {
+    QueryBuilder {
+        table: table
+        conditions: []
+        order_col: ""
+        order_asc: true
+        limit_val: -1
+        offset_val: -1
+        selects: []
+        joins: []
+        params: []
+    }
+}
+
+// ── ビルダーメソッド ───────────────────────────────────────────────────────
+
+// where_clause(builder, condition, params) -> QueryBuilder
+// WHERE 条件を追加する。複数回呼ぶと AND で結合される。
+// condition 中の $1, $2, ... は params の先頭からの相対インデックス。
+// build_sql 時に全体のパラメータ位置に合わせてリナンバリングする。
+pub fn where_clause(builder: QueryBuilder, condition: string, params: list) -> QueryBuilder {
+    // 既存のパラメータ数を取得してオフセットを計算する
+    let existing_param_count = builder.params.len()
+    // condition 中の $1, $2, ... を $N+1, $N+2, ... に変換する
+    let param_count = params.len()
+    state renumbered = condition
+    // 後ろから処理することで番号の重複置換を防ぐ
+    state j = param_count
+    while j >= 1 {
+        let old_placeholder = "${j}"
+        let new_index = existing_param_count + j
+        let new_placeholder = "${new_index}"
+        renumbered = string_replace(renumbered, old_placeholder, new_placeholder)
+        j = j - 1
+    }
+    // 条件を追加する
+    builder.conditions.push(renumbered)
+    // パラメータをマージする
+    state i = 0
+    let p_count = params.len()
+    while i < p_count {
+        builder.params.push(params[i])
+        i = i + 1
+    }
+    builder
+}
+
+// order_by(builder, column, asc) -> QueryBuilder
+// ORDER BY 句を設定する。後から呼んだ場合は上書きされる。
+pub fn order_by(builder: QueryBuilder, column: string, asc: bool) -> QueryBuilder {
+    let builder = QueryBuilder {
+        table: builder.table
+        conditions: builder.conditions
+        order_col: column
+        order_asc: asc
+        limit_val: builder.limit_val
+        offset_val: builder.offset_val
+        selects: builder.selects
+        joins: builder.joins
+        params: builder.params
+    }
+    builder
+}
+
+// limit_rows(builder, n) -> QueryBuilder
+// LIMIT 句を設定する。
+pub fn limit_rows(builder: QueryBuilder, n: number) -> QueryBuilder {
+    let builder = QueryBuilder {
+        table: builder.table
+        conditions: builder.conditions
+        order_col: builder.order_col
+        order_asc: builder.order_asc
+        limit_val: n
+        offset_val: builder.offset_val
+        selects: builder.selects
+        joins: builder.joins
+        params: builder.params
+    }
+    builder
+}
+
+// offset_rows(builder, n) -> QueryBuilder
+// OFFSET 句を設定する。
+pub fn offset_rows(builder: QueryBuilder, n: number) -> QueryBuilder {
+    let builder = QueryBuilder {
+        table: builder.table
+        conditions: builder.conditions
+        order_col: builder.order_col
+        order_asc: builder.order_asc
+        limit_val: builder.limit_val
+        offset_val: n
+        selects: builder.selects
+        joins: builder.joins
+        params: builder.params
+    }
+    builder
+}
+
+// select_columns(builder, columns) -> QueryBuilder
+// SELECT するカラムを指定する。空の場合は * が使われる。
+pub fn select_columns(builder: QueryBuilder, columns: list<string>) -> QueryBuilder {
+    let builder = QueryBuilder {
+        table: builder.table
+        conditions: builder.conditions
+        order_col: builder.order_col
+        order_asc: builder.order_asc
+        limit_val: builder.limit_val
+        offset_val: builder.offset_val
+        selects: columns
+        joins: builder.joins
+        params: builder.params
+    }
+    builder
+}
+
+// join_table(builder, table, on) -> QueryBuilder
+// JOIN 句を追加する。"INNER JOIN table ON on" の形式で追加される。
+pub fn join_table(builder: QueryBuilder, table: string, on: string) -> QueryBuilder {
+    let join_clause = "INNER JOIN {table} ON {on}"
+    builder.joins.push(join_clause)
+    builder
+}
+
+// ── SQL 生成 ──────────────────────────────────────────────────────────────
+
+// join_strings(parts, sep) -> string
+// 文字列リストを sep で結合する
+pub fn join_strings(parts: list<string>, sep: string) -> string {
+    let count = parts.len()
+    if count == 0 { return "" }
+    state result = parts[0]
+    state i = 1
+    while i < count {
+        result = "{result}{sep}{parts[i]}"
+        i = i + 1
+    }
+    result
+}
+
+// build_select_clause(builder) -> string
+// SELECT 句を生成する
+pub fn build_select_clause(builder: QueryBuilder) -> string {
+    let col_count = builder.selects.len()
+    if col_count == 0 {
+        return "SELECT *"
+    }
+    let cols = join_strings(builder.selects, ", ")
+    "SELECT {cols}"
+}
+
+// build_from_clause(builder) -> string
+// FROM 句を生成する
+pub fn build_from_clause(builder: QueryBuilder) -> string {
+    "FROM {builder.table}"
+}
+
+// build_join_clause(builder) -> string
+// JOIN 句を生成する（なければ空文字列）
+pub fn build_join_clause(builder: QueryBuilder) -> string {
+    let join_count = builder.joins.len()
+    if join_count == 0 { return "" }
+    join_strings(builder.joins, " ")
+}
+
+// build_where_clause(builder) -> string
+// WHERE 句を生成する（条件がなければ空文字列）
+pub fn build_where_clause(builder: QueryBuilder) -> string {
+    let cond_count = builder.conditions.len()
+    if cond_count == 0 { return "" }
+    let conditions = join_strings(builder.conditions, " AND ")
+    "WHERE {conditions}"
+}
+
+// build_order_clause(builder) -> string
+// ORDER BY 句を生成する（order_col が空なら空文字列）
+pub fn build_order_clause(builder: QueryBuilder) -> string {
+    if builder.order_col == "" { return "" }
+    if builder.order_asc {
+        return "ORDER BY {builder.order_col} ASC"
+    }
+    "ORDER BY {builder.order_col} DESC"
+}
+
+// build_limit_clause(builder) -> string
+// LIMIT 句を生成する（limit_val < 0 なら空文字列）
+pub fn build_limit_clause(builder: QueryBuilder) -> string {
+    if builder.limit_val < 0 { return "" }
+    "LIMIT {builder.limit_val}"
+}
+
+// build_offset_clause(builder) -> string
+// OFFSET 句を生成する（offset_val < 0 なら空文字列）
+pub fn build_offset_clause(builder: QueryBuilder) -> string {
+    if builder.offset_val < 0 { return "" }
+    "OFFSET {builder.offset_val}"
+}
+
+// build_sql(builder) -> map
+// { "sql": string, "params": list } の形式で SQL を生成する。
+// 生成される SQL:
+//   SELECT [cols] FROM [table]
+//   [JOIN ...]
+//   [WHERE ...]
+//   [ORDER BY ...]
+//   [LIMIT n]
+//   [OFFSET n]
+pub fn build_sql(builder: QueryBuilder) -> map {
+    let parts = []
+
+    // SELECT 句
+    parts.push(build_select_clause(builder))
+
+    // FROM 句
+    parts.push(build_from_clause(builder))
+
+    // JOIN 句
+    let join_str = build_join_clause(builder)
+    if join_str != "" {
+        parts.push(join_str)
+    }
+
+    // WHERE 句
+    let where_str = build_where_clause(builder)
+    if where_str != "" {
+        parts.push(where_str)
+    }
+
+    // ORDER BY 句
+    let order_str = build_order_clause(builder)
+    if order_str != "" {
+        parts.push(order_str)
+    }
+
+    // LIMIT 句
+    let limit_str = build_limit_clause(builder)
+    if limit_str != "" {
+        parts.push(limit_str)
+    }
+
+    // OFFSET 句
+    let offset_str = build_offset_clause(builder)
+    if offset_str != "" {
+        parts.push(offset_str)
+    }
+
+    let sql = join_strings(parts, " ")
+    { "sql": sql, "params": builder.params }
+}
+
+// ── クエリ実行メソッド ────────────────────────────────────────────────────
+
+// run_all(builder, conn) -> list<map>!
+// ビルダーの SQL を実行してすべての行を返す。
+pub fn run_all(builder: QueryBuilder, conn: Conn) -> list<map>! {
+    let result = build_sql(builder)
+    execute(conn, result["sql"], result["params"])
+}
+
+// run_first(builder, conn) -> map!
+// ビルダーの SQL を実行して先頭行を返す。0 件なら err。
+pub fn run_first(builder: QueryBuilder, conn: Conn) -> map! {
+    let b = limit_rows(builder, 1)
+    let result = build_sql(b)
+    execute_one(conn, result["sql"], result["params"])
+}
+
+// run_count(builder, conn) -> number!
+// ビルダーの条件に合致する行数を返す。
+pub fn run_count(builder: QueryBuilder, conn: Conn) -> number! {
+    let count_builder = QueryBuilder {
+        table: builder.table
+        conditions: builder.conditions
+        order_col: ""
+        order_asc: true
+        limit_val: -1
+        offset_val: -1
+        selects: ["COUNT(*) AS count"]
+        joins: builder.joins
+        params: builder.params
+    }
+    let result = build_sql(count_builder)
+    execute_count(conn, result["sql"], result["params"])
+}
+
+// run_exists(builder, conn) -> bool!
+// 条件に合致する行が存在するかどうかを返す。
+pub fn run_exists(builder: QueryBuilder, conn: Conn) -> bool! {
+    let n = run_count(builder, conn)?
+    ok(n > 0)
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────
+
+test "new_query は正しい初期値を持つ QueryBuilder を返す" {
+    let b = new_query("users")
+    assert_eq(b.table, "users")
+    assert_eq(b.conditions.len(), 0)
+    assert_eq(b.order_col, "")
+    assert_eq(b.order_asc, true)
+    assert_eq(b.limit_val, -1)
+    assert_eq(b.offset_val, -1)
+    assert_eq(b.selects.len(), 0)
+    assert_eq(b.joins.len(), 0)
+    assert_eq(b.params.len(), 0)
+}
+
+test "build_sql は SELECT * FROM table を生成する" {
+    let b = new_query("users")
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users")
+    assert_eq(result["params"].len(), 0)
+}
+
+test "build_sql は WHERE 句を追加する" {
+    let b = new_query("users")
+    let b = where_clause(b, "id = $1", [42])
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users WHERE id = $1")
+    assert_eq(result["params"].len(), 1)
+    assert_eq(result["params"][0], 42)
+}
+
+test "build_sql は複数の WHERE 条件を AND で結合する" {
+    let b = new_query("users")
+    let b = where_clause(b, "active = $1", [true])
+    let b = where_clause(b, "age > $2", [18])
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users WHERE active = $1 AND age > $2")
+    assert_eq(result["params"].len(), 2)
+}
+
+test "build_sql は ORDER BY ASC を追加する" {
+    let b = new_query("users")
+    let b = order_by(b, "name", true)
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users ORDER BY name ASC")
+}
+
+test "build_sql は ORDER BY DESC を追加する" {
+    let b = new_query("posts")
+    let b = order_by(b, "created_at", false)
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM posts ORDER BY created_at DESC")
+}
+
+test "build_sql は LIMIT を追加する" {
+    let b = new_query("users")
+    let b = limit_rows(b, 10)
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users LIMIT 10")
+}
+
+test "build_sql は OFFSET を追加する" {
+    let b = new_query("users")
+    let b = limit_rows(b, 10)
+    let b = offset_rows(b, 20)
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM users LIMIT 10 OFFSET 20")
+}
+
+test "build_sql は SELECT カラムを指定できる" {
+    let b = new_query("users")
+    let b = select_columns(b, ["id", "name", "email"])
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT id, name, email FROM users")
+}
+
+test "build_sql は JOIN を追加する" {
+    let b = new_query("posts")
+    let b = join_table(b, "users", "posts.user_id = users.id")
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT * FROM posts INNER JOIN users ON posts.user_id = users.id")
+}
+
+test "build_sql は複合クエリを生成する" {
+    let b = new_query("users")
+    let b = select_columns(b, ["id", "name"])
+    let b = where_clause(b, "active = $1", [true])
+    let b = order_by(b, "name", true)
+    let b = limit_rows(b, 5)
+    let b = offset_rows(b, 10)
+    let result = build_sql(b)
+    assert_eq(result["sql"], "SELECT id, name FROM users WHERE active = $1 ORDER BY name ASC LIMIT 5 OFFSET 10")
+    assert_eq(result["params"][0], true)
+}
+
+test "where_clause は複数呼び出しでパラメータを正しくリナンバリングする" {
+    let b = new_query("users")
+    let b = where_clause(b, "status = $1", ["active"])
+    let b = where_clause(b, "age > $1", [18])
+    let result = build_sql(b)
+    // 2 回目の $1 は全体の $2 になる
+    assert_eq(result["sql"], "SELECT * FROM users WHERE status = $1 AND age > $2")
+    assert_eq(result["params"].len(), 2)
+    assert_eq(result["params"][0], "active")
+    assert_eq(result["params"][1], 18)
+}
+
+test "join_strings は文字列リストを結合する" {
+    let parts = ["a", "b", "c"]
+    let result = join_strings(parts, ", ")
+    assert_eq(result, "a, b, c")
+}
+
+test "join_strings は空リストに対して空文字列を返す" {
+    let result = join_strings([], ", ")
+    assert_eq(result, "")
+}
+
+test "join_strings は要素 1 つのリストをそのまま返す" {
+    let result = join_strings(["only"], " AND ")
+    assert_eq(result, "only")
+}

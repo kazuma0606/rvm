@@ -336,6 +336,8 @@ impl Lexer {
                         "defer" => TokenKind::Defer,
                         "spawn" => TokenKind::Spawn,
                         "yield" => TokenKind::Yield,
+                        "loop" => TokenKind::Loop,
+                        "break" => TokenKind::Break,
                         "use" => TokenKind::Use,
                         "pub" => TokenKind::Pub,
                         "as" => TokenKind::As,

@@ -1,0 +1,250 @@
+// crucible/query.forge — 高レベルクエリ API
+// Phase C-2-B
+//
+// 依存: conn.forge (query_raw / Conn), types.forge (pg_value_to_forge_simple)
+use ./conn.*
+
+// ── パラメータバインド ─────────────────────────────────────────────────────
+
+// is_numeric_string(s) -> bool
+// s が数値文字列かどうかを返す（整数または小数）
+pub fn is_numeric_string(s: string) -> bool {
+    let bytes = string_to_bytes(s)
+    let len = bytes.len()
+    if len == 0 { return false }
+    state i = 0
+    state has_dot = false
+    // 先頭のマイナス符号を許容する
+    if bytes[0] == 45 {
+        if len == 1 { return false }
+        i = 1
+    }
+    while i < len {
+        let b = bytes[i]
+        // '0'-'9' = 48-57
+        if b >= 48 && b <= 57 {
+            i = i + 1
+        } else {
+            // '.' = 46: 小数点は1回だけ許容
+            if b == 46 && !has_dot {
+                has_dot = true
+                i = i + 1
+            } else {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// escape_string_value(s) -> string
+// シングルクォートをエスケープして SQL 文字列リテラルを生成する
+pub fn escape_string_value(s: string) -> string {
+    let bytes = string_to_bytes(s)
+    let len = bytes.len()
+    let result = []
+    // 開きシングルクォート "'"
+    result.push(39)
+    state i = 0
+    while i < len {
+        let b = bytes[i]
+        // シングルクォート (39) は 2 つに重ねてエスケープする
+        if b == 39 {
+            result.push(39)
+            result.push(39)
+        } else {
+            result.push(b)
+        }
+        i = i + 1
+    }
+    // 閉じシングルクォート "'"
+    result.push(39)
+    bytes_to_str(result)
+}
+
+// param_to_sql(val) -> string
+// パラメータ値を SQL リテラル文字列に変換する。
+// number  -> そのまま文字列化
+// bool    -> "true" / "false"
+// string  -> シングルクォートでエスケープ
+// unit    -> "NULL"
+pub fn param_to_sql(val: any) -> string {
+    // unit (NULL) チェック
+    if val == unit {
+        return "NULL"
+    }
+    // bool チェック: true / false
+    if val == true {
+        return "true"
+    }
+    if val == false {
+        return "false"
+    }
+    // 文字列化して数値かどうか確認する
+    let s = "{val}"
+    if is_numeric_string(s) {
+        return s
+    }
+    // 文字列として扱う: シングルクォートでエスケープ
+    escape_string_value(s)
+}
+
+// bind_params(sql, params) -> string
+// SQL 中の $1, $2, ... をパラメータ値で置換する。
+// 置換は左から右に行い、番号順に処理する。
+// params[0] が $1, params[1] が $2 に対応する。
+pub fn bind_params(sql: string, params: list) -> string {
+    let param_count = params.len()
+    // パラメータがなければそのまま返す
+    if param_count == 0 {
+        return sql
+    }
+
+    state result = sql
+    state i = 0
+    while i < param_count {
+        // $1, $2, ... のプレースホルダ番号 (1-based)
+        let placeholder_num = i + 1
+        let placeholder = "${placeholder_num}"
+        let replacement = param_to_sql(params[i])
+        // result 中の placeholder を replacement に置換する
+        // ForgeScript の string_replace(s, from, to) を使用
+        result = string_replace(result, placeholder, replacement)
+        i = i + 1
+    }
+    result
+}
+
+// ── 公開 API ─────────────────────────────────────────────────────────────
+
+// execute(conn, sql, params) -> list<map>!
+// パラメータをバインドした SQL を実行して行のリストを返す。
+pub fn execute(conn: Conn, sql: string, params: list) -> list<map>! {
+    let bound_sql = bind_params(sql, params)
+    query_raw(conn, bound_sql)
+}
+
+// execute_one(conn, sql, params) -> map!
+// パラメータをバインドした SQL を実行して先頭の行を返す。
+// 0 件の場合は err を返す。
+pub fn execute_one(conn: Conn, sql: string, params: list) -> map! {
+    let rows = execute(conn, sql, params)?
+    let row_count = rows.len()
+    if row_count == 0 {
+        return err("execute_one: no rows returned")
+    }
+    ok(rows[0])
+}
+
+// execute_count(conn, sql, params) -> number!
+// COUNT(*) クエリを実行してカウント値を返す。
+// 結果の先頭行・先頭カラムの値を number に変換して返す。
+pub fn execute_count(conn: Conn, sql: string, params: list) -> number! {
+    let rows = execute(conn, sql, params)?
+    let row_count = rows.len()
+    if row_count == 0 {
+        return ok(0)
+    }
+    let first_row = rows[0]
+    // 先頭カラム名は "count" または任意の名前を想定する
+    // ForgeScript では map のキー一覧を取得する map_keys() を使用する
+    let keys = map_keys(first_row)
+    if keys.len() == 0 {
+        return ok(0)
+    }
+    let first_key = keys[0]
+    let val = first_row[first_key]
+    // 文字列の場合は number() で変換する
+    if val == unit {
+        return ok(0)
+    }
+    let s = "{val}"
+    let n = number(s)?
+    ok(n)
+}
+
+// ── トランザクション API (C-5-C) ──────────────────────────────────────────
+
+// begin_transaction(conn) -> unit!
+// BEGIN を送信してトランザクションを開始する
+pub fn begin_transaction(conn: Conn) -> unit! {
+    query_raw(conn, "BEGIN")?
+    ok(unit)
+}
+
+// commit_transaction(conn) -> unit!
+// COMMIT を送信してトランザクションをコミットする
+pub fn commit_transaction(conn: Conn) -> unit! {
+    query_raw(conn, "COMMIT")?
+    ok(unit)
+}
+
+// rollback_transaction(conn) -> unit!
+// ROLLBACK を送信してトランザクションをロールバックする
+pub fn rollback_transaction(conn: Conn) -> unit! {
+    query_raw(conn, "ROLLBACK")?
+    ok(unit)
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────
+
+test "bind_params はパラメータなしの SQL をそのまま返す" {
+    let sql = "SELECT * FROM users"
+    let result = bind_params(sql, [])
+    assert_eq(result, "SELECT * FROM users")
+}
+
+test "bind_params は $1 を数値で置換する" {
+    let sql = "SELECT * FROM users WHERE id = $1"
+    let result = bind_params(sql, [42])
+    assert_eq(result, "SELECT * FROM users WHERE id = 42")
+}
+
+test "bind_params は $1 を文字列でエスケープして置換する" {
+    let sql = "SELECT * FROM users WHERE name = $1"
+    let result = bind_params(sql, ["Alice"])
+    assert_eq(result, "SELECT * FROM users WHERE name = 'Alice'")
+}
+
+test "bind_params は複数パラメータを置換する" {
+    let sql = "SELECT * FROM posts WHERE user_id = $1 AND title = $2"
+    let result = bind_params(sql, [1, "Hello"])
+    assert_eq(result, "SELECT * FROM posts WHERE user_id = 1 AND title = 'Hello'")
+}
+
+test "bind_params は bool パラメータを変換する" {
+    let sql = "SELECT * FROM users WHERE active = $1"
+    let result = bind_params(sql, [true])
+    assert_eq(result, "SELECT * FROM users WHERE active = true")
+}
+
+test "bind_params は NULL を変換する" {
+    let sql = "INSERT INTO users (name, email) VALUES ($1, $2)"
+    let result = bind_params(sql, ["Bob", unit])
+    assert_eq(result, "INSERT INTO users (name, email) VALUES ('Bob', NULL)")
+}
+
+test "escape_string_value はシングルクォートをエスケープする" {
+    let result = escape_string_value("it's")
+    assert_eq(result, "'it''s'")
+}
+
+test "escape_string_value は通常文字列を囲む" {
+    let result = escape_string_value("hello")
+    assert_eq(result, "'hello'")
+}
+
+test "param_to_sql は数値をそのまま返す" {
+    let result = param_to_sql(123)
+    assert_eq(result, "123")
+}
+
+test "param_to_sql は true を 'true' に変換する" {
+    let result = param_to_sql(true)
+    assert_eq(result, "true")
+}
+
+test "param_to_sql は unit を 'NULL' に変換する" {
+    let result = param_to_sql(unit)
+    assert_eq(result, "NULL")
+}

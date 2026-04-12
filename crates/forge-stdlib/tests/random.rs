@@ -21,9 +21,8 @@ fn shuffle_preserves_elements() {
 
 #[test]
 fn seed_random_reproducible() {
-    seed_random(42);
-    let a = random_int(1, 100).unwrap();
-    seed_random(42);
-    let b = random_int(1, 100).unwrap();
+    // seed と読み取りを1ロック内で行う（並列テストによる競合を回避）
+    let a = forge_stdlib::random::seed_and_random_int(42, 1, 100);
+    let b = forge_stdlib::random::seed_and_random_int(42, 1, 100);
     assert_eq!(a, b);
 }

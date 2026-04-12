@@ -1,0 +1,26 @@
+// insert_user.forge — crucible E2E デモ
+// 使い方: forge run packages/crucible/examples/
+//
+// 事前に以下を実行しておく:
+//   docker compose -f docker/docker-compose.test.yml up -d
+//   cd packages/crucible && crucible migrate
+
+use crucible.*
+
+// 接続
+let conn = connect("localhost", 5432, "postgres", "test", "crucible_test")?
+
+// 既存データをクリーンアップ
+query_raw(conn, "DELETE FROM users WHERE email = 'alice@example.com'")?
+
+// INSERT
+let rows = query_raw(conn, "INSERT INTO users (name, email, password) VALUES ('Alice', 'alice@example.com', 'hashed_pw') RETURNING *")?
+let user = rows[0]
+println("inserted: {user["id"]}")
+
+// SELECT
+let found_rows = query_raw(conn, "SELECT * FROM users WHERE email = 'alice@example.com'")?
+let found = found_rows[0]
+println("found: {found["name"]}")
+
+close(conn)

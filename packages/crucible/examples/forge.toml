@@ -1,0 +1,7 @@
+[package]
+name = "crucible-examples"
+version = "0.1.0"
+entry = "insert_user.forge"
+
+[dependencies]
+crucible = { path = "../" }

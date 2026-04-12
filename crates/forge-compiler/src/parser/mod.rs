@@ -1021,10 +1021,15 @@ impl Parser {
                     "string" => TypeAnn::String,
                     "bool" => TypeAnn::Bool,
                     "list" => {
-                        self.expect_token(&TokenKind::Lt)?;
-                        let inner = self.parse_type_ann()?;
-                        self.expect_token(&TokenKind::Gt)?;
-                        TypeAnn::List(Box::new(inner))
+                        if matches!(self.peek_kind(), TokenKind::Lt) {
+                            self.expect_token(&TokenKind::Lt)?;
+                            let inner = self.parse_type_ann()?;
+                            self.expect_token(&TokenKind::Gt)?;
+                            TypeAnn::List(Box::new(inner))
+                        } else {
+                            // bare `list` without type params — treat as list<any>
+                            TypeAnn::List(Box::new(TypeAnn::Named("any".to_string())))
+                        }
                     }
                     "generate" => {
                         self.expect_token(&TokenKind::Lt)?;
@@ -1033,12 +1038,20 @@ impl Parser {
                         TypeAnn::Generate(Box::new(inner))
                     }
                     "map" => {
-                        self.expect_token(&TokenKind::Lt)?;
-                        let key = self.parse_type_ann()?;
-                        self.expect_token(&TokenKind::Comma)?;
-                        let val = self.parse_type_ann()?;
-                        self.expect_token(&TokenKind::Gt)?;
-                        TypeAnn::Map(Box::new(key), Box::new(val))
+                        if matches!(self.peek_kind(), TokenKind::Lt) {
+                            self.expect_token(&TokenKind::Lt)?;
+                            let key = self.parse_type_ann()?;
+                            self.expect_token(&TokenKind::Comma)?;
+                            let val = self.parse_type_ann()?;
+                            self.expect_token(&TokenKind::Gt)?;
+                            TypeAnn::Map(Box::new(key), Box::new(val))
+                        } else {
+                            // bare `map` without type params — treat as map<any, any>
+                            TypeAnn::Map(
+                                Box::new(TypeAnn::Named("any".to_string())),
+                                Box::new(TypeAnn::Named("any".to_string())),
+                            )
+                        }
                     }
                     "set" => {
                         self.expect_token(&TokenKind::Lt)?;
@@ -1686,10 +1699,12 @@ impl Parser {
                 })
             }
 
-            // ── if / while / for / match ──
+            // ── if / while / for / loop / match ──
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
+            TokenKind::Loop => self.parse_loop(),
+            TokenKind::Break => self.parse_break(),
             TokenKind::Match => self.parse_match(),
 
             // ── [ ] リスト / 範囲 ──
@@ -1795,6 +1810,22 @@ impl Parser {
             body: Box::new(body),
             span,
         })
+    }
+
+    fn parse_loop(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Loop)?;
+        let body = self.parse_block()?;
+        Ok(Expr::Loop {
+            body: Box::new(body),
+            span,
+        })
+    }
+
+    fn parse_break(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Break)?;
+        Ok(Expr::Break { span })
     }
 
     fn parse_for(&mut self) -> Result<Expr, ParseError> {

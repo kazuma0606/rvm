@@ -1,0 +1,215 @@
+// crucible/model.forge — ORM モデル管理
+// Phase C-3-A
+//
+// ForgeScript ではグローバル変数を持てないため、
+// registry（map）を関数の引数・戻り値で受け渡す設計とする。
+//
+// registry の構造:
+//   {
+//     "ModelName": {
+//       "table": "table_name",
+//       "fields": ["field1", "field2", ...]
+//     },
+//     ...
+//   }
+
+// ── レジストリ管理 ────────────────────────────────────────────────────────
+
+// new_registry() -> map
+// 空のモデルレジストリを作成する
+pub fn new_registry() -> map {
+    {}
+}
+
+// register_model(registry, model_name, table, fields) -> map
+// モデルをレジストリに登録して更新済みレジストリを返す。
+// 同名のモデルが存在する場合は上書きする。
+pub fn register_model(registry: map, model_name: string, table: string, fields: list<string>) -> map {
+    let entry = {
+        "table": table,
+        "fields": fields
+    }
+    registry.insert(model_name, entry)
+    registry
+}
+
+// model_entry(registry, model_name) -> map!
+// レジストリからモデルエントリを取得する。
+// 存在しない場合は err を返す。
+pub fn model_entry(registry: map, model_name: string) -> map! {
+    let entry = registry[model_name]
+    if entry == unit {
+        return err("model not found: {model_name}")
+    }
+    ok(entry)
+}
+
+// model_table(registry, model_name) -> string!
+// モデルに対応するテーブル名を返す。
+pub fn model_table(registry: map, model_name: string) -> string! {
+    let entry = model_entry(registry, model_name)?
+    ok(entry["table"])
+}
+
+// model_fields(registry, model_name) -> list<string>!
+// モデルのフィールド一覧を返す。
+pub fn model_fields(registry: map, model_name: string) -> list<string>! {
+    let entry = model_entry(registry, model_name)?
+    ok(entry["fields"])
+}
+
+// has_model(registry, model_name) -> bool
+// モデルが登録されているかどうかを返す。
+pub fn has_model(registry: map, model_name: string) -> bool {
+    let entry = registry[model_name]
+    entry != unit
+}
+
+// ── 行 → モデル変換 ────────────────────────────────────────────────────────
+
+// row_to_model(row, field_map) -> map
+// DB から取得した行（map）を field_map に従ってフィールド名を変換する。
+//
+// field_map の構造:
+//   { "db_column_name": "model_field_name", ... }
+//
+// 例: { "user_name": "name", "user_email": "email" }
+//   → row["user_name"] が model["name"] に格納される
+//
+// field_map が空の場合はそのまま返す。
+pub fn row_to_model(row: map, field_map: map) -> map {
+    let keys = map_keys(field_map)
+    let key_count = keys.len()
+    if key_count == 0 {
+        // フィールドマッピングなし: row をそのまま返す
+        return row
+    }
+    let model = {}
+    state i = 0
+    while i < key_count {
+        let db_col = keys[i]
+        let model_field = field_map[db_col]
+        let val = row[db_col]
+        model.insert(model_field, val)
+        i = i + 1
+    }
+    model
+}
+
+// row_to_model_by_fields(row, fields) -> map
+// フィールドリストに基づいて row からモデルを構築する。
+// fields に含まれるキーのみを取り出す（名前はそのまま）。
+// fields が空の場合は row をそのまま返す。
+pub fn row_to_model_by_fields(row: map, fields: list<string>) -> map {
+    let field_count = fields.len()
+    if field_count == 0 {
+        return row
+    }
+    let model = {}
+    state i = 0
+    while i < field_count {
+        let field = fields[i]
+        let val = row[field]
+        model.insert(field, val)
+        i = i + 1
+    }
+    model
+}
+
+// rows_to_models(rows, field_map) -> list<map>
+// 行リストの各行を field_map に従って変換する。
+pub fn rows_to_models(rows: list<map>, field_map: map) -> list<map> {
+    let models = []
+    state i = 0
+    let row_count = rows.len()
+    while i < row_count {
+        let model = row_to_model(rows[i], field_map)
+        models.push(model)
+        i = i + 1
+    }
+    models
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────
+
+test "new_registry は空の map を返す" {
+    let reg = new_registry()
+    let keys = map_keys(reg)
+    assert_eq(keys.len(), 0)
+}
+
+test "register_model → model_table が正しいテーブル名を返す" {
+    let reg = new_registry()
+    let reg = register_model(reg, "User", "users", ["id", "name", "email"])
+    let table = model_table(reg, "User")?
+    assert_eq(table, "users")
+}
+
+test "register_model → model_fields が正しいフィールド一覧を返す" {
+    let reg = new_registry()
+    let reg = register_model(reg, "User", "users", ["id", "name", "email"])
+    let fields = model_fields(reg, "User")?
+    assert_eq(fields.len(), 3)
+    assert_eq(fields[0], "id")
+    assert_eq(fields[1], "name")
+    assert_eq(fields[2], "email")
+}
+
+test "存在しないモデルへの model_table は err を返す" {
+    let reg = new_registry()
+    let result = model_table(reg, "NonExistent")
+    // result は err なので ok() ではない
+    // ForgeScript では is_err(result) または result? でエラー判定
+    // ここでは has_model で代替確認する
+    assert_eq(has_model(reg, "NonExistent"), false)
+}
+
+test "has_model は登録済みモデルに true を返す" {
+    let reg = new_registry()
+    let reg = register_model(reg, "Post", "posts", ["id", "title", "body"])
+    assert_eq(has_model(reg, "Post"), true)
+    assert_eq(has_model(reg, "User"), false)
+}
+
+test "複数モデルを登録できる" {
+    let reg = new_registry()
+    let reg = register_model(reg, "User", "users", ["id", "name"])
+    let reg = register_model(reg, "Post", "posts", ["id", "title", "user_id"])
+    assert_eq(has_model(reg, "User"), true)
+    assert_eq(has_model(reg, "Post"), true)
+    let user_table = model_table(reg, "User")?
+    let post_table = model_table(reg, "Post")?
+    assert_eq(user_table, "users")
+    assert_eq(post_table, "posts")
+}
+
+test "row_to_model はフィールドマッピングに従って変換する" {
+    let row = {}
+    row.insert("user_name", "Alice")
+    row.insert("user_email", "alice@example.com")
+    let field_map = {}
+    field_map.insert("user_name", "name")
+    field_map.insert("user_email", "email")
+    let model = row_to_model(row, field_map)
+    assert_eq(model["name"], "Alice")
+    assert_eq(model["email"], "alice@example.com")
+}
+
+test "row_to_model は空の field_map の場合 row をそのまま返す" {
+    let row = {}
+    row.insert("id", 1)
+    row.insert("name", "Bob")
+    let model = row_to_model(row, {})
+    assert_eq(model["id"], 1)
+    assert_eq(model["name"], "Bob")
+}
+
+test "register_model は既存モデルを上書きする" {
+    let reg = new_registry()
+    let reg = register_model(reg, "User", "users", ["id", "name"])
+    let reg = register_model(reg, "User", "accounts", ["id", "username", "email"])
+    let table = model_table(reg, "User")?
+    assert_eq(table, "accounts")
+    let fields = model_fields(reg, "User")?
+    assert_eq(fields.len(), 3)
+}

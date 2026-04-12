@@ -1266,6 +1266,8 @@ impl CodeGenerator {
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) | Expr::Closure { .. } => {}
             Expr::Pipeline { .. } => {}
+            Expr::Loop { body, .. } => self.scan_expr_codegen_requirements(body),
+            Expr::Break { .. } => {}
         }
     }
 
@@ -1543,6 +1545,7 @@ impl CodeGenerator {
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) => Ok(()),
             Expr::Pipeline { .. } => Ok(()),
+            Expr::Loop { .. } | Expr::Break { .. } => Ok(()),
         }
     }
 
@@ -1669,6 +1672,7 @@ impl CodeGenerator {
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) => false,
             Expr::Pipeline { .. } => false,
+            Expr::Loop { .. } | Expr::Break { .. } => false,
         }
     }
 
@@ -2030,6 +2034,7 @@ impl CodeGenerator {
                     || self.expr_calls_fn(value, fn_name)
             }
             Expr::Pipeline { .. } => false,
+            Expr::Loop { .. } | Expr::Break { .. } => false,
         }
     }
 
@@ -3650,6 +3655,10 @@ impl CodeGenerator {
                 ..
             } => self.gen_method_call(object, method, args),
             Expr::Pipeline { steps, .. } => self.gen_pipeline(steps),
+            Expr::Loop { body, .. } => {
+                format!("loop {{\n{}\n}}", self.gen_expr(body, true))
+            }
+            Expr::Break { .. } => "break".to_string(),
             Expr::Field { object, field, .. } => {
                 format!("{}.{}", self.gen_expr(object, false), field)
             }

@@ -1,4 +1,290 @@
-// crucible: ForgeScript の PostgreSQL ORM ライブラリ
-// Phase C-3 以降で本実装に置き換える
+// crucible/mod.forge — 公開 CRUD API
+// Phase C-3-C
+//
+// このファイルは crucible パッケージのエントリポイントです。
+// 各サブモジュールの関数を使いやすい形でラップして提供します。
+pub use ./conn.*
+pub use ./query.*
+pub use ./model.*
+pub use ./builder.*
+pub use ./migration.*
+pub use ./types.*
 
-// スタブ: 現時点では何もエクスポートしない
+// ── テーブル直接 CRUD API ─────────────────────────────────────────────────
+//
+// モデルレジストリを使わず、テーブル名を直接指定して操作するシンプル API。
+
+// all_rows(conn, table) -> list<map>!
+// テーブルの全行を返す。
+pub fn all_rows(conn: Conn, table: string) -> list<map>! {
+    let sql = "SELECT * FROM {table}"
+    execute(conn, sql, [])
+}
+
+// find_by_id(conn, table, id) -> map!
+// 主キー id で行を1件取得する。0 件なら err を返す。
+// 主キーカラム名は "id" と仮定する。
+pub fn find_by_id(conn: Conn, table: string, id: number) -> map! {
+    let sql = "SELECT * FROM {table} WHERE id = $1 LIMIT 1"
+    execute_one(conn, sql, [id])
+}
+
+// first_where(conn, table, condition, params) -> map!
+// 条件に合致する最初の行を返す。0 件なら err を返す。
+// condition 例: "name = $1 AND active = $2"
+pub fn first_where(conn: Conn, table: string, condition: string, params: list) -> map! {
+    let sql = "SELECT * FROM {table} WHERE {condition} LIMIT 1"
+    execute_one(conn, sql, params)
+}
+
+// where_many(conn, table, condition, params) -> list<map>!
+// 条件に合致するすべての行を返す。
+pub fn where_many(conn: Conn, table: string, condition: string, params: list) -> list<map>! {
+    let sql = "SELECT * FROM {table} WHERE {condition}"
+    execute(conn, sql, params)
+}
+
+// map_keys_sorted(m) -> list<string>
+// マップのキーリストを返す（挿入順）
+// build_insert で使用する内部ヘルパー
+pub fn map_keys_sorted(m: map) -> list<string> {
+    map_keys(m)
+}
+
+// build_insert_sql(table, values) -> map
+// INSERT 文を生成する。戻り値: { "sql": string, "params": list }
+// values の各キー・値ペアからカラム名と値リストを生成する。
+pub fn build_insert_sql(table: string, values: map) -> map {
+    let keys = map_keys_sorted(values)
+    let key_count = keys.len()
+
+    if key_count == 0 {
+        return { "sql": "INSERT INTO {table} DEFAULT VALUES RETURNING *", "params": [] }
+    }
+
+    // カラム名リストを生成する
+    let col_parts = []
+    state i = 0
+    while i < key_count {
+        col_parts.push(keys[i])
+        i = i + 1
+    }
+
+    // プレースホルダリスト ($1, $2, ...) を生成する
+    let placeholder_parts = []
+    state j = 0
+    while j < key_count {
+        let n = j + 1
+        placeholder_parts.push("${n}")
+        j = j + 1
+    }
+
+    // パラメータリストを生成する
+    let params = []
+    state k = 0
+    while k < key_count {
+        params.push(values[keys[k]])
+        k = k + 1
+    }
+
+    // カラムリスト文字列
+    let col_count = col_parts.len()
+    state cols_str = col_parts[0]
+    state ci = 1
+    while ci < col_count {
+        cols_str = "{cols_str}, {col_parts[ci]}"
+        ci = ci + 1
+    }
+
+    // プレースホルダリスト文字列
+    let ph_count = placeholder_parts.len()
+    state ph_str = placeholder_parts[0]
+    state pi = 1
+    while pi < ph_count {
+        ph_str = "{ph_str}, {placeholder_parts[pi]}"
+        pi = pi + 1
+    }
+
+    let sql = "INSERT INTO {table} ({cols_str}) VALUES ({ph_str}) RETURNING *"
+    { "sql": sql, "params": params }
+}
+
+// insert_row(conn, table, values) -> map!
+// テーブルに行を挿入して挿入された行を返す（RETURNING * を使用）。
+// values は { "column_name": value, ... } 形式の map。
+pub fn insert_row(conn: Conn, table: string, values: map) -> map! {
+    let insert_info = build_insert_sql(table, values)
+    execute_one(conn, insert_info["sql"], insert_info["params"])
+}
+
+// delete_where(conn, table, condition, params) -> unit!
+// 条件に合致する行をすべて削除する。
+pub fn delete_where(conn: Conn, table: string, condition: string, params: list) -> unit! {
+    let sql = "DELETE FROM {table} WHERE {condition}"
+    execute(conn, sql, params)?
+    ok(unit)
+}
+
+// update_where(conn, table, values, condition, params) -> list<map>!
+// 条件に合致する行を更新して更新された行を返す（RETURNING * を使用）。
+// values は { "column_name": new_value, ... } 形式の map。
+pub fn update_where(conn: Conn, table: string, values: map, condition: string, cond_params: list) -> list<map>! {
+    let keys = map_keys_sorted(values)
+    let key_count = keys.len()
+    if key_count == 0 {
+        return err("update_where: values は空にできません")
+    }
+
+    // SET 句を生成する: key1 = $1, key2 = $2, ...
+    let set_parts = []
+    let params = []
+    state i = 0
+    while i < key_count {
+        let n = i + 1
+        set_parts.push("{keys[i]} = ${n}")
+        params.push(values[keys[i]])
+        i = i + 1
+    }
+
+    // SET 句文字列
+    let set_count = set_parts.len()
+    state set_str = set_parts[0]
+    state si = 1
+    while si < set_count {
+        set_str = "{set_str}, {set_parts[si]}"
+        si = si + 1
+    }
+
+    // condition 中の $1, $2, ... をオフセット後の番号に変換する
+    let offset = key_count
+    let cond_param_count = cond_params.len()
+    state renumbered_cond = condition
+    state j = cond_param_count
+    while j >= 1 {
+        let old_ph = "${j}"
+        let new_index = offset + j
+        let new_ph = "${new_index}"
+        renumbered_cond = string_replace(renumbered_cond, old_ph, new_ph)
+        j = j - 1
+    }
+
+    // cond_params をマージする
+    state k = 0
+    while k < cond_param_count {
+        params.push(cond_params[k])
+        k = k + 1
+    }
+
+    let sql = "UPDATE {table} SET {set_str} WHERE {renumbered_cond} RETURNING *"
+    execute(conn, sql, params)
+}
+
+// ── モデルレジストリ経由 CRUD API ─────────────────────────────────────────
+//
+// モデルレジストリを使用してテーブル名を解決する高レベル API。
+// all_rows / find_by_id などの薄いラッパー。
+
+// model_all(conn, registry, model_name) -> list<map>!
+// モデルに対応するテーブルの全行を返す。
+pub fn model_all(conn: Conn, registry: map, model_name: string) -> list<map>! {
+    let table = model_table(registry, model_name)?
+    all_rows(conn, table)
+}
+
+// model_find(conn, registry, model_name, id) -> map!
+// モデルの行を id で取得する。
+pub fn model_find(conn: Conn, registry: map, model_name: string, id: number) -> map! {
+    let table = model_table(registry, model_name)?
+    find_by_id(conn, table, id)
+}
+
+// model_insert(conn, registry, model_name, values) -> map!
+// モデルのテーブルに行を挿入する。
+pub fn model_insert(conn: Conn, registry: map, model_name: string, values: map) -> map! {
+    let table = model_table(registry, model_name)?
+    insert_row(conn, table, values)
+}
+
+// model_delete(conn, registry, model_name, condition, params) -> unit!
+// モデルのテーブルから条件に合致する行を削除する。
+pub fn model_delete(conn: Conn, registry: map, model_name: string, condition: string, params: list) -> unit! {
+    let table = model_table(registry, model_name)?
+    delete_where(conn, table, condition, params)
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────
+
+test "build_insert_sql は正しい INSERT 文を生成する" {
+    // 単純な値マップで確認
+    state values = {}
+    values.insert("name", "Alice")
+    values.insert("email", "alice@example.com")
+    let result = build_insert_sql("users", values)
+    let sql = result["sql"]
+    let params = result["params"]
+    // SQL に必須要素が含まれることを確認する
+    // （キーの順序は実装依存のため部分一致で確認）
+    assert(sql != "")
+    // RETURNING * が含まれる
+    let has_returning = str_contains(sql, "RETURNING *")
+    assert(has_returning)
+    // パラメータ数が一致する
+    assert_eq(params.len(), 2)
+}
+
+test "build_insert_sql は空の values に DEFAULT VALUES を生成する" {
+    let result = build_insert_sql("logs", {})
+    assert_eq(result["sql"], "INSERT INTO logs DEFAULT VALUES RETURNING *")
+    assert_eq(result["params"].len(), 0)
+}
+
+test "all_rows は正しい SQL を生成する（単体確認）" {
+    // 実際の DB 接続なしで SQL 文字列を確認するためのロジックテスト
+    let table = "users"
+    let expected_sql = "SELECT * FROM {table}"
+    // bind_params にパラメータなしで渡した場合の動作確認
+    let bound = bind_params(expected_sql, [])
+    assert_eq(bound, "SELECT * FROM users")
+}
+
+test "find_by_id の SQL にはプレースホルダが含まれる" {
+    let table = "posts"
+    let sql = "SELECT * FROM {table} WHERE id = $1 LIMIT 1"
+    let bound = bind_params(sql, [99])
+    assert_eq(bound, "SELECT * FROM posts WHERE id = 99 LIMIT 1")
+}
+
+test "delete_where の SQL 生成確認" {
+    let table = "sessions"
+    let condition = "user_id = $1 AND expired = $2"
+    let sql = "DELETE FROM {table} WHERE {condition}"
+    let bound = bind_params(sql, [42, true])
+    assert_eq(bound, "DELETE FROM sessions WHERE user_id = 42 AND expired = true")
+}
+
+// str_contains(s, sub) -> bool
+// s が sub を含むかどうかを返す内部ヘルパー
+pub fn str_contains(s: string, sub: string) -> bool {
+    let s_bytes = string_to_bytes(s)
+    let sub_bytes = string_to_bytes(sub)
+    let s_len = s_bytes.len()
+    let sub_len = sub_bytes.len()
+    if sub_len == 0 { return true }
+    if sub_len > s_len { return false }
+    state i = 0
+    while i <= s_len - sub_len {
+        state matched = true
+        state j = 0
+        while j < sub_len {
+            if s_bytes[i + j] != sub_bytes[j] {
+                matched = false
+                j = sub_len  // ループを抜ける
+            } else {
+                j = j + 1
+            }
+        }
+        if matched { return true }
+        i = i + 1
+    }
+    false
+}

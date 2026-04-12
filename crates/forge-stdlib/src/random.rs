@@ -41,3 +41,11 @@ pub fn seed_random(seed: u64) {
     let mut guard = RNG.lock().expect("rng lock");
     *guard = StdRng::seed_from_u64(seed);
 }
+
+/// seed してから1回 random_int を読む（1ロック内で完結させる）
+#[doc(hidden)]
+pub fn seed_and_random_int(seed: u64, min: i64, max: i64) -> i64 {
+    let mut guard = RNG.lock().expect("rng lock");
+    *guard = StdRng::seed_from_u64(seed);
+    guard.gen_range(min..=max)
+}

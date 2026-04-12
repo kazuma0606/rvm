@@ -1,0 +1,15 @@
+[database]
+driver   = "postgres"
+host     = "localhost"
+port     = 5432
+name     = "crucible_test"
+user     = "postgres"
+password = "test"
+
+[pool]
+max_connections = 10
+connect_timeout = 5000
+
+[migrations]
+directory = "migrations"
+table     = "_crucible_migrations"

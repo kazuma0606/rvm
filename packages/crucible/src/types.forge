@@ -1,0 +1,279 @@
+// crucible/types.forge — PostgreSQL 型マッピング
+// Phase C-2-A
+
+// ── OID 定数 ─────────────────────────────────────────────────────────────
+//
+// 主要な PostgreSQL 組み込み型 OID
+// (pg_type システムカタログより抜粋)
+//
+//   bool        = 16
+//   int2        = 21
+//   int4        = 23
+//   int8        = 20
+//   float4      = 700
+//   float8      = 701
+//   numeric     = 1700
+//   char        = 18  (単一文字)
+//   bpchar      = 1042 (blank-padded char = CHAR(n))
+//   varchar     = 1043
+//   text        = 25
+//   bytea       = 17
+//   timestamp   = 1114
+//   timestamptz = 1184
+//   date        = 1082
+//   time        = 1083
+//   json        = 114
+//   jsonb       = 3802
+//   uuid        = 2950
+//   oid         = 26
+//   serial      = int4 (23)
+//   bigserial   = int8 (20)
+
+// pg_oid_to_type(oid) -> string
+// OID を型名文字列に変換する。未知の OID は "text" として扱う。
+pub fn pg_oid_to_type(oid: number) -> string {
+    if oid == 16  { return "bool" }
+    if oid == 20  { return "int8" }
+    if oid == 21  { return "int2" }
+    if oid == 23  { return "int4" }
+    if oid == 26  { return "oid" }
+    if oid == 700 { return "float4" }
+    if oid == 701 { return "float8" }
+    if oid == 1700 { return "numeric" }
+    if oid == 18  { return "char" }
+    if oid == 1042 { return "bpchar" }
+    if oid == 1043 { return "varchar" }
+    if oid == 25  { return "text" }
+    if oid == 17  { return "bytea" }
+    if oid == 1114 { return "timestamp" }
+    if oid == 1184 { return "timestamptz" }
+    if oid == 1082 { return "date" }
+    if oid == 1083 { return "time" }
+    if oid == 114  { return "json" }
+    if oid == 3802 { return "jsonb" }
+    if oid == 2950 { return "uuid" }
+    // 未知の型は text として扱う
+    "text"
+}
+
+// is_integer_type(pg_type) -> bool
+// 整数型かどうかを返す
+pub fn is_integer_type(pg_type: string) -> bool {
+    if pg_type == "int2" { return true }
+    if pg_type == "int4" { return true }
+    if pg_type == "int8" { return true }
+    if pg_type == "oid"  { return true }
+    false
+}
+
+// is_float_type(pg_type) -> bool
+// 浮動小数点型かどうかを返す
+pub fn is_float_type(pg_type: string) -> bool {
+    if pg_type == "float4"   { return true }
+    if pg_type == "float8"   { return true }
+    if pg_type == "numeric"  { return true }
+    false
+}
+
+// is_string_type(pg_type) -> bool
+// 文字列型かどうかを返す
+pub fn is_string_type(pg_type: string) -> bool {
+    if pg_type == "varchar"  { return true }
+    if pg_type == "text"     { return true }
+    if pg_type == "char"     { return true }
+    if pg_type == "bpchar"   { return true }
+    if pg_type == "uuid"     { return true }
+    false
+}
+
+// is_temporal_type(pg_type) -> bool
+// 日時型かどうかを返す（string として返す）
+pub fn is_temporal_type(pg_type: string) -> bool {
+    if pg_type == "timestamp"   { return true }
+    if pg_type == "timestamptz" { return true }
+    if pg_type == "date"        { return true }
+    if pg_type == "time"        { return true }
+    false
+}
+
+// is_json_type(pg_type) -> bool
+// JSON 型かどうかを返す
+pub fn is_json_type(pg_type: string) -> bool {
+    if pg_type == "json"  { return true }
+    if pg_type == "jsonb" { return true }
+    false
+}
+
+// pg_value_to_forge(pg_type, text) -> map
+// PostgreSQL テキスト形式の値を ForgeScript の Value に変換する。
+// 戻り値は { "type": string, "value": any } の形式:
+//   type = "number"  -> value は number
+//   type = "bool"    -> value は bool
+//   type = "string"  -> value は string
+//   type = "unit"    -> value は unit (NULL)
+//
+// NULL は空文字列 "" で渡す規約とする。
+pub fn pg_value_to_forge(pg_type: string, text: string) -> map {
+    // NULL チェック: 空文字列は unit として扱う
+    if text == "" {
+        return { "type": "unit", "value": unit }
+    }
+
+    // bool 型: PostgreSQL は "t" / "f" で返す
+    if pg_type == "bool" {
+        if text == "t" {
+            return { "type": "bool", "value": true }
+        }
+        return { "type": "bool", "value": false }
+    }
+
+    // 整数型: number に変換
+    if is_integer_type(pg_type) {
+        let n = number(text)
+        return { "type": "number", "value": n }
+    }
+
+    // 浮動小数点型: number に変換
+    if is_float_type(pg_type) {
+        let n = number(text)
+        return { "type": "number", "value": n }
+    }
+
+    // 文字列型: そのまま返す
+    if is_string_type(pg_type) {
+        return { "type": "string", "value": text }
+    }
+
+    // 日時型: 文字列として返す
+    if is_temporal_type(pg_type) {
+        return { "type": "string", "value": text }
+    }
+
+    // JSON 型: 文字列として返す（パースは呼び出し側で行う）
+    if is_json_type(pg_type) {
+        return { "type": "string", "value": text }
+    }
+
+    // bytea 型: 文字列として返す
+    if pg_type == "bytea" {
+        return { "type": "string", "value": text }
+    }
+
+    // 未知の型: 文字列として返す
+    { "type": "string", "value": text }
+}
+
+// pg_value_to_forge_simple(pg_type, text) -> any
+// pg_value_to_forge の簡略版: map ではなく値そのものを返す。
+// 型情報が不要な場合に使用する。
+pub fn pg_value_to_forge_simple(pg_type: string, text: string) -> any {
+    let result = pg_value_to_forge(pg_type, text)
+    result["value"]
+}
+
+// convert_row_types(row: map, cols: list<map>) -> map
+// DataRow の各フィールドを OID に基づいて適切な型に変換する。
+// cols は parse_row_description の出力（{ "name": string, "oid": number }）。
+// row の各値はテキスト形式の文字列。
+pub fn convert_row_types(row: map, cols: list<map>) -> map {
+    let converted = {}
+    state i = 0
+    let col_count = cols.len()
+    while i < col_count {
+        let col = cols[i]
+        let col_name = col["name"]
+        let col_oid = col["oid"]
+        let pg_type = pg_oid_to_type(col_oid)
+        // row にそのキーが存在する場合のみ変換する（NULL の場合はキーが存在しない）
+        let text_val = row[col_name]
+        if text_val == unit {
+            // キーが存在しない = NULL
+            // unit のまま格納
+            converted.insert(col_name, unit)
+        } else {
+            let typed_val = pg_value_to_forge_simple(pg_type, text_val)
+            converted.insert(col_name, typed_val)
+        }
+        i = i + 1
+    }
+    converted
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────
+
+test "pg_value_to_forge('int4', '42') は number を返す" {
+    let result = pg_value_to_forge("int4", "42")
+    assert_eq(result["type"], "number")
+    assert_eq(result["value"], 42)
+}
+
+test "pg_value_to_forge('bool', 't') は true を返す" {
+    let result = pg_value_to_forge("bool", "t")
+    assert_eq(result["type"], "bool")
+    assert_eq(result["value"], true)
+}
+
+test "pg_value_to_forge('bool', 'f') は false を返す" {
+    let result = pg_value_to_forge("bool", "f")
+    assert_eq(result["type"], "bool")
+    assert_eq(result["value"], false)
+}
+
+test "pg_value_to_forge('text', 'hello') は string を返す" {
+    let result = pg_value_to_forge("text", "hello")
+    assert_eq(result["type"], "string")
+    assert_eq(result["value"], "hello")
+}
+
+test "pg_value_to_forge('varchar', 'world') は string を返す" {
+    let result = pg_value_to_forge("varchar", "world")
+    assert_eq(result["type"], "string")
+    assert_eq(result["value"], "world")
+}
+
+test "pg_value_to_forge('float4', '3.14') は number を返す" {
+    let result = pg_value_to_forge("float4", "3.14")
+    assert_eq(result["type"], "number")
+}
+
+test "pg_value_to_forge('int8', '9876543210') は number を返す" {
+    let result = pg_value_to_forge("int8", "9876543210")
+    assert_eq(result["type"], "number")
+    assert_eq(result["value"], 9876543210)
+}
+
+test "NULL (空文字列) は unit を返す" {
+    let result = pg_value_to_forge("text", "")
+    assert_eq(result["type"], "unit")
+}
+
+test "pg_value_to_forge('timestamp', '2024-01-01 12:00:00') は string を返す" {
+    let result = pg_value_to_forge("timestamp", "2024-01-01 12:00:00")
+    assert_eq(result["type"], "string")
+    assert_eq(result["value"], "2024-01-01 12:00:00")
+}
+
+test "pg_value_to_forge json type は string を返す" {
+    let result = pg_value_to_forge("json", "null")
+    assert_eq(result["type"], "string")
+}
+
+test "pg_oid_to_type(23) は 'int4' を返す" {
+    let t = pg_oid_to_type(23)
+    assert_eq(t, "int4")
+}
+
+test "pg_oid_to_type(25) は 'text' を返す" {
+    let t = pg_oid_to_type(25)
+    assert_eq(t, "text")
+}
+
+test "pg_oid_to_type(16) は 'bool' を返す" {
+    let t = pg_oid_to_type(16)
+    assert_eq(t, "bool")
+}
+
+test "pg_oid_to_type(未知) は 'text' を返す" {
+    let t = pg_oid_to_type(99999)
+    assert_eq(t, "text")
+}

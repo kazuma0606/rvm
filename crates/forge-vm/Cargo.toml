@@ -8,6 +8,11 @@ forge-compiler = { path = "../forge-compiler" }
 serde_json = "1"
 csv = "1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+base64 = "0.22"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

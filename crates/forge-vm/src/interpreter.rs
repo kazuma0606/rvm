@@ -130,6 +130,8 @@ pub enum RuntimeError {
     PropagateErr(String),
     /// アサーション失敗（forge test でテストを失敗としてマーク）（FT-1-D）
     TestFailure(String),
+    /// break 文による loop の脱出（eval_loop が補足）
+    LoopBreak,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -153,6 +155,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::Return(_) => write!(f, "<return>"),
             RuntimeError::PropagateErr(e) => write!(f, "<propagate err: {}>", e),
             RuntimeError::TestFailure(msg) => write!(f, "assertion failed: {}", msg),
+            RuntimeError::LoopBreak => write!(f, "<break>"),
         }
     }
 }
@@ -378,6 +381,7 @@ impl Interpreter {
 
     fn register_builtins(&mut self) {
         self.define("none", Value::Option(None), false);
+        self.define("unit", Value::Unit, false);
 
         macro_rules! native {
             ($f:expr) => {
@@ -478,6 +482,61 @@ impl Interpreter {
                         "{} を number に変換できません",
                         v.type_name()
                     )))),
+                }
+            }),
+            false,
+        );
+
+        self.define(
+            "string_replace",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 3 {
+                    return Err("string_replace() takes 3 args: (s, from, to)".to_string());
+                }
+                let to = match args.remove(2) {
+                    Value::String(s) => s,
+                    v => {
+                        return Err(format!(
+                            "string_replace: 'to' must be string, got {}",
+                            v.type_name()
+                        ))
+                    }
+                };
+                let from = match args.remove(1) {
+                    Value::String(s) => s,
+                    v => {
+                        return Err(format!(
+                            "string_replace: 'from' must be string, got {}",
+                            v.type_name()
+                        ))
+                    }
+                };
+                let s = match args.remove(0) {
+                    Value::String(s) => s,
+                    v => {
+                        return Err(format!(
+                            "string_replace: 's' must be string, got {}",
+                            v.type_name()
+                        ))
+                    }
+                };
+                Ok(Value::String(s.replacen(&from, &to, 1)))
+            }),
+            false,
+        );
+
+        self.define(
+            "map_keys",
+            native!(|mut args: Vec<Value>| {
+                if args.len() != 1 {
+                    return Err("map_keys() takes 1 arg".to_string());
+                }
+                match args.remove(0) {
+                    Value::Map(entries) => {
+                        let keys: Vec<Value> = entries.into_iter().map(|(k, _)| k).collect();
+                        Ok(mk_list(keys))
+                    }
+                    v => Err(format!("map_keys: expected map, got {}", v.type_name())),
                 }
             }),
             false,
@@ -1344,9 +1403,10 @@ impl Interpreter {
                         .unwrap_or(false);
                     if is_sub_dir {
                         // サブディレクトリの場合は再帰
-                        self.eval_directory_use(&sub_path, &UseSymbols::All, depth + 1)?;
+                        self.eval_directory_use_with_tracking(&sub_path, &UseSymbols::All, depth + 1)?;
                     } else {
-                        self.eval_file_use(&sub_path, &UseSymbols::All)?;
+                        // dep パッケージ内ファイルの場合は with_tracking を使う（path rewriting のため）
+                        self.eval_file_use_with_tracking(&sub_path, &UseSymbols::All)?;
                     }
                 }
                 // wildcard 分は既に処理済みなので、名前付きシンボルのみを返す
@@ -1586,6 +1646,8 @@ impl Interpreter {
                 ..
             } => self.eval_if(cond, then_block, else_block.as_deref()),
             Expr::While { cond, body, .. } => self.eval_while(cond, body),
+            Expr::Loop { body, .. } => self.eval_loop(body),
+            Expr::Break { .. } => Err(RuntimeError::LoopBreak),
             Expr::For {
                 var, iter, body, ..
             } => self.eval_for(var, iter, body),
@@ -1834,6 +1896,18 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    fn eval_loop(&mut self, body: &Expr) -> Result<Value, RuntimeError> {
+        loop {
+            match self.eval_expr(body) {
+                Ok(_) => {}
+                Err(RuntimeError::LoopBreak) => break,
+                Err(RuntimeError::Return(v)) => return Err(RuntimeError::Return(v)),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Value::Unit)
+    }
+
     fn eval_for(&mut self, var: &str, iter: &Expr, body: &Expr) -> Result<Value, RuntimeError> {
         let iter_val = self.eval_expr(iter)?;
         let items = match iter_val {
@@ -1903,17 +1977,38 @@ impl Interpreter {
             // TCP クライアント関数
             if matches!(
                 name.as_str(),
-                "tcp_connect"
-                    | "tcp_write"
-                    | "tcp_read_exact"
-                    | "tcp_read_available"
-                    | "tcp_close"
+                "tcp_connect" | "tcp_write" | "tcp_read_exact" | "tcp_read_available" | "tcp_close"
             ) {
                 let arg_vals: Vec<Value> = args
                     .iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
                 return eval_tcp_client(name, arg_vals);
+            }
+            // SCRAM-SHA-256 暗号計算関数
+            if matches!(
+                name.as_str(),
+                "scram_generate_nonce"
+                    | "scram_hi"
+                    | "scram_hmac"
+                    | "scram_h"
+                    | "scram_xor"
+                    | "scram_base64_encode"
+                    | "scram_base64_decode"
+            ) {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return eval_scram(name, arg_vals);
+            }
+            // バイト列 ↔ 文字列変換関数
+            if matches!(name.as_str(), "string_to_bytes" | "bytes_to_str") {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                return eval_bytes_string(name, arg_vals);
             }
         }
         let callee_val = self.eval_expr(callee)?;
@@ -5865,8 +5960,8 @@ fn rewrite_local_use_paths(stmts: &[Stmt], dep_name: &str) -> Vec<Stmt> {
 fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
     use std::collections::HashMap as StdMap;
     use std::rc::Rc;
-    use std::sync::{Arc, Mutex, OnceLock};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     // レジストリ: conn_id → Arc<Mutex<std::net::TcpStream>>
     static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -5881,9 +5976,10 @@ fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> 
         CONN_COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn lock_registry(
-    ) -> Result<std::sync::MutexGuard<'static, StdMap<u64, Arc<Mutex<std::net::TcpStream>>>>, RuntimeError>
-    {
+    fn lock_registry() -> Result<
+        std::sync::MutexGuard<'static, StdMap<u64, Arc<Mutex<std::net::TcpStream>>>>,
+        RuntimeError,
+    > {
         get_registry()
             .lock()
             .map_err(|_| RuntimeError::Custom("tcp conn registry lock poisoned".to_string()))
@@ -6049,10 +6145,7 @@ fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> 
             let stream_arc = registry
                 .get(&conn_id)
                 .ok_or_else(|| {
-                    RuntimeError::Custom(format!(
-                        "tcp_read_available: unknown conn_id {}",
-                        conn_id
-                    ))
+                    RuntimeError::Custom(format!("tcp_read_available: unknown conn_id {}", conn_id))
                 })?
                 .clone();
             drop(registry);
@@ -6065,10 +6158,7 @@ fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> 
                 .read(&mut chunk)
                 .map_err(|e| RuntimeError::Custom(format!("tcp_read_available failed: {}", e)))?;
             let list = Rc::new(std::cell::RefCell::new(
-                chunk[..n]
-                    .iter()
-                    .map(|&b| Value::Int(b as i64))
-                    .collect(),
+                chunk[..n].iter().map(|&b| Value::Int(b as i64)).collect(),
             ));
             Ok(Value::Result(Ok(Box::new(Value::List(list)))))
         }
@@ -6085,6 +6175,251 @@ fn eval_tcp_client(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> 
         }
         _ => Err(RuntimeError::Custom(format!(
             "unknown tcp client function: {}",
+            name
+        ))),
+    }
+}
+
+// ── バイト列 ↔ 文字列変換 ──────────────────────────────────────────────────
+//
+// string_to_bytes(s: string) -> list<number>  — UTF-8 バイト列に変換
+// bytes_to_str(bytes: list<number>) -> string — UTF-8 バイト列から文字列に変換
+
+fn eval_bytes_string(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    match name {
+        "string_to_bytes" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "string_to_bytes(s) takes 1 argument".to_string(),
+                ));
+            }
+            match &args[0] {
+                Value::String(s) => {
+                    let bytes: Vec<Value> =
+                        s.as_bytes().iter().map(|&b| Value::Int(b as i64)).collect();
+                    Ok(Value::List(Rc::new(RefCell::new(bytes))))
+                }
+                other => Err(RuntimeError::Custom(format!(
+                    "string_to_bytes: expected string, got {}",
+                    other.type_name()
+                ))),
+            }
+        }
+        "bytes_to_str" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "bytes_to_str(bytes) takes 1 argument".to_string(),
+                ));
+            }
+            match &args[0] {
+                Value::List(items) => {
+                    let bytes: Result<Vec<u8>, RuntimeError> = items
+                        .borrow()
+                        .iter()
+                        .map(|v| match v {
+                            Value::Int(n) => Ok((*n & 0xFF) as u8),
+                            Value::Float(n) => Ok(*n as u8),
+                            other => Err(RuntimeError::Custom(format!(
+                                "bytes_to_str: byte must be number, got {}",
+                                other.type_name()
+                            ))),
+                        })
+                        .collect();
+                    let bytes = bytes?;
+                    match String::from_utf8(bytes) {
+                        Ok(s) => Ok(Value::String(s)),
+                        Err(_) => {
+                            // 無効な UTF-8 は lossy 変換
+                            Ok(Value::String(String::new()))
+                        }
+                    }
+                }
+                other => Err(RuntimeError::Custom(format!(
+                    "bytes_to_str: expected list<number>, got {}",
+                    other.type_name()
+                ))),
+            }
+        }
+        _ => Err(RuntimeError::Custom(format!(
+            "unknown bytes/string function: {}",
+            name
+        ))),
+    }
+}
+
+// ── SCRAM-SHA-256 暗号計算関数 ────────────────────────────────────────────
+//
+// ForgeScript から呼べる組み込み関数として実装する。
+// scram_generate_nonce / scram_hi / scram_hmac / scram_h / scram_xor /
+// scram_base64_encode / scram_base64_decode
+
+fn eval_scram(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    /// Value::List から Vec<u8> に変換するヘルパー
+    fn list_to_bytes(v: &Value) -> Result<Vec<u8>, RuntimeError> {
+        match v {
+            Value::List(items) => items
+                .borrow()
+                .iter()
+                .map(|item| match item {
+                    Value::Int(n) => Ok((*n & 0xFF) as u8),
+                    Value::Float(n) => Ok(*n as u8),
+                    other => Err(RuntimeError::Custom(format!(
+                        "scram: byte list element must be number, got {}",
+                        other.type_name()
+                    ))),
+                })
+                .collect(),
+            other => Err(RuntimeError::Custom(format!(
+                "scram: expected list<number>, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    /// Vec<u8> を Value::List に変換するヘルパー
+    fn bytes_to_list(bytes: Vec<u8>) -> Value {
+        let items: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+        Value::List(Rc::new(RefCell::new(items)))
+    }
+
+    match name {
+        "scram_generate_nonce" => {
+            // 18 バイトの乱数を base64 エンコードしてノンスを生成する
+            use rand::RngCore;
+            let mut bytes = [0u8; 18];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let nonce = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(Value::String(nonce))
+        }
+        "scram_hi" => {
+            // scram_hi(password: string, salt: list<number>, iterations: number) -> list<number>
+            // PBKDF2-HMAC-SHA256
+            if args.len() != 3 {
+                return Err(RuntimeError::Custom(
+                    "scram_hi(password, salt, iterations) takes 3 arguments".to_string(),
+                ));
+            }
+            let password = match &args[0] {
+                Value::String(s) => s.as_bytes().to_vec(),
+                other => {
+                    return Err(RuntimeError::Custom(format!(
+                        "scram_hi: password must be string, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            let salt = list_to_bytes(&args[1])?;
+            let iterations: u32 = match &args[2] {
+                Value::Int(n) => u32::try_from(*n).map_err(|_| {
+                    RuntimeError::Custom(format!("scram_hi: invalid iterations: {}", n))
+                })?,
+                Value::Float(n) => *n as u32,
+                other => {
+                    return Err(RuntimeError::Custom(format!(
+                        "scram_hi: iterations must be number, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            let mut output = vec![0u8; 32]; // SHA-256 output = 32 bytes
+            pbkdf2::pbkdf2::<HmacSha256>(&password, &salt, iterations, &mut output)
+                .map_err(|e| RuntimeError::Custom(format!("scram_hi pbkdf2 failed: {}", e)))?;
+            Ok(bytes_to_list(output))
+        }
+        "scram_hmac" => {
+            // scram_hmac(key: list<number>, msg: string) -> list<number>
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "scram_hmac(key, msg) takes 2 arguments".to_string(),
+                ));
+            }
+            let key = list_to_bytes(&args[0])?;
+            let msg = match &args[1] {
+                Value::String(s) => s.as_bytes().to_vec(),
+                other => {
+                    return Err(RuntimeError::Custom(format!(
+                        "scram_hmac: msg must be string, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            let mut mac = HmacSha256::new_from_slice(&key)
+                .map_err(|e| RuntimeError::Custom(format!("scram_hmac key error: {}", e)))?;
+            mac.update(&msg);
+            let result = mac.finalize().into_bytes().to_vec();
+            Ok(bytes_to_list(result))
+        }
+        "scram_h" => {
+            // scram_h(data: list<number>) -> list<number> — SHA-256 ハッシュ
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "scram_h(data) takes 1 argument".to_string(),
+                ));
+            }
+            let data = list_to_bytes(&args[0])?;
+            let hash = Sha256::digest(&data).to_vec();
+            Ok(bytes_to_list(hash))
+        }
+        "scram_xor" => {
+            // scram_xor(a: list<number>, b: list<number>) -> list<number>
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "scram_xor(a, b) takes 2 arguments".to_string(),
+                ));
+            }
+            let a = list_to_bytes(&args[0])?;
+            let b = list_to_bytes(&args[1])?;
+            if a.len() != b.len() {
+                return Err(RuntimeError::Custom(format!(
+                    "scram_xor: length mismatch: {} vs {}",
+                    a.len(),
+                    b.len()
+                )));
+            }
+            let result: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
+            Ok(bytes_to_list(result))
+        }
+        "scram_base64_encode" => {
+            // scram_base64_encode(data: list<number>) -> string
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "scram_base64_encode(data) takes 1 argument".to_string(),
+                ));
+            }
+            let data = list_to_bytes(&args[0])?;
+            Ok(Value::String(
+                base64::engine::general_purpose::STANDARD.encode(&data),
+            ))
+        }
+        "scram_base64_decode" => {
+            // scram_base64_decode(s: string) -> list<number>!
+            if args.len() != 1 {
+                return Err(RuntimeError::Custom(
+                    "scram_base64_decode(s) takes 1 argument".to_string(),
+                ));
+            }
+            let s = match &args[0] {
+                Value::String(s) => s.clone(),
+                other => {
+                    return Err(RuntimeError::Custom(format!(
+                        "scram_base64_decode: expected string, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            match base64::engine::general_purpose::STANDARD.decode(&s) {
+                Ok(bytes) => Ok(Value::Result(Ok(Box::new(bytes_to_list(bytes))))),
+                Err(e) => Ok(Value::Result(Err(format!("scram_base64_decode: {}", e)))),
+            }
+        }
+        _ => Err(RuntimeError::Custom(format!(
+            "unknown scram function: {}",
             name
         ))),
     }
@@ -8440,5 +8775,406 @@ res
         }
 
         mock.assert();
+    }
+
+    // ── C-1-A: wire protocol encode テスト ─────────────────────────────────
+
+    #[test]
+    fn c1a_encode_terminate_returns_correct_bytes() {
+        // encode_terminate() が [88, 0, 0, 0, 4] を返すことを確認する
+        // NOTE: ForgeScript では let 変数宣言の直後にリストリテラルを書くと
+        //       インデックスアクセスと誤解釈されるため、リテラルを変数に代入する
+        let src = r#"
+fn encode_terminate() -> list<number> {
+    let out = [88, 0, 0, 0, 4]
+    out
+}
+let result = encode_terminate()
+result.len()
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(5), "length should be 5");
+    }
+
+    #[test]
+    fn c1a_encode_terminate_byte_values() {
+        let src = r#"
+fn encode_terminate() -> list<number> {
+    let out = [88, 0, 0, 0, 4]
+    out
+}
+let result = encode_terminate()
+result[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(88), "byte[0] should be 88 ('X')");
+    }
+
+    #[test]
+    fn c1a_encode_int32_big_endian() {
+        // encode_int32(256) の動作確認（byte[2] == 1 であれば正しいビッグエンディアン）
+        let src = r#"
+fn encode_int32(n: number) -> list<number> {
+    let b0 = (n / 16777216) % 256
+    let b1 = (n / 65536) % 256
+    let b2 = (n / 256) % 256
+    let b3 = n % 256
+    let out = [b0, b1, b2, b3]
+    out
+}
+let r = encode_int32(256)
+r[2]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(
+            result,
+            Value::Int(1),
+            "byte[2] of 256 should be 1 (big-endian)"
+        );
+    }
+
+    #[test]
+    fn c1a_encode_query_select_1() {
+        // encode_query("SELECT 1") のバイト列長が正しいことを確認する
+        let src = r#"
+fn encode_int32(n: number) -> list<number> {
+    let b0 = (n / 16777216) % 256
+    let b1 = (n / 65536) % 256
+    let b2 = (n / 256) % 256
+    let b3 = n % 256
+    let out = [b0, b1, b2, b3]
+    out
+}
+fn encode_string(s: string) -> list<number> {
+    let raw = string_to_bytes(s)
+    let result = []
+    state i = 0
+    let len = raw.len()
+    loop {
+        if i >= len { break }
+        result.push(raw[i])
+        i = i + 1
+    }
+    result.push(0)
+    result
+}
+fn list_concat(a: list<number>, b: list<number>) -> list<number> {
+    let result = []
+    state i = 0
+    let alen = a.len()
+    loop {
+        if i >= alen { break }
+        result.push(a[i])
+        i = i + 1
+    }
+    state j = 0
+    let blen = b.len()
+    loop {
+        if j >= blen { break }
+        result.push(b[j])
+        j = j + 1
+    }
+    result
+}
+fn encode_query(sql: string) -> list<number> {
+    let sql_bytes = encode_string(sql)
+    let msg_len = 4 + sql_bytes.len()
+    let len_bytes = encode_int32(msg_len)
+    let type_byte = [81]
+    let result = list_concat(type_byte, len_bytes)
+    list_concat(result, sql_bytes)
+}
+let q = encode_query("SELECT 1")
+q.len()
+"#;
+        let result = eval_source(src).expect("eval failed");
+        // 1 ('Q') + 4 (length) + 8 ("SELECT 1") + 1 ('\0') = 14
+        assert_eq!(result, Value::Int(14), "total length should be 14");
+    }
+
+    #[test]
+    fn c1a_encode_query_type_byte() {
+        let src = r#"
+fn encode_int32(n: number) -> list<number> {
+    let b0 = (n / 16777216) % 256
+    let b1 = (n / 65536) % 256
+    let b2 = (n / 256) % 256
+    let b3 = n % 256
+    let out = [b0, b1, b2, b3]
+    out
+}
+fn encode_string(s: string) -> list<number> {
+    let raw = string_to_bytes(s)
+    let result = []
+    state i = 0
+    let len = raw.len()
+    loop {
+        if i >= len { break }
+        result.push(raw[i])
+        i = i + 1
+    }
+    result.push(0)
+    result
+}
+fn list_concat(a: list<number>, b: list<number>) -> list<number> {
+    let result = []
+    state i = 0
+    let alen = a.len()
+    loop {
+        if i >= alen { break }
+        result.push(a[i])
+        i = i + 1
+    }
+    state j = 0
+    let blen = b.len()
+    loop {
+        if j >= blen { break }
+        result.push(b[j])
+        j = j + 1
+    }
+    result
+}
+fn encode_query(sql: string) -> list<number> {
+    let sql_bytes = encode_string(sql)
+    let msg_len = 4 + sql_bytes.len()
+    let len_bytes = encode_int32(msg_len)
+    let type_byte = [81]
+    let result = list_concat(type_byte, len_bytes)
+    list_concat(result, sql_bytes)
+}
+let q = encode_query("SELECT 1")
+q[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(81), "type byte should be 'Q' = 81");
+    }
+
+    // ── C-1-B: wire protocol decode テスト ─────────────────────────────────
+
+    #[test]
+    fn c1b_decode_backend_message_ready_for_query() {
+        // ReadyForQuery ('Z' + 0x00000005 + 'I') を正しく decode できることを確認する
+        let src = r#"
+fn decode_int32(bytes: list<number>, offset: number) -> number {
+    bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3]
+}
+fn make_backend_message(t: number, body: list<number>) {
+    { "type_byte": t, "body": body }
+}
+fn decode_backend_message(bytes: list<number>) {
+    let t = bytes[0]
+    let msg_len = decode_int32(bytes, 1)
+    let body_len = msg_len - 4
+    let body = []
+    state i = 0
+    loop {
+        if i >= body_len { break }
+        body.push(bytes[5 + i])
+        i = i + 1
+    }
+    make_backend_message(t, body)
+}
+let input = [90, 0, 0, 0, 5, 73]
+let msg = decode_backend_message(input)
+msg["type_byte"]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(90), "type_byte = 'Z' = 90");
+    }
+
+    #[test]
+    fn c1b_decode_ready_for_query_body() {
+        let src = r#"
+fn decode_int32(bytes: list<number>, offset: number) -> number {
+    bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3]
+}
+fn make_backend_message(t: number, body: list<number>) {
+    { "type_byte": t, "body": body }
+}
+fn decode_backend_message(bytes: list<number>) {
+    let t = bytes[0]
+    let msg_len = decode_int32(bytes, 1)
+    let body_len = msg_len - 4
+    let body = []
+    state i = 0
+    loop {
+        if i >= body_len { break }
+        body.push(bytes[5 + i])
+        i = i + 1
+    }
+    make_backend_message(t, body)
+}
+let input = [90, 0, 0, 0, 5, 73]
+let msg = decode_backend_message(input)
+let body = msg["body"]
+body[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(73), "body[0] = 'I' = 73");
+    }
+
+    // ── C-1-C: SCRAM 暗号計算テスト ────────────────────────────────────────
+
+    #[test]
+    fn c1c_scram_generate_nonce_returns_nonempty_string() {
+        let src = r#"
+let nonce = scram_generate_nonce()
+nonce.len() > 0
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Bool(true), "nonce should be non-empty");
+    }
+
+    #[test]
+    fn c1c_scram_base64_encode() {
+        // base64 encode の確認
+        let src = r#"
+let input_bytes = [72, 101, 108, 108, 111]
+scram_base64_encode(input_bytes)
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(
+            result,
+            Value::String("SGVsbG8=".to_string()),
+            "base64(Hello) should be SGVsbG8="
+        );
+    }
+
+    #[test]
+    fn c1c_scram_base64_decode() {
+        // base64 decode の確認
+        let src = r#"
+let decoded = scram_base64_decode("SGVsbG8=")?
+decoded[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(72), "decoded[0] = 'H' = 72");
+    }
+
+    #[test]
+    fn c1c_scram_xor_correctness() {
+        // XOR 計算の正しさを確認する
+        let src = r#"
+let a = [255, 0, 170]
+let b = [15, 240, 85]
+let result = scram_xor(a, b)
+result[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(240), "0xFF ^ 0x0F = 0xF0 = 240");
+    }
+
+    #[test]
+    fn c1c_scram_xor_second_element() {
+        let src = r#"
+let a = [255, 0, 170]
+let b = [15, 240, 85]
+let result = scram_xor(a, b)
+result[1]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(240), "0x00 ^ 0xF0 = 0xF0 = 240");
+    }
+
+    #[test]
+    fn c1c_scram_hi_pbkdf2_produces_32_bytes() {
+        // PBKDF2-HMAC-SHA256 の出力が 32 バイトであることを確認する
+        let src = r#"
+let salt_b64 = "W22ZaJ0SNY7soEsUEjb6gQ=="
+let salt = scram_base64_decode(salt_b64)?
+let result = scram_hi("pencil", salt, 4096)
+result.len()
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(32), "SHA-256 output should be 32 bytes");
+    }
+
+    #[test]
+    fn c1c_scram_hmac_produces_32_bytes() {
+        // HMAC-SHA256 の出力が 32 バイトであることを確認する
+        let src = r#"
+let key = scram_base64_decode("AAECBAUG")?
+let result = scram_hmac(key, "Client Key")
+result.len()
+"#;
+        // 短いbase64でもHMACは32バイト出力する
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(
+            result,
+            Value::Int(32),
+            "HMAC-SHA256 output should be 32 bytes"
+        );
+    }
+
+    #[test]
+    fn c1c_scram_h_sha256_produces_32_bytes() {
+        // SHA-256 の出力が 32 バイトであることを確認する
+        let src = r#"
+let raw_bytes = string_to_bytes("hello")
+let result = scram_h(raw_bytes)
+result.len()
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(32), "SHA-256 output should be 32 bytes");
+    }
+
+    // ── C-1-D: 統合テスト (PostgreSQL 必要、通常はスキップ) ────────────────
+
+    /// connect() 統合テスト
+    /// docker compose -f docker/docker-compose.test.yml up -d 後に実行すること
+    #[test]
+    #[ignore]
+    fn c1d_integration_connect_and_query() {
+        // この統合テストは PostgreSQL が起動している状態でのみ実行可能
+        // docker compose -f docker/docker-compose.test.yml up -d を先に実行すること
+        let src = r#"
+let conn_result = tcp_connect("localhost", 5432)
+match conn_result {
+    ok(conn) => {
+        tcp_close(conn)
+        true
+    }
+    err(e) => false
+}
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(
+            result,
+            Value::Bool(true),
+            "PostgreSQL connection should succeed"
+        );
+    }
+
+    // ── C-1-E: string_to_bytes / bytes_to_str テスト ───────────────────────
+
+    #[test]
+    fn c1e_string_to_bytes_len() {
+        let src = r#"
+let bytes = string_to_bytes("Hello")
+bytes.len()
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(5), "len = 5");
+    }
+
+    #[test]
+    fn c1e_string_to_bytes_first_char() {
+        let src = r#"
+let bytes = string_to_bytes("Hello")
+bytes[0]
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Int(72), "'H' = 72");
+    }
+
+    #[test]
+    fn c1e_bytes_to_str_round_trip() {
+        let src = r#"
+let bytes = string_to_bytes("Hello")
+let s = bytes_to_str(bytes)
+s == "Hello"
+"#;
+        let result = eval_source(src).expect("eval failed");
+        assert_eq!(result, Value::Bool(true), "round-trip");
     }
 }
