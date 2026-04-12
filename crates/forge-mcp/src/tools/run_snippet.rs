@@ -29,21 +29,26 @@ pub fn call(args: &Value) -> Value {
         }
     };
 
-    let mut interp = forge_vm::interpreter::Interpreter::new();
+    // 出力をキャプチャするインタープリタを生成（MCP の stdout を汚染しない）
+    let (mut interp, output_buf) = forge_vm::interpreter::Interpreter::with_output_capture();
+
     match interp.eval(&module) {
-        Ok(value) => {
+        Ok(_) => {
+            let output = output_buf.lock().map(|b| b.clone()).unwrap_or_default();
             let result = serde_json::json!({
                 "ok": true,
-                "output": format!("{:?}", value)
+                "output": output
             });
             serde_json::json!({
                 "content": [{"type": "text", "text": result.to_string()}]
             })
         }
         Err(e) => {
+            let output = output_buf.lock().map(|b| b.clone()).unwrap_or_default();
             let result = serde_json::json!({
                 "ok": false,
-                "error": format!("{}", e)
+                "error": format!("{}", e),
+                "output": output
             });
             serde_json::json!({
                 "content": [{"type": "text", "text": result.to_string()}]

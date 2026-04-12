@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 use forge_compiler::ast::*;
@@ -204,6 +205,8 @@ pub struct Interpreter {
     /// REPL でロード済みのモジュール情報（M-7-A）
     /// モジュールパス → そのモジュールからインポートしたシンボル名リスト
     pub loaded_modules: HashMap<String, Vec<String>>,
+    /// 出力バッファ: Some の場合 print/println はここに書き込む（MCP 等でのキャプチャ用）
+    pub output_buffer: Option<Arc<Mutex<String>>>,
 }
 
 impl Interpreter {
@@ -219,9 +222,58 @@ impl Interpreter {
             defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
+            output_buffer: None,
         };
         interp.register_builtins();
         interp
+    }
+
+    /// 出力バッファ付きインタープリタを生成する（MCP などでの stdout キャプチャ用）
+    pub fn with_output_capture() -> (Self, Arc<Mutex<String>>) {
+        let buf = Arc::new(Mutex::new(String::new()));
+        let mut interp = Self::new();
+        interp.output_buffer = Some(Arc::clone(&buf));
+        // output_buffer が設定されているので register_builtins を再実行して print を上書き
+        interp.register_print_builtins();
+        (interp, buf)
+    }
+
+    /// print / println を output_buffer に書き込むよう再登録する
+    fn register_print_builtins(&mut self) {
+        let buf1 = Arc::clone(self.output_buffer.as_ref().unwrap());
+        self.define(
+            "print",
+            Value::NativeFunction(NativeFn(Rc::new(move |args: Vec<Value>| {
+                let s = args
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Ok(mut b) = buf1.lock() {
+                    b.push_str(&s);
+                    b.push('\n');
+                }
+                Ok(Value::Unit)
+            }))),
+            false,
+        );
+        let buf2 = Arc::clone(self.output_buffer.as_ref().unwrap());
+        self.define(
+            "println",
+            Value::NativeFunction(NativeFn(Rc::new(move |args: Vec<Value>| {
+                let s = args
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Ok(mut b) = buf2.lock() {
+                    b.push_str(&s);
+                    b.push('\n');
+                }
+                Ok(Value::Unit)
+            }))),
+            false,
+        );
     }
 
     /// ファイルパスを指定してモジュールローダーを初期化する
@@ -237,6 +289,7 @@ impl Interpreter {
             defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
+            output_buffer: None,
         };
         interp.register_builtins();
         interp
@@ -255,6 +308,7 @@ impl Interpreter {
             defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
+            output_buffer: None,
         };
         interp.register_builtins();
         interp
@@ -280,6 +334,7 @@ impl Interpreter {
             defer_stack: Vec::new(),
             is_test_mode: false,
             loaded_modules: HashMap::new(),
+            output_buffer: None,
         };
         interp.register_builtins();
         interp
@@ -1403,7 +1458,11 @@ impl Interpreter {
                         .unwrap_or(false);
                     if is_sub_dir {
                         // サブディレクトリの場合は再帰
-                        self.eval_directory_use_with_tracking(&sub_path, &UseSymbols::All, depth + 1)?;
+                        self.eval_directory_use_with_tracking(
+                            &sub_path,
+                            &UseSymbols::All,
+                            depth + 1,
+                        )?;
                     } else {
                         // dep パッケージ内ファイルの場合は with_tracking を使う（path rewriting のため）
                         self.eval_file_use_with_tracking(&sub_path, &UseSymbols::All)?;
