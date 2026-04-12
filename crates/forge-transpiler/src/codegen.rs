@@ -6920,6 +6920,106 @@ use serde.{Serialize}
     }
 
     #[test]
+    fn use_stdlib_crypto_snapshot() {
+        let src = r#"
+use forge/std/crypto.{ hash, hmac_verify, HashAlgo }
+
+let digest = hash("password", HashAlgo::Sha256)
+let verified = hmac_verify("payload", "mac", "secret", HashAlgo::Sha256)
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("use forge_std::forge::std::crypto::{hash, hmac_verify, HashAlgo};"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let digest = hash(\"password\".to_string(), HashAlgo::Sha256);"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let verified = hmac_verify(\"payload\".to_string(), \"mac\".to_string(), \"secret\".to_string(), HashAlgo::Sha256);"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn use_stdlib_compress_snapshot() {
+        let src = r#"
+use forge/std/compress.{ compress_str, CompressAlgo }
+
+let compressed = compress_str("payload", CompressAlgo::Gzip)
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("use forge_std::forge::std::compress::{compress_str, CompressAlgo};"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains(
+                "let compressed = compress_str(\"payload\".to_string(), CompressAlgo::Gzip);"
+            ),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn use_stdlib_wasm_snapshot() {
+        let src = r#"
+use forge/std/wasm.Wasm
+
+let app = Wasm::load("dist/app.wasm")
+let html = app.call("render", "json")
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("use forge_std::forge::std::wasm::Wasm;"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let app = Wasm::load(\"dist/app.wasm\".to_string());"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let html = app.call(\"render\".to_string(), \"json\".to_string());"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn use_stdlib_wasm_options_snapshot() {
+        let src = r#"
+use forge/std/wasm.{ Wasm, WasmOptions }
+
+let opts = WasmOptions::trusted()
+let app = Wasm::load_with("dist/app.wasm", opts)
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("use forge_std::forge::std::wasm::{Wasm, WasmOptions};"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let opts = WasmOptions::trusted();"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let app = Wasm::load_with(\"dist/app.wasm\".to_string(), opts);"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
     fn when_platform_snapshot() {
         let src = r#"
 when platform.linux {

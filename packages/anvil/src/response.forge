@@ -19,6 +19,10 @@ impl<T> Response<T> {
         }
     }
 
+    fn html(body: string) -> Response<string> {
+        Response::text(body).header("Content-Type", "text/html; charset=utf-8")
+    }
+
     fn json(body: T) -> Response<T> {
         let headers: map<string, string> = {"Content-Type": "application/json"}
         Response {

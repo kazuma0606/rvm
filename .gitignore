@@ -23,6 +23,19 @@
 *.dll
 *.exe
 
+# Zig build cache
+.zig-cache/
+.zig-global-cache/
+
+# Alternate build targets
+target-anvil/
+
+# Local MCP config (machine-specific paths)
+.mcp.json
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
 # Misc
 .env
 .env.local

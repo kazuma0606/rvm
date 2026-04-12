@@ -11,6 +11,7 @@ use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 use forge_compiler::ast::*;
 use forge_compiler::deps::DepsManager;
 use forge_compiler::loader::{ModForgeExport, ModuleLoader};
+use wasmtime::{Engine, Instance, Module as WasmModule, Store};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
 #[derive(Clone)]
@@ -1127,8 +1128,11 @@ impl Interpreter {
                     Ok(Value::Unit)
                 }
             }
-            UsePath::Stdlib(_) => {
-                // forge run では標準ライブラリはスキップ（警告なし）
+            UsePath::Stdlib(path) => {
+                if path == "forge/std/wasm" {
+                    self.register_wasm_module(symbols)
+                        .map_err(RuntimeError::Custom)?;
+                }
                 Ok(Value::Unit)
             }
         }
@@ -5275,6 +5279,170 @@ impl Interpreter {
     // ── forge/http モジュール ─────────────────────────────────────────────
 
     /// `use forge/http.{ get, post, ... }` を処理して HTTP 関数をスコープに登録する
+    fn register_wasm_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
+        if !self.type_registry.structs.contains_key("Wasm") {
+            self.setup_wasm_types();
+        }
+
+        let exports = ["Wasm", "WasmOptions"];
+        for name in exports {
+            let should_bind = match symbols {
+                UseSymbols::All => true,
+                UseSymbols::Single(symbol, _) => symbol == name,
+                UseSymbols::Multiple(items) => items.iter().any(|(symbol, _)| symbol == name),
+            };
+            if !should_bind {
+                continue;
+            }
+
+            let bind_name = match symbols {
+                UseSymbols::Single(_, Some(alias)) => alias.clone(),
+                UseSymbols::Multiple(items) => items
+                    .iter()
+                    .find(|(symbol, _)| symbol == name)
+                    .and_then(|(_, alias)| alias.clone())
+                    .unwrap_or_else(|| name.to_string()),
+                _ => name.to_string(),
+            };
+
+            self.define(&bind_name, Value::String(name.to_string()), false);
+        }
+
+        Ok(())
+    }
+
+    fn setup_wasm_types(&mut self) {
+        let mut wasm_options_methods: HashMap<String, MethodImpl> = HashMap::new();
+        wasm_options_methods.insert(
+            "trusted".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|_args: Vec<Value>| {
+                Ok(vm_wasm_options_value(None, None, None, true, true, true))
+            }))),
+        );
+        wasm_options_methods.insert(
+            "sandboxed".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|_args: Vec<Value>| {
+                Ok(vm_wasm_options_value(
+                    Some(1_000_000),
+                    Some(16),
+                    Some(500),
+                    false,
+                    false,
+                    false,
+                ))
+            }))),
+        );
+        wasm_options_methods.insert(
+            "strict".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|_args: Vec<Value>| {
+                Ok(vm_wasm_options_value(
+                    Some(100_000),
+                    Some(4),
+                    Some(100),
+                    false,
+                    false,
+                    false,
+                ))
+            }))),
+        );
+        self.type_registry.structs.insert(
+            "WasmOptions".to_string(),
+            StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: wasm_options_methods,
+                operators: HashMap::new(),
+            },
+        );
+
+        let mut wasm_methods: HashMap<String, MethodImpl> = HashMap::new();
+        wasm_methods.insert(
+            "load".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                let path = match args.first() {
+                    Some(Value::String(path)) => path.clone(),
+                    Some(other) => {
+                        return Err(format!(
+                            "Wasm.load() expects string, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Wasm.load() requires path".to_string()),
+                };
+                Ok(Value::Result(Ok(Box::new(vm_wasm_value(
+                    path,
+                    vm_wasm_options_value(None, None, None, true, true, true),
+                )))))
+            }))),
+        );
+        wasm_methods.insert(
+            "load_with".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                let path = match args.first() {
+                    Some(Value::String(path)) => path.clone(),
+                    Some(other) => {
+                        return Err(format!(
+                            "Wasm.load_with() expects path string, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Wasm.load_with() requires path".to_string()),
+                };
+                let options = match args.get(1) {
+                    Some(value @ Value::Struct { type_name, .. }) if type_name == "WasmOptions" => {
+                        value.clone()
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "Wasm.load_with() expects WasmOptions, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Wasm.load_with() requires options".to_string()),
+                };
+                Ok(Value::Result(Ok(Box::new(vm_wasm_value(path, options)))))
+            }))),
+        );
+        wasm_methods.insert(
+            "call".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|mut args: Vec<Value>| {
+                let self_val = args.remove(0);
+                let fn_name = match args.first() {
+                    Some(Value::String(name)) => name.clone(),
+                    Some(other) => {
+                        return Err(format!(
+                            "Wasm.call() expects function name string, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Wasm.call() requires function name".to_string()),
+                };
+                let input = match args.get(1) {
+                    Some(Value::String(input)) => input.clone(),
+                    Some(other) => {
+                        return Err(format!(
+                            "Wasm.call() expects input string, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Wasm.call() requires input".to_string()),
+                };
+                let (path, options) = vm_wasm_parts(&self_val)?;
+                let output = vm_wasm_call_from_file(&path, &options, &fn_name, &input)?;
+                Ok(Value::Result(Ok(Box::new(Value::String(output)))))
+            }))),
+        );
+        self.type_registry.structs.insert(
+            "Wasm".to_string(),
+            StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods: wasm_methods,
+                operators: HashMap::new(),
+            },
+        );
+    }
+
     fn register_http_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
         // 型レジストリに HttpRequest / HttpResponse がなければ初回登録
         if !self.type_registry.structs.contains_key("HttpRequest") {
@@ -5651,6 +5819,137 @@ fn req_clone_map(val: &Value) -> Result<HashMap<String, Value>, String> {
         }
         _ => Err(format!("expected HttpRequest, got {}", val.type_name())),
     }
+}
+
+fn vm_wasm_options_value(
+    max_instructions: Option<i64>,
+    max_memory_mb: Option<i64>,
+    timeout_ms: Option<i64>,
+    allow_fs: bool,
+    allow_net: bool,
+    allow_env: bool,
+) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert(
+        "max_instructions".to_string(),
+        Value::Option(max_instructions.map(|v| Box::new(Value::Int(v)))),
+    );
+    fields.insert(
+        "max_memory_mb".to_string(),
+        Value::Option(max_memory_mb.map(|v| Box::new(Value::Int(v)))),
+    );
+    fields.insert(
+        "timeout_ms".to_string(),
+        Value::Option(timeout_ms.map(|v| Box::new(Value::Int(v)))),
+    );
+    fields.insert("allow_fs".to_string(), Value::Bool(allow_fs));
+    fields.insert("allow_net".to_string(), Value::Bool(allow_net));
+    fields.insert("allow_env".to_string(), Value::Bool(allow_env));
+    Value::Struct {
+        type_name: "WasmOptions".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+fn vm_wasm_value(path: String, options: Value) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("path".to_string(), Value::String(path));
+    fields.insert("options".to_string(), options);
+    Value::Struct {
+        type_name: "Wasm".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+fn vm_wasm_parts(val: &Value) -> Result<(String, Value), String> {
+    match val {
+        Value::Struct { type_name, fields } if type_name == "Wasm" => {
+            let borrowed = fields.borrow();
+            let path = match borrowed.get("path") {
+                Some(Value::String(path)) => path.clone(),
+                _ => return Err("invalid Wasm: missing path".to_string()),
+            };
+            let options = borrowed
+                .get("options")
+                .cloned()
+                .ok_or_else(|| "invalid Wasm: missing options".to_string())?;
+            Ok((path, options))
+        }
+        other => Err(format!("expected Wasm, got {}", other.type_name())),
+    }
+}
+
+fn vm_wasm_option_i64(fields: &HashMap<String, Value>, key: &str) -> Option<i64> {
+    match fields.get(key) {
+        Some(Value::Option(Some(inner))) => match inner.as_ref() {
+            Value::Int(n) => Some(*n),
+            Value::Float(f) => Some(*f as i64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn vm_wasm_call_from_file(
+    path: &str,
+    options: &Value,
+    fn_name: &str,
+    input: &str,
+) -> Result<String, String> {
+    let option_fields = match options {
+        Value::Struct { type_name, fields } if type_name == "WasmOptions" => {
+            fields.borrow().clone()
+        }
+        other => return Err(format!("expected WasmOptions, got {}", other.type_name())),
+    };
+
+    if vm_wasm_option_i64(&option_fields, "max_instructions") == Some(0) {
+        return Err("WasmFuelExhausted: max_instructions exhausted before execution".to_string());
+    }
+    if vm_wasm_option_i64(&option_fields, "timeout_ms") == Some(0) {
+        return Err("WasmTimeout: timeout_ms elapsed before execution".to_string());
+    }
+
+    let engine = Engine::default();
+    let module = WasmModule::from_file(&engine, path)
+        .map_err(|err| format!("WasmLoadError: failed to load {}: {}", path, err))?;
+    let mut store = Store::new(&engine, ());
+    let instance =
+        Instance::new(&mut store, &module, &[]).map_err(|err| format!("WasmTrap: {}", err))?;
+
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .ok_or_else(|| "WasmCallError: exported memory not found".to_string())?;
+    let alloc = instance
+        .get_typed_func::<i32, i32>(&mut store, "alloc")
+        .map_err(|err| format!("WasmCallError: alloc export not found or invalid: {}", err))?;
+    let func = instance
+        .get_typed_func::<(i32, i32), i64>(&mut store, fn_name)
+        .map_err(|err| {
+            format!(
+                "WasmCallError: function `{}` not found or invalid: {}",
+                fn_name, err
+            )
+        })?;
+
+    let input_ptr = alloc
+        .call(&mut store, input.len() as i32)
+        .map_err(|err| format!("WasmTrap: {}", err))?;
+    memory
+        .write(&mut store, input_ptr as usize, input.as_bytes())
+        .map_err(|err| format!("WasmCallError: failed to write memory: {}", err))?;
+
+    let packed = func
+        .call(&mut store, (input_ptr, input.len() as i32))
+        .map_err(|err| format!("WasmTrap: {}", err))?;
+    let output_ptr = ((packed as u64) >> 32) as usize;
+    let output_len = ((packed as u64) & 0xffff_ffff) as usize;
+    let mut output = vec![0u8; output_len];
+    memory
+        .read(&mut store, output_ptr, &mut output)
+        .map_err(|err| format!("WasmCallError: failed to read memory: {}", err))?;
+    String::from_utf8(output)
+        .map_err(|err| format!("WasmCallError: wasm output is not valid utf-8: {}", err))
 }
 
 /// fields HashMap から HttpRequest Value を作る

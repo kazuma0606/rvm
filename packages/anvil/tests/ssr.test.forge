@@ -1,0 +1,50 @@
+use ./anvil.*
+use ./request.*
+use ./response.*
+
+let SSR_FIXTURE = "packages/anvil/tests/fixtures/ssr_render.wasm"
+
+fn ssr_page_handler(req: Request<string>) -> Response<string>! {
+    let props: map<string, string> = {"name": "Forge"}
+    let html = ssr_render("hello", props)?
+    ok(Response::html(ssr_layout(html, ssr_hydrate_script())))
+}
+
+test "ssr: init -> render -> layout" {
+    ssr_init(SSR_FIXTURE)?
+
+    let props: map<string, string> = {"name": "Forge"}
+    let html = ssr_render("hello", props)?
+    let doc = ssr_layout(html, ssr_hydrate_script())
+
+    assert(doc.contains("<!doctype html>"))
+    assert(doc.contains("<div id=\"app\">"))
+    assert(doc.contains("<script"))
+}
+
+test "ssr: render returns valid html string" {
+    ssr_init(SSR_FIXTURE)?
+
+    let props: map<string, string> = {"name": "Forge"}
+    let html = ssr_render("hello", props)?
+
+    assert(html.contains("<section"))
+    assert(html.contains("data-component=\"hello\""))
+    assert(html.contains("Forge"))
+}
+
+test "ssr: hydrate_script contains script tag" {
+    let script = ssr_hydrate_script()
+    assert(script.contains("<script"))
+    assert(script.contains("forge.min.js"))
+}
+
+test "ssr: anvil route can return html response" {
+    ssr_init(SSR_FIXTURE)?
+
+    let req = new_request("GET", "/", "")
+    let response = ssr_page_handler(req)?
+
+    assert_eq(response.headers.get("Content-Type"), some("text/html; charset=utf-8"))
+    assert(response.body.unwrap_or("").contains("<div id=\"app\">"))
+}

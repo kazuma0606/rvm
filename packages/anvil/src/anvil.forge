@@ -5,6 +5,7 @@ use ./request.*
 use ./response.*
 use ./router.{ match_route_pattern }
 use ./router.*
+use ./ssr.{ init, render, hydrate_script, layout }
 
 pub struct Anvil {
     routes: list<Route>
@@ -60,6 +61,22 @@ pub fn error_response_to_raw(response: Response<ErrorBody>) -> RawResponse {
             none        => "",
         },
     }
+}
+
+pub fn ssr_init(path: string) -> number! {
+    init(path)
+}
+
+pub fn ssr_render(component: string, props: map<string, string>) -> string! {
+    render(component, props)
+}
+
+pub fn ssr_hydrate_script() -> string {
+    hydrate_script()
+}
+
+pub fn ssr_layout(html: string, script: string) -> string {
+    layout(html, script)
 }
 
 pub fn apply_request_middlewares(req: Request<string>, middlewares: list<Middleware>) -> Request<string> {

@@ -223,6 +223,24 @@
 
 ---
 
+## Stage A-6: SSR統合（forge/std/wasm W-0〜W-3 完了後）
+
+> **前提**: `lang/std/v2` Phase W-0〜W-3 が完了し `forge/std/wasm` が使えること。
+> Bloom コンポーネントをサーバーサイドでレンダリングし、チラつきなしのハイドレーションを実現する。
+
+- [x] `src/ssr.forge` を新規作成する
+- [x] `use forge/std/wasm.Wasm` で WASMモジュールを保持する `state _wasm: Wasm?` を定義する
+- [x] `fn init(path: string)` を実装する（`Wasm.load_with(path, WasmOptions.trusted())` で起動時1回ロード）
+- [x] `fn render(component: string, props: map<string, string>) -> string!` を実装する（`Wasm.call("render", ...)` でHTML文字列を取得）
+- [x] `fn hydrate_script() -> string` を実装する（`forge.min.js` のローダータグを返す）
+- [x] `fn layout(html: string, script: string) -> string` を実装する（SSRレスポンス用のHTMLラッパー）
+- [x] Anvilのルートから `ssr.render` を呼び `Response.html()` で返せることを確認する
+- [x] `tests/ssr.test.forge` に `init → render → layout` の結合テストを書く
+- [x] `tests/ssr.test.forge` に `render` が有効なHTML文字列を返すテストを書く
+- [x] `tests/ssr.test.forge` に `hydrate_script` が `<script>` タグを含むテストを書く
+
+---
+
 ## Stage A-5: 非同期（将来 / Forge async 実装後）
 
 - [x] `forge/std/net` を tokio ベースに切り替える（Anvil 側のコード変更なし）
@@ -245,5 +263,6 @@
 | A-3   | 19      | 19   | 100% |
 | A-4   | 21      | 21   | 100% |
 | A-5   | 6       | 6    | 100% |
-| **合計** | **110** | **110** | **100%** |
+| A-6   | 10      | 10   | 100% |
+| **合計** | **120** | **120** | — |
 

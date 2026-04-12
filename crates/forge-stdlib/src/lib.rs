@@ -5,7 +5,9 @@
 pub mod builtins;
 pub mod cache;
 pub mod collections;
+pub mod compress;
 pub mod config;
+pub mod crypto;
 pub mod env;
 pub mod event;
 pub mod fs;
@@ -22,11 +24,14 @@ pub mod regex;
 pub mod retry;
 pub mod string;
 pub mod uuid;
+pub mod wasm;
 
 pub mod forge {
     pub mod std {
         pub use crate::cache;
+        pub use crate::compress;
         pub use crate::config;
+        pub use crate::crypto;
         pub use crate::env;
         pub use crate::event;
         pub use crate::fs;
@@ -42,5 +47,6 @@ pub mod forge {
         pub use crate::retry;
         pub use crate::string;
         pub use crate::uuid;
+        pub use crate::wasm;
     }
 }

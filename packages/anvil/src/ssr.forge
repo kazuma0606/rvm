@@ -1,0 +1,42 @@
+use forge/std/wasm.{ Wasm, WasmOptions }
+
+state _wasm: Wasm? = none()
+let DEFAULT_WASM_PATH = "packages/anvil/tests/fixtures/ssr_render.wasm"
+
+pub fn init(path: string) -> number! {
+    let module = Wasm.load_with(path, WasmOptions.trusted())?
+    _wasm = some(module)
+    ok(0)
+}
+
+pub fn render(component: string, props: map<string, string>) -> string! {
+    let module = match _wasm {
+        some(value) => ok(value),
+        none        => Wasm.load_with(DEFAULT_WASM_PATH, WasmOptions.trusted()),
+    }?
+
+    state payload = "\{\"component\":\"{component}\",\"props\":\{"
+    state first = true
+    for key in props.keys() {
+        let value = match props.get(key) {
+            some(v) => v,
+            none    => "",
+        }
+        if !first {
+            payload = "{payload},"
+        }
+        payload = "{payload}\"{key}\":\"{value}\""
+        first = false
+    }
+    payload = "{payload}}}"
+
+    module.call("render", payload)
+}
+
+pub fn hydrate_script() -> string {
+    "<script src=\"/forge.min.js\" defer></script>"
+}
+
+pub fn layout(html: string, script: string) -> string {
+    "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><div id=\"app\">{html}</div>{script}</body></html>"
+}
