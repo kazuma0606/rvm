@@ -525,6 +525,228 @@ Step 3: Expr → LaTeX 変換（逆方向）
 
 ---
 
+---
+
+## 数学的な正しさ — 本物の math クレートに向けて
+
+ほとんどの数値計算ライブラリが手を抜いている部分。
+ForgeScript の型システム（`T!` / typestate）と組み合わせることで、
+**数学的な不確かさを型で表現できる唯一のライブラリ**を目指す。
+
+---
+
+### 設計原則
+
+```
+原則1: 数学的に不可能なことは「不可能」と返す
+原則2: 結果に「有効な条件（定義域・収束条件）」を添付する
+原則3: 解析解と数値解を型で区別する
+原則4: 特異点・不連続点を自動検出する
+原則5: 「答えが出た」と「正しい答えが出た」を区別する
+```
+
+---
+
+### 五次方程式と Abel-Ruffini の定理
+
+**アーベル＝ルフィニの定理**: 五次以上の方程式には代数的な一般解の公式が存在しない。
+
+多くのライブラリはこれを無視して数値近似を返すだけだが、
+forge/std/math は数学的に正直に設計する。
+
+```forge
+// 解析解が存在する場合 → Exact を返す
+expr("x^2 - 2").solve("x")
+// → SolveResult::Exact(["-√2", "√2"])
+
+// 四次以下で解の公式がある場合
+expr("x^3 - 6*x - 9").solve("x")
+// → SolveResult::Exact(["3.0", ...])  // カルダノの公式
+
+// 五次以上 → 解析解なし・数値近似を返す
+expr("x^5 + x + 1").solve("x")
+// → SolveResult::Numerical([-0.7549...], precision: 1e-10)
+//   + note: "Abel-Ruffini: 5次以上の方程式に代数的一般解は存在しません"
+```
+
+`SolveResult` は `T!` と同様に match で強制的に処理させる：
+
+```forge
+match f.solve("x") {
+    SolveResult::Exact(roots)          => println("解析解: {roots}"),
+    SolveResult::Numerical(roots, eps) => println("数値解（誤差 {eps}）: {roots}"),
+    SolveResult::NoRealRoots           => println("実数解なし"),
+    SolveResult::InfiniteRoots         => println("恒等式（すべての x が解）"),
+}
+```
+
+---
+
+### 定義域の型表現
+
+`Expr` は計算結果とともに**定義域**を持つ。
+
+```forge
+data Domain {
+    All                              // すべての実数 (-∞, +∞)
+    GreaterThan(float)               // x > a
+    GreaterOrEqual(float)            // x ≥ a
+    Interval(float, float)           // a < x < b
+    ClosedInterval(float, float)     // a ≤ x ≤ b
+    Union(Domain, Domain)            // 和集合
+    Except(Domain, list<float>)      // 特異点を除外
+}
+
+data Expr {
+    tree:   ExprTree
+    domain: Domain                   // 有効な定義域
+}
+```
+
+関数の定義域は自動付与される：
+
+```forge
+expr("ln(x)").domain            // → Domain::GreaterThan(0.0)
+expr("sqrt(x)").domain          // → Domain::GreaterOrEqual(0.0)
+expr("1/x").domain              // → Domain::Except(All, [0.0])
+expr("tan(x)").domain           // → Domain::Except(All, [π/2, 3π/2, ...])
+expr("x^2").domain              // → Domain::All
+
+// 合成関数の定義域は自動的に交差を取る
+expr("ln(x^2 - 1)").domain      // → Domain::Union(LessThan(-1.0), GreaterThan(1.0))
+//  (x^2 - 1 > 0 → x < -1 または x > 1)
+```
+
+定義域外で eval しようとするとエラー：
+
+```forge
+let f = expr("ln(x)")
+f.eval(x: -1.0)
+// → Err("DomainError: x = -1.0 は定義域 x > 0 の外です")
+
+f.eval(x: 2.0)
+// → Ok(0.693...)
+```
+
+---
+
+### 広義積分の収束判定
+
+```forge
+// 発散する積分
+expr("1/x").integrate("x", from: -1.0, to: 1.0)
+// → IntegrateResult::Diverges
+//   reason: "x = 0.0 に非可積分特異点があります"
+
+expr("1/x").integrate("x", from: 1.0, to: Inf)
+// → IntegrateResult::Diverges
+//   reason: "上限が ∞ で被積分関数が 1/x オーダー（収束には 1/x^p, p>1 が必要）"
+
+// 収束する積分
+expr("1/x^2").integrate("x", from: 1.0, to: Inf)
+// → IntegrateResult::Converges(1.0)
+
+expr("exp(-x^2)").integrate("x", from: Neg::Inf, to: Inf)
+// → IntegrateResult::Converges(√π)  // ガウス積分
+
+// 数値積分（解析解がない場合）
+expr("sin(x)/x").integrate("x", from: 0.0, to: 10.0)
+// → IntegrateResult::Numerical(1.6583..., error: 1e-8)
+```
+
+---
+
+### 特異点の自動検出
+
+```forge
+let f = expr("(x^2 - 1) / (x - 1)")
+
+f.singularities()
+// → [Singularity { at: 1.0, kind: SingularityKind::Removable }]
+//   ※ x→1 の極限は 2（除去可能特異点）
+
+f.simplify()
+// → expr("x + 1")  // 除去可能特異点を simplify で除去
+//   domain: Except(All, [1.0])  // 定義域は保持
+
+let g = expr("1 / (x - 1)^2")
+g.singularities()
+// → [Singularity { at: 1.0, kind: SingularityKind::Pole(order: 2) }]
+```
+
+---
+
+### 代数構造（群・環・体）
+
+抽象代数の基本構造をサポートする。
+
+```forge
+use forge/std/math/algebra.*
+
+// ── 群（Group）──
+
+// 巡回群 Z/nZ
+let Z6 = CyclicGroup::new(6)
+Z6.order()                      // → 6
+Z6.is_abelian()                 // → true
+Z6.subgroups()                  // → [Z1, Z2, Z3, Z6]
+Z6.generators()                 // → [1, 5]（生成元）
+
+// 対称群 S_n（n次置換群）
+let S3 = SymmetricGroup::new(3)
+S3.order()                      // → 6
+S3.is_abelian()                 // → false（n ≥ 3 で非可換）
+S3.cayley_table()               // → 乗積表（6×6）
+
+// 任意の群を定義
+let G = Group::from_cayley_table([
+    [0, 1, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+])
+G.is_cyclic()                   // → true
+G.is_isomorphic(Z6.subgroup(3)) // → true
+
+// ── 環・体（Ring / Field）──
+
+// 有限体 GF(p)
+let GF7 = GaloisField::new(7)
+GF7.add(3, 5)                   // → 1  (mod 7)
+GF7.mul(3, 5)                   // → 1  (3*5=15≡1)
+GF7.inverse(3)                  // → 5
+GF7.is_prime_field()            // → true
+
+// 多項式環 Z[x]
+let Zx = PolynomialRing::integer()
+let p  = Zx.poly([1, 0, -1])   // x^2 - 1
+let q  = Zx.poly([1, -1])      // x - 1
+Zx.gcd(p, q)                    // → x - 1
+Zx.factor(p)                    // → (x-1)(x+1)
+```
+
+---
+
+### フェーズ更新（数学的正しさ対応）
+
+| フェーズ | 内容 |
+|---|---|
+| M-0 | 数式パーサー + Expr 型 |
+| M-1 | 数値評価（`eval`） |
+| M-2 | 記号微分（`diff`） |
+| M-3 | 簡約（`simplify` / `expand`） |
+| M-4 | 基本積分（不定積分） |
+| M-5 | 定積分 + `SolveResult` 型（解析解 / 数値解 / 解なし） |
+| M-6 | **定義域の自動付与**（`Domain` 型・`DomainError`） |
+| M-7 | **広義積分の収束判定**（`IntegrateResult::Diverges / Converges`） |
+| M-8 | **特異点の自動検出**（除去可能・極・真性） |
+| M-9 | テイラー展開・極限 |
+| M-10 | 多変数・偏微分・勾配 |
+| M-11 | ノートブック統合（`display::math`・KaTeX） |
+| M-12 | **代数構造**（群・環・体） |
+| M-13 | 線形代数（`linalg`・行列・固有値・SVD） |
+
+---
+
 ## 参考
 
 - [SymPy](https://www.sympy.org/) — Python 記号計算の標準
@@ -532,3 +754,4 @@ Step 3: Expr → LaTeX 変換（逆方向）
 - [KaTeX](https://katex.org/) — 高速 LaTeX レンダリング（ノートブック WebView 用）
 - [roots](https://docs.rs/roots/) — Rust 方程式の数値解
 - [latex2sympy](https://github.com/augustt198/latex2sympy) — LaTeX → sympy 変換の参考実装
+- [Abstract Algebra（Dummit & Foote）](https://www.wiley.com/en-us/Abstract+Algebra%2C+3rd+Edition-p-9780471433347) — 群・環・体の参考文献
