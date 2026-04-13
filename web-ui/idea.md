@@ -615,6 +615,111 @@ forge deploy
 
 ---
 
+## DOM コマンドストリームブリッジ（プロトタイプの起点）
+
+> これがなければ何も動かない。最初に実装するコアピース。
+
+WASM はブラウザ上で DOM に直接アクセスできない。
+WASM → JS へ「DOM 操作命令を送るチャンネル」が必要で、これをコマンドストリームブリッジと呼ぶ。
+
+### プロトコル設計
+
+```
+WASM (Bloom runtime)                    JS (forge.min.js)
+      │                                       │
+      │── [op: SetText, id: "h1", val: "hi"] ──→│
+      │── [op: AddListener, id: "btn", ev: "click"] ──→│
+      │← [ev: Click, id: "btn"] ─────────────│
+```
+
+コマンドは線形バッファ（`i32` 配列）としてシリアライズ。JSON より高速で、JS 側のパースも単純。
+
+```js
+// forge.min.js（~200行目標）
+const CMDS = { SET_TEXT: 1, SET_ATTR: 2, ADD_LISTENER: 3, REMOVE_NODE: 4, ... };
+
+function applyCommands(buf) {
+  let i = 0;
+  while (i < buf.length) {
+    switch (buf[i++]) {
+      case CMDS.SET_TEXT: {
+        const id = readStr(buf, i); i += strLen;
+        const val = readStr(buf, i); i += strLen;
+        document.getElementById(id).textContent = val;
+        break;
+      }
+      // ...
+    }
+  }
+}
+```
+
+JS は DOM の操作係に徹する。ロジックはすべて WASM 側。
+
+### アタッチモデル（DOM 所有権を奪わない）
+
+既存の React/Vue は「DOM を丸ごと上書きする」モデルが多い。
+Bloom は**既存の HTML に接着（attach）する**モデルを採る。
+
+```
+SSR で生成された HTML（DOM はすでに存在）
+  ↓
+WASM がロード
+  ↓
+既存 DOM を「スキャン」してイベントハンドラをアタッチするだけ
+  ↓ DOM の再生成なし = チラつきゼロ
+```
+
+React の hydration がチラつく原因：CSR で DOM を再レンダリングし、既存ノードを置き換えるため。
+Bloom のアタッチモデルでは既存ノードはそのまま。
+
+### ストリクト・ハイドレーションモード（番人）
+
+開発時のみ有効にするデバッグモードを `forge dev` に組み込む。
+
+```
+WASM がアタッチしようとした DOM ノードの構造 ≠ SSR 出力
+  → エラーオーバーレイ「ハイドレーションミスマッチ: <h1> の子ノード数が一致しません」
+  → 不一致箇所をハイライト表示
+```
+
+- Next.js の hydration error と同等だが、**コンパイラが SSR と CSR の整合性を事前チェック**するため、実行時に初めて気づくケースを大幅に減らせる
+- `forge build --web --strict` で本番ビルドにも組み込める（パフォーマンスペナルティあり）
+
+---
+
+## コンパイラによる SSR/CSR 整合性チェック
+
+同一 `.bloom` ファイルから SSR（サーバー出力）と CSR（WASM アタッチ）の両方を生成するため、
+コンパイラがビルド時に両者の DOM ツリー構造を比較できる。
+
+```
+forge build --web
+  └── .bloom → SSR レンダラー（WASM for Anvil）
+  └── .bloom → CSR ランタイム（WASM for browser）
+  └── 両者の静的 DOM ツリーを照合
+      一致しなければビルドエラー  ← ハイドレーションミスマッチを実行時前に検出
+```
+
+Next.js / Nuxt では「実行してみないと気づかない」ミスマッチを、Bloom は**ビルド時エラー**として表面化する。
+
+---
+
+## プロトタイプロードマップ
+
+| フェーズ | 内容 | 達成基準 |
+|---|---|---|
+| **B-0** | DOM コマンドストリームブリッジ | `document.getElementById` + `textContent` が WASM から動く |
+| **B-1** | `.bloom` パーサー + コード生成 MVP | `state` / `@click` / テンプレート補間の最小セット |
+| **B-2** | コンパイル時リアクティビティ | `state` 変更 → 最小 DOM コマンド発行（仮想 DOM なし） |
+| **B-3** | SSR アタッチモデル | Anvil が HTML 出力 → WASM が接着 → チラつきなし |
+| **B-4** | `typestate` ストア + DevTools | ステートマシングラフ可視化・タイムトラベル |
+
+**B-0 から始める理由**: ブリッジがなければ B-1 以降はすべてデッドコード。
+B-0 が完成した時点で「ForgeScript から Hello World をブラウザに表示する」という最初のマイルストーンが達成できる。
+
+---
+
 ## スコープ外
 
 - **WASI対応（ブラウザ）**: ブラウザはセキュリティサンドボックスの設計上WASIを実装しておらず、今後も変わらない見込み。ブラウザでのファイルI/OはAnvil経由でクラウドベンダーに委ねる責務分離とする。
