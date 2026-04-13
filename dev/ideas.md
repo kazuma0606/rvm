@@ -170,6 +170,162 @@ beat.play()
 
 ---
 
+## エコシステム系
+
+### Forge Package Registry
+`npm` / `crates.io` の ForgeScript 版。**言語が本当に普及するかどうかはここで決まる。**
+
+- `forge add` / `forge publish` でパッケージ管理
+- セマンティックバージョニング・依存解決
+- GitHub の星より「誰かがパッケージを公開し始めた」が普及の証拠
+- forge.toml でバージョン固定
+
+```bash
+forge add forge/std/math        # 公式パッケージ
+forge add kazuma/my-lib@1.2.0   # コミュニティパッケージ
+forge publish                   # 自分のパッケージを公開
+```
+
+---
+
+### Forge Playground（Web REPL）
+ブラウザで即試せる環境。**布教ツールとして最強。**
+
+- URL を開くだけで ForgeScript が動く（WASM で実現可能）
+- コードを書いてリンクをシェアできる
+- README のサンプルコードが全部「実行可能」になる
+- Rust Playground / Kotlin Playground と同じ戦略
+- **技術的には今の forge-vm を wasm32 にコンパイルするだけで作れる**
+
+---
+
+## データ処理系
+
+### forge/std/data — DataFrame / データパイプライン
+Python の pandas 相当。**実務ユーザーが一番欲しがる領域。**
+
+- CSV / JSON / Parquet / Excel 読み書き
+- filter / group_by / agg / sort / join
+- GPU と統合 → 大規模データ処理が高速
+- ノートブックとの相性が抜群
+- `display::table` で即可視化
+
+```forge
+let df = DataFrame::read_csv("sales.csv")?
+
+df.filter(|row| row["amount"] > 1000)
+  .group_by("region")
+  .agg(["amount": Agg::Sum, "count": Agg::Count])
+  .sort_by("amount", desc: true)
+  |> display::table
+```
+
+---
+
+### forge/std/search — 組み込みフルテキスト検索
+[Tantivy](https://github.com/quickwit-oss/tantivy)（Rust 製 Lucene）のラッパー。
+
+- SQLite に検索機能を足したいときに即使える
+- Anvil に組み込めばサイト内検索が即実装できる
+- ElasticSearch 不要で全文検索が動く
+- 日本語形態素解析（lindera）との統合も視野
+
+```forge
+let index = SearchIndex::new("./my_index")?
+index.add({ id: 1, title: "ForgeScript入門", body: "..." })?
+
+let results = index.search("ForgeScript GPU")?
+for hit in results {
+    display::text("{hit.score:.2} — {hit.title}")
+}
+```
+
+---
+
+## 「流れ」を扱う系
+
+### forge/std/reactive — リアクティブストリーム / シグナル
+Bloom の内部モデルの基盤にもなる。SolidJS のシグナルに近い概念。
+
+- シグナル（状態の最小単位）・derived（派生値）・effect（副作用）
+- `forge/std/actor` と組み合わせると分散リアクティブシステム
+- Bloom の UI 更新ロジックをこの上に乗せられる
+- RxJS / Solid / Svelte の「なぜ動くか」を ForgeScript で学べる
+
+```forge
+let count  = signal(0)
+let double = derived(|| count.get() * 2)
+
+effect(|| {
+    display::text("count={count.get()}, double={double.get()}")
+})
+
+count.set(5)   // → double が自動再計算、effect が自動再実行
+```
+
+---
+
+### forge/std/shell — シェルスクリプト置き換え
+bash スクリプトを型安全な ForgeScript で書く。
+
+- パイプでデータを型付きで渡せる（bash との最大の差別化）
+- `forge run deploy.forge` で実行
+- **自分たちのリリーススクリプトを ForgeScript で書くと説得力がある**
+- git / ssh / fs / http を標準で統合
+
+```forge
+// deploy.forge — bash の代わりに
+let branch = git::current_branch()?
+if branch != "main" { exit(1) }
+
+sh("cargo build --release")?
+ssh::copy("target/release/forge", "deploy@server:/usr/local/bin/forge")?
+ssh::run("deploy@server", "systemctl restart forge")?
+display::text("デプロイ完了 ✓")
+```
+
+---
+
+## ビジュアル系
+
+### forge/std/flow — ノードベースビジュアルプログラミング
+TouchDesigner / Node-RED の ForgeScript 版。ノートブック内で動く。
+
+- ノードをつなぐだけでデータパイプラインが作れる
+- 非プログラマーへの入口になる
+- 内部は普通の ForgeScript コードに変換される
+- `forge/std/data` と統合 → ノーコードデータ分析
+
+```
+[CSV読み込み] → [フィルタ] → [グループ集計] → [グラフ表示]
+     ↓               ↓              ↓               ↓
+  DataFrame      DataFrame      DataFrame        Plot
+```
+
+---
+
+### forge/std/graph — グラフ理論・ネットワーク分析
+[petgraph](https://github.com/petgraph/petgraph) ラッパー＋可視化。
+
+- Dijkstra / BFS / DFS / トポロジカルソート / 最小全域木
+- 中心性分析（媒介・近接・固有ベクトル）
+- `display::plot_network` でグラフを可視化
+- `forge/std/sim` と組み合わせるとネットワーク上のシミュレーション
+- 応用: SNS・依存関係・ルート探索・サプライチェーン・知識グラフ
+
+```forge
+let g = Graph::new()
+let a = g.node("Tokyo")
+let b = g.node("Osaka")
+g.edge(a, b, weight: 513.0)
+
+let path = g.dijkstra(a, b)?
+display::text("最短距離: {path.cost} km")
+display::plot_network(g, node_size: g.betweenness_centrality())
+```
+
+---
+
 ## メタ系
 
 ### forge/std/macro — マクロシステム
@@ -192,15 +348,35 @@ let users = SELECT * FROM users WHERE age > 18
 
 ## 優先度メモ
 
-着手するなら以下の順が自然：
-
+### 短期で「使える・刺さる」もの
 ```
-forge/std/proto   ← MQ・Actor がすでにあるので通信フォーマットが欲しくなる
-forge/std/embed   ← forge-kernel の no_std が整ったら自然な次のステップ
-forge/std/canvas  ← ノートブックと数学ライブラリが揃ったら映えるデモになる
-forge/std/audio   ← canvas と同時期、ノートブック統合で個性が出る
-forge/std/quantum ← 数学ライブラリ（M-3 以降）が先行条件
-forge/std/sim     ← GPU + Actor が整ったら面白くなる
-forge/std/zk      ← 数学ライブラリの有限体・楕円曲線が先行条件
+Forge Playground    ← forge-vm を wasm32 化するだけ。マーケティング効果が即効
+forge/std/shell     ← 自分たちのデプロイスクリプトを今すぐ ForgeScript で書ける
+forge/std/data      ← 実務ユーザーが一番欲しい。pandas の代替
+forge/std/search    ← Anvil サイト内検索に即使える
+```
+
+### 中期：基盤が揃ったら自然につながるもの
+```
+forge/std/proto     ← MQ・Actor がすでにあるので通信フォーマットが欲しくなる
+forge/std/reactive  ← Bloom の内部モデル基盤
+forge/std/graph     ← data + sim と組み合わせると強い
+forge/std/embed     ← forge-kernel の no_std が整ったら自然な次のステップ
+forge/std/canvas    ← ノートブック + 数学ライブラリが揃ったら映えるデモになる
+forge/std/audio     ← canvas と同時期、ノートブック統合で個性が出る
+forge/std/flow      ← data + canvas が揃ったらノーコード入口になる
+```
+
+### 長期：数学ライブラリが先行条件
+```
+forge/std/quantum   ← math M-3（行列・線形代数）以降
+forge/std/sim       ← GPU + Actor が整ったら
+forge/std/zk        ← math の有限体・楕円曲線が先行条件
 forge/std/consensus ← MQ のネットワーク版が先行条件
+```
+
+### エコシステム：どこかのタイミングで必須
+```
+Forge Package Registry  ← 言語の普及はここで決まる
+forge/std/macro         ← 言語が安定してから
 ```
