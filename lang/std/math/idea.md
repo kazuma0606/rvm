@@ -2,6 +2,7 @@
 
 > 関連: `packages/notebook/spec.md`（ノートブック統合）
 > 関連: `lang/std/plot/idea.md`（グラフ描画との連携）
+> 関連: `forge/std/tex`（LaTeX 双方向変換、本ファイル末尾）
 
 ---
 
@@ -359,9 +360,175 @@ display::math(expr("\\int_0^2 f(x)\\,dx = {area}"))
 
 ---
 
+---
+
+## forge/std/tex — LaTeX 双方向変換
+
+### 動機
+
+論文・技術文書を `.tex` で書いている人が、数式をそのまま ForgeScript で計算・検算できる。
+完全な LaTeX パーサーは不要で、**数式環境だけを抽出・変換する**限定的な実装で十分。
+
+### 対象とする LaTeX 数式環境
+
+```latex
+% インライン数式
+$f(x) = x^2 + 3x$
+
+% ディスプレイ数式
+$$\int_0^1 x^2\,dx$$
+
+% equation 環境
+\begin{equation}
+  f(x) = x^3 - 3x^2 + 2
+\end{equation}
+
+% align 環境（複数式）
+\begin{align}
+  f(x)  &= x^3 - 3x^2 + 2 \\
+  f'(x) &= 3x^2 - 6x
+\end{align}
+```
+
+### LaTeX → Expr 変換ルール
+
+| LaTeX 記法 | Expr 変換 |
+|---|---|
+| `x^{n}` / `x^n` | `Pow(x, n)` |
+| `\frac{a}{b}` | `Div(a, b)` |
+| `\sqrt{x}` | `Pow(x, 0.5)` |
+| `\sin`, `\cos`, `\tan` | `Func("sin", ...)` 等 |
+| `\exp`, `\ln`, `\log` | `Func("exp", ...)` 等 |
+| `\cdot`, `\times` | `Mul` |
+| `\int_a^b` | `integrate(from: a, to: b)` |
+| `\sum_{i=0}^{n}` | `Sum(i, from: 0, to: n)` |
+| `\left(`, `\right)` | グループ化（読み飛ばし） |
+| `\,`, `\!`, `\quad` | 空白（読み飛ばし） |
+
+### API 設計
+
+```forge
+use forge/std/tex.*
+use forge/std/math.*
+
+// ── .tex ファイルから数式を抽出して計算 ──
+
+let doc = tex::parse("paper.tex")?
+
+// 番号付き equation 環境を取得
+let eq1 = doc.equation(1)        // \begin{equation} ... \end{equation} の1番目
+display::math(eq1)               // f(x) = x³ - 3x² + 2
+
+// 右辺だけ取り出す（f(x) = ... の右辺）
+let f = eq1.rhs()
+
+// 微分・積分
+let df = f.diff("x")
+display::math(df)                // 3x² - 6x
+
+let integral = f.integrate("x", from: 0.0, to: 2.0)
+display::text("定積分: {integral}")
+
+// 結果を .tex に追記して保存
+doc.append_equation(df, label: "deriv")
+doc.save("paper_annotated.tex")?
+
+// ── 文字列として LaTeX を直接パース ──
+let expr = tex::parse_expr("\\frac{x^2 + 1}{x - 1}")?
+display::math(expr.diff("x"))
+```
+
+### 逆方向：Expr → LaTeX
+
+```forge
+use forge/std/math.*
+
+let f = expr("x^2 + 3*x")
+
+// Expr を LaTeX 文字列に変換
+f.to_latex()                   // "x^{2} + 3x"
+f.diff("x").to_latex()         // "2x + 3"
+f.integrate("x").to_latex()    // "\\frac{x^{3}}{3} + \\frac{3x^{2}}{2} + C"
+
+// display::math は内部で to_latex() を使う
+display::math(f.diff("x"))     // ノートブックで LaTeX レンダリング
+```
+
+### 実用ワークフロー例
+
+```forge
+// 論文の数式を検算するノートブック
+use forge/std/tex.*
+use forge/std/math.*
+use forge/std/plot.*
+
+let doc = tex::parse("thesis.tex")?
+
+// 論文の数式(3)を取り出す
+let eq = doc.equation(3)
+display::text("論文の数式(3):")
+display::math(eq)
+
+// 微分して極値を確認
+let f  = eq.rhs()
+let df = f.diff("x")
+display::text("導関数:")
+display::math(df)
+
+let roots = df.solve("x")
+display::text("極値の候補: x = {roots}")
+
+// グラフで確認
+plot()
+    .fn(f,  x: -3.0..3.0, name: "f(x)")
+    .fn(df, x: -3.0..3.0, name: "f'(x)")
+    .points(roots.map(r => [r, 0.0]), name: "極値")
+    .title("論文 式(3) の検証")
+    .show()
+```
+
+### 実装アプローチ
+
+完全な LaTeX パーサーは不要。数式環境の抽出は正規表現ベースで十分。
+
+```
+Step 1: 数式環境の抽出
+  - $...$, $$...$$, \begin{equation}...\end{equation} を正規表現で切り出す
+
+Step 2: LaTeX 数式 → Expr 変換
+  - 上記の変換ルールテーブルを再帰的に適用
+  - `forge-compiler` の Lexer を参考に LaTeX トークナイザーを実装
+
+Step 3: Expr → LaTeX 変換（逆方向）
+  - Expr を再帰的にたどって LaTeX 文字列を生成
+```
+
+### 依存クレート
+
+| 用途 | クレート |
+|---|---|
+| 正規表現（数式環境抽出） | `regex`（forge-stdlib に既存） |
+| LaTeX パーサー | **自作**（数式環境限定） |
+
+### 実装フェーズ
+
+| フェーズ | 内容 |
+|---|---|
+| **T-0** | `.tex` から数式環境の抽出（`$...$` / `equation` / `align`） |
+| **T-1** | LaTeX 数式 → Expr 変換（基本四則・冪・分数） |
+| **T-2** | 三角関数・指数・対数の変換 |
+| **T-3** | Expr → LaTeX 逆変換（`to_latex()`） |
+| **T-4** | `\int` / `\sum` の変換 |
+| **T-5** | `doc.equation(n)` / `doc.append_equation()` / `doc.save()` |
+
+**T-1 完成 = 「.tex の数式を微分できる」最初のデモ**
+
+---
+
 ## 参考
 
 - [SymPy](https://www.sympy.org/) — Python 記号計算の標準
 - [nalgebra](https://nalgebra.org/) — Rust 線形代数
 - [KaTeX](https://katex.org/) — 高速 LaTeX レンダリング（ノートブック WebView 用）
 - [roots](https://docs.rs/roots/) — Rust 方程式の数値解
+- [latex2sympy](https://github.com/augustt198/latex2sympy) — LaTeX → sympy 変換の参考実装
