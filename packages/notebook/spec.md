@@ -409,3 +409,74 @@ println(value)          // デフォルト
 | **N-2: VS Code** | `FnbSerializer` + `FnbKernelController`・`.fnb.out.json` の読み書き |
 | **N-3: display()** | `display::text/json/table/html/markdown/image` 組み込み関数 |
 | **N-4: エクスポート** | `forge notebook export --format ipynb`（Jupyter 互換） |
+| **N-5: 可視化** | `display::plot` + `forge/std/plot` / `forge/std/ml` 統合（後述） |
+
+---
+
+## 12. 可視化統合（forge/std/plot + forge/std/ml）
+
+> 詳細設計: `lang/std/plot/idea.md`
+
+### display::plot（追加 output タイプ）
+
+`forge/std/plot` の `.show()` がノートブック内でインタラクティブグラフを表示する。
+
+```forge
+use forge/std/plot.*
+use forge/std/ml.*
+
+let data    = load_csv("embeddings.csv")?
+let labels  = load_csv("labels.csv")?
+let reduced = tsne(data, dims: 2, perplexity: 30.0)?
+
+scatter(reduced.col(0), reduced.col(1))
+    .color_by(labels)
+    .title("t-SNE visualization")
+    .show()   // ノートブックにインタラクティブ散布図を表示
+```
+
+バックエンドは **plotly**（Rust バインディング）。Plotly.js 互換 JSON を出力し、
+VS Code の WebView 上で Plotly.js がインタラクティブにレンダリングする。
+
+### .fnb.out.json への格納
+
+```json
+{
+  "type": "plot",
+  "backend": "plotly",
+  "spec": { "...Plotly JSON spec..." }
+}
+```
+
+### 対応グラフ種別
+
+| 関数 | グラフ種別 | 主な用途 |
+|---|---|---|
+| `scatter(x, y)` | 散布図 | t-SNE / PCA 結果の可視化 |
+| `line(y)` | 折れ線 | 損失曲線・時系列 |
+| `histogram(data)` | ヒストグラム | 分布確認 |
+| `bar(labels, values)` | バーチャート | カテゴリ集計 |
+| `heatmap(matrix)` | ヒートマップ | 相関行列・混同行列 |
+
+### forge run でのフォールバック
+
+```forge
+scatter(x, y).show()
+// forge run では:
+// "[scatter plot: 100 points, x: [-2.3..3.1], y: [-1.8..2.7]]"
+```
+
+静的ファイルが必要な場合: `scatter(x, y).save("output.png")`（`plotters` 経由で PNG 出力）
+
+### Candle との連携イメージ
+
+```forge
+use forge/std/candle.*   // 将来モジュール
+use forge/std/ml.*
+use forge/std/plot.*
+
+let model      = Model::load("model.safetensors")?
+let embeddings = model.encode(texts)?   // 推論 → 埋め込みベクトル
+let reduced    = tsne(embeddings, dims: 2)?
+scatter(reduced.col(0), reduced.col(1)).color_by(labels).show()
+```
