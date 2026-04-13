@@ -418,23 +418,174 @@ MCPサーバーがすでに稼働しているため、`forge dev`中のコンパ
 
 ---
 
-## Tailwind連携方針：v4 Standalone Binary
+## Tailwind 統合：ゼロ設定・ゼロ CSS ファイル方針
 
-Tailwind v4はエンジンがRustベース（Lightning CSS）に刷新され、設定ファイル不要・非常に高速。
-Standalone Binaryが提供されているため**Node.js/npm不要**で動作する。
+### 設計思想
 
-ForgeScriptの「依存最小」方針と相性が良い。
+Dioxus / Leptos の Tailwind 設定は現状こうなっている：
+
+```
+❌ ユーザーがやること（Dioxus/Leptos）
+  1. Node.js をインストール
+  2. npm install tailwindcss
+  3. tailwind.config.js を手書き（content パス設定）
+  4. input.css を手書き（@tailwind base/components/utilities）
+  5. tailwindcss CLI をビルドフローに組み込む
+  6. 出力 CSS を HTML に <link> で手動で繋ぐ
+```
+
+Bloom の目標：**ユーザーがやることをゼロにする。**
+
+```
+✅ Bloom でユーザーがやること
+  （なし）
+```
+
+### forge new — プロジェクトテンプレートに最初から同梱
+
+`forge new my-app` で生成されるプロジェクトは最初から Bloom + Tailwind が設定済み。
+ユーザーが CSS 設定ファイルを一行も書く必要はない。
+
+```
+my-app/
+├── forge.toml         ← [bloom] tailwind = true が既定で入っている
+├── src/
+│   ├── main.bloom     ← <div class="p-4 text-blue-500"> がすぐ動く
+│   └── app.bloom
+└── (tailwind.config.js なし・input.css なし)
+```
+
+`forge.toml` の設定：
+
+```toml
+[bloom]
+tailwind = true          # デフォルト true（false にすれば完全無効）
+# tailwind_theme = {}   # v4 CSS variables でテーマ上書き（任意）
+```
+
+### Tailwind v4 Standalone Binary の自動管理
+
+初回 `forge build --web` 時に Tailwind v4 Standalone Binary を自動取得。
+
+```
+forge build --web (初回)
+  └── ~/.forge/tools/tailwind-v4 が未存在
+  └── プラットフォーム検出（x86_64-windows / aarch64-macos 等）
+  └── GitHub Releases から該当バイナリをダウンロード（~7MB）
+  └── ~/.forge/tools/tailwind-v4 にキャッシュ
+  └── 以降は即時使用（ダウンロード不要）
+```
+
+- Node.js / npm / npx 不要
+- `forge.toml` にバージョンピンを持つため CI でも再現性が保証される
+
+```toml
+[bloom]
+tailwind = true
+tailwind_version = "4.1.0"  # ピン留め（省略時は最新安定版）
+```
+
+### ビルドフロー（内部）
 
 ```
 forge build --web
-  └── Tailwind v4 standalone binary を自動取得（初回のみ）
-  └── .bloomテンプレート内の class="..." をスキャン
-  └── 使われているクラスだけを含む最小CSSを生成
-  └── WASM + CSS を出力
+  ├── .bloom テンプレートを全スキャン → class="..." 属性を収集
+  ├── Bloom が内部で input.css を生成（ユーザーには見えない）
+  │     @import "tailwindcss";
+  │     /* ここに tailwind_theme の上書きが入る */
+  ├── tailwind-v4 standalone --input [生成CSS] --output dist/bloom.css
+  └── WASM + dist/bloom.css を dist/ に出力
 ```
 
-- npmもviteも不要
-- `forge build --web` 一発でWASM+CSS両方が揃う
+ユーザーが触るのは `forge.toml` の `[bloom]` セクションだけ。設定ファイルは 1 つ。
+
+---
+
+## Tailwind クラス名のコンパイル時バリデーション
+
+### 問題
+
+Tailwind は文字列クラス名なので typo がサイレントに無視される：
+
+```bloom
+<!-- bg-bleu-500 は存在しない → 無色になるだけで気づかない -->
+<div class="bg-bleu-500 text-whte rounded-lrg">
+```
+
+### 解決策：Bloom コンパイラがクラス名を検証
+
+Bloom のコンパイラは Tailwind v4 の有効クラス一覧を持ち、テンプレートのクラス名をビルド時に照合する。
+
+```
+forge build --web
+
+warning: unknown Tailwind class "bg-bleu-500" at src/app.bloom:12:14
+  hint: did you mean "bg-blue-500"?
+
+warning: unknown Tailwind class "text-whte" at src/app.bloom:12:24
+  hint: did you mean "text-white"?
+
+warning: unknown Tailwind class "rounded-lrg" at src/app.bloom:12:31
+  hint: did you mean "rounded-lg" or "rounded-3xl"?
+```
+
+- デフォルトは **warning**（ビルドは通る）
+- `forge build --web --strict` で **error** に昇格（CI に組み込みやすい）
+
+### 動的クラスへの対応
+
+ロジックで生成するクラス名は静的解析できないため、`@dynamic_class` アノテーションで明示：
+
+```bloom
+<script>
+  @dynamic_class
+  fn button_class(variant: string) -> string {
+    match variant {
+      "primary" => "bg-blue-500 hover:bg-blue-600",
+      "danger"  => "bg-red-500 hover:bg-red-600",
+      _         => "bg-gray-500",
+    }
+  }
+</script>
+
+<button class={button_class(variant)}>Click</button>
+```
+
+`@dynamic_class` が付いた関数の返り値はバリデーション対象から外れる。
+関数本体内のリテラル文字列は引き続き検証される。
+
+---
+
+## チラつきの正直な分析
+
+「同一 WASM バイナリ」はロジックの同一性を保証するが、**入力状態の差異** は別問題。
+
+| ケース | チラつき | 対策 |
+|---|---|---|
+| 静的コンテンツ（テキスト・画像） | **なし** | attach するだけ・DOM 変更なし |
+| サーバー既知の動的データ（DB等） | **なし** | SSR 時に値が埋め込まれている |
+| localStorage / Cookie | **あり** | `@client` で SSR をプレースホルダーに |
+| 時刻・カウンター系 | **あり** | `@client` + Suspense |
+| `window.innerWidth` 等 | **あり** | `@client` で SSR スキップ |
+
+### `@client` デコレータ
+
+クライアント専用状態に付けると、SSR 時は `<slot data-bloom-client>` プレースホルダーが出力され、
+WASM ロード後にそこだけが更新される。他の DOM には触れないためチラつきは局所化される。
+
+```bloom
+<script>
+  @client
+  state theme: string = localStorage.get("theme") |> or("light")
+  //           ↑ SSR 時は "light" で固定レンダリング → WASM ロード後に更新
+</script>
+```
+
+### React との比較
+
+React は「SSR 出力と全く同じでも」仮想 DOM の差分計算のために一度 DOM を再生成する。
+これが構造的チラつきの原因。Bloom のアタッチモデルは再生成しないため、
+**`@client` 不要な大半のコンテンツでチラつきはゼロ**。
 
 ---
 
