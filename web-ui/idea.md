@@ -939,7 +939,154 @@ B-0 が完成した時点で「ForgeScript から Hello World をブラウザに
 
 ---
 
-## スコープ外
+## アーキテクチャ決定事項（確定）
+
+---
+
+### 決定①：WASM ランタイム共有チャンク
+
+Islands の WASM がランタイムを重複して抱えないよう、`forge.min.js` がランタイムを先行ロードする。
+
+```
+ページロード時のシーケンス:
+  1. forge.min.js が bloom-runtime.wasm をロード（1回だけ）
+  2. クリティカル CSS をインライン注入（FOUC 対策）
+  3. ビューポート内の @island を検出 → 各 Island の .wasm をロード
+  4. 各 Island WASM はランタイムを内包せず、ロード済みランタイムに依存
+  5. イベントハンドラをアタッチ
+
+dist/
+  bloom-runtime.wasm   ← 共有ランタイム（全 Island が参照）
+  like-button.wasm     ← アプリコードのみ（数KB 程度）
+  comment-form.wasm    ← 同上
+  forge.min.js         ← ローダー + クリティカル CSS インライン（< 5KB gzip）
+```
+
+`bloom-runtime.wasm` のサイズを最小化することが全体の UX に直結するため、ランタイムのスリム化を設計上の優先事項とする。
+
+---
+
+### 決定②：DOM ブリッジは自作（コマンドストリーム方式）
+
+`wasm-bindgen` / `web-sys` は使用しない。自作のコマンドストリームブリッジで DOM 操作を行う。
+
+**理由:**
+- `web-sys` はすべての DOM API を含むため WASM サイズが膨れる
+- 自作なら Bloom が実際に使う操作だけを定義でき、バイナリを最小化できる
+- 将来 WebGPU / WebGL / カスタム描画との統合を柔軟に設計できる
+- コマンドプロトコル自体が Bloom の「独自の面白い何か」になる余地がある
+
+**コマンドプロトコル設計方針:**
+
+```
+WASM → JS: コマンドバッファ（i32 配列）
+  [op_code, arg1, arg2, ...]
+
+JS → WASM: イベントバッファ（i32 配列）
+  [event_type, target_id, payload_ptr, payload_len]
+```
+
+文字列は線形メモリの共有領域を通じて渡す（コピーを最小化）。
+op_code は Bloom コンパイラが静的に決定するため、実行時のディスパッチコストが低い。
+
+実装は段階的に追加：
+
+| フェーズ | 追加 op |
+|---|---|
+| B-0（MVP） | SET_TEXT / SET_ATTR / ADD_LISTENER / REMOVE_LISTENER |
+| B-2 | INSERT_NODE / REMOVE_NODE / SET_CLASS |
+| B-3（SSR） | ATTACH / DETACH（既存 DOM ノードへの参照取得） |
+| 将来 | CANVAS_CMD / WEBGPU_PASS（use raw {} 対応） |
+
+---
+
+### 決定③：SPA スタイルのルーティング（サーバードリブン Morphing）
+
+TS / Vue / React に慣れたユーザーが自然に使えるよう、SPA スタイルのクライアントサイドナビゲーションを採用する。ただし「JSON を受け取って WASM が再レンダリング」ではなく、**サーバーが HTML を返し、WASM が DOM を Morph する**方式とする。
+
+```
+初回ロード:
+  ブラウザ → Anvil: GET /users/123
+  Anvil → ブラウザ: SSR済みHTML（スタイル込み）
+  bloom-runtime.wasm: DOM にアタッチ
+
+クライアントサイドナビゲーション（<Link> クリック後）:
+  Bloom → Anvil: fetch /users/456 (header: X-Bloom-Nav: true)
+  Anvil → Bloom: HTML フラグメント（<body> 内側のみ）
+  Bloom runtime: 現在の DOM を新しい HTML へ Morph（最小差分更新）
+  History API: URL を /users/456 に更新
+  ページリロードなし・スクロール位置保持
+```
+
+この方式の利点：
+- 各ページが SSR されるので SEO・初回描画が常に速い（SPA の欠点を持たない）
+- WASM がデータフェッチとレンダリングを両方持つ必要がない（サーバーが HTML を生成）
+- TS ユーザーには「Turbo Drive / htmx に近い感覚だが型安全」として説明できる
+
+**`<Link>` コンポーネントと `@contract` の連携:**
+
+```forge
+// Anvil 側（ルート定義）
+@contract
+app.get("/users/:id", fn(req) -> UserPage! { ... })
+
+// Bloom 側（自動的に型付きリンクが生成される）
+// @contract があれば存在しないルートへの <Link> はコンパイルエラー
+<Link to={Routes.users(user.id)}>{user.name}</Link>
+//          ↑ Anvil のルート定義から自動生成された型安全な URL ビルダー
+```
+
+存在しないルートへの `<Link>` がコンパイル時エラーになる。
+
+**ルーティングの責務分担:**
+
+| 責務 | 担当 |
+|---|---|
+| URL パターン定義・サーバー処理 | Anvil（既存） |
+| クライアントナビゲーション（History API） | Bloom `<Link>` コンポーネント |
+| DOM Morphing | Bloom runtime（コマンドストリーム経由） |
+| 型安全な URL 生成 | `@contract` から自動生成（forge build 時） |
+| 戻る/進む（popstate） | forge.min.js が検知 → Bloom runtime に通知 |
+
+---
+
+### 決定④：プログレッシブエンハンスメント + ストリクトモードによる検証
+
+WASM のロードに失敗した場合（古いブラウザ・ネットワークエラー・JS 無効）でも、
+コンテンツの閲覧とフォーム送信が機能するようにする。
+
+**フォールバック設計:**
+
+```bloom
+<!-- WASM あり → @click で SPA 的に処理 -->
+<!-- WASM なし → <form> がそのまま POST → Anvil が処理 -->
+<form method="POST" action="/posts/{id}/like">
+  <button type="submit" @click={handleLike}>
+    {liked ? "Liked!" : "Like"}
+  </button>
+</form>
+```
+
+- `@click` が付いていても、`<form>` の中にあれば WASM なし時はネイティブ送信にフォールバック
+- Anvil 側が同じエンドポイントで HTML レスポンスと JSON レスポンス両方を返せるよう `@contract` が型を保証
+
+**ストリクト・ハイドレーションモードとの連携:**
+
+```
+forge build --web --strict
+
+warning: button at src/app.bloom:24 has @click but no native fallback
+  hint: wrap in <form action="..."> for progressive enhancement
+
+warning: <Link> at src/app.bloom:31 has no <a href="..."> equivalent
+  hint: use <Link href={Routes.users(id)}> (renders as <a> in SSR)
+```
+
+- `<Link>` は SSR 時に `<a href="...">` としてレンダリングされるため JS なしでも遷移できる（自動対応）
+- `@click` 単体のボタンは `--strict` で警告（フォールバックがないため）
+- `--strict` を CI に組み込むことでアクセシビリティ・耐障害性を継続的に担保
+
+---
 
 - **WASI対応（ブラウザ）**: ブラウザはセキュリティサンドボックスの設計上WASIを実装しておらず、今後も変わらない見込み。ブラウザでのファイルI/OはAnvil経由でクラウドベンダーに委ねる責務分離とする。
 - **WASI対応（サーバー）**: wasmtimeは内部的にWASIをサポートしているため必要になれば自然に活用できる。Bloomのスコープとしては意識しない。
