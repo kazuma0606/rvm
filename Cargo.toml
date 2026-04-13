@@ -1,13 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
+    # 言語コア
     "crates/forge-compiler",
     "crates/forge-vm",
     "crates/forge-stdlib",
-    "crates/forge-cli",
     "crates/forge-transpiler",
+    "crates/forge-cli",
     "crates/forge-mcp",
+    # パッケージ Rust 実装（packages/ 配下の ForgeScript パッケージを支えるクレート）
     "crates/crucible-cli",
+    # 将来追加:
+    # "crates/ember-runtime",   # Ember ゲームエンジン（wgpu + rapier）
+    # "crates/bloom-runtime",   # Bloom UI ランタイム（DOM ブリッジ）
 ]
 
 [workspace.package]
