@@ -46,6 +46,7 @@ impl std::error::Error for ParseError {}
 enum BraceExprKind {
     Block,
     EmptyMap,
+    AnonStruct,
     Map,
     Set,
 }
@@ -727,15 +728,77 @@ impl Parser {
     fn parse_let_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::Let)?;
-        let (name, _) = self.expect_ident()?;
+        let pat = self.parse_pat()?;
         let (type_ann, value, _) = self.parse_binding_rhs()?;
         Ok(Stmt::Let {
-            name,
+            pat,
             type_ann,
             value,
             is_pub,
             span,
         })
+    }
+
+    /// 分割代入パターンをパースする (E2-1-B)
+    fn parse_pat(&mut self) -> Result<Pat, ParseError> {
+        match self.peek_kind().clone() {
+            // タプルパターン: (a, b, c) / (head, ..tail)
+            TokenKind::LParen => {
+                self.advance(); // consume '('
+                let pats = self.parse_pat_list(&TokenKind::RParen)?;
+                self.expect_token(&TokenKind::RParen)?;
+                Ok(Pat::Tuple(pats))
+            }
+            // リストパターン: [a, b, c]
+            TokenKind::LBracket => {
+                self.advance(); // consume '['
+                let pats = self.parse_pat_list(&TokenKind::RBracket)?;
+                self.expect_token(&TokenKind::RBracket)?;
+                Ok(Pat::List(pats))
+            }
+            // ワイルドカード: _
+            TokenKind::Ident(name) if name == "_" => {
+                self.advance();
+                Ok(Pat::Wildcard)
+            }
+            // 残余パターン: ..name
+            TokenKind::DotDot => {
+                self.advance(); // consume '..'
+                let (name, _) = self.expect_ident()?;
+                Ok(Pat::Rest(name))
+            }
+            // 単純識別子: x
+            _ => {
+                let (name, _) = self.expect_ident()?;
+                Ok(Pat::Ident(name))
+            }
+        }
+    }
+
+    /// カンマ区切りのパターンリストをパース（終端トークンの手前まで）
+    fn parse_pat_list(&mut self, end_token: &TokenKind) -> Result<Vec<Pat>, ParseError> {
+        let mut pats = Vec::new();
+        while !self.peek_kind_eq(end_token) && !matches!(self.peek_kind(), TokenKind::Eof) {
+            // 残余パターン: ..name
+            if matches!(self.peek_kind(), TokenKind::DotDot) {
+                self.advance(); // consume '..'
+                let (name, _) = self.expect_ident()?;
+                pats.push(Pat::Rest(name));
+                // 残余パターンは最後の要素
+                break;
+            }
+            pats.push(self.parse_pat()?);
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Ok(pats)
+    }
+
+    fn peek_kind_eq(&self, kind: &TokenKind) -> bool {
+        std::mem::discriminant(self.peek_kind()) == std::mem::discriminant(kind)
     }
 
     fn parse_state(&mut self) -> Result<Stmt, ParseError> {
@@ -991,6 +1054,25 @@ impl Parser {
                 self.advance();
                 self.expect_token(&TokenKind::RParen)?;
                 TypeAnn::Unit
+            }
+            TokenKind::LBrace => {
+                self.advance();
+                let mut fields = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    let (field_name, _) = self.expect_ident()?;
+                    self.expect_token(&TokenKind::Colon)?;
+                    let type_ann = self.parse_type_ann()?;
+                    fields.push((field_name, type_ann));
+                    if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                TypeAnn::AnonStruct(fields)
             }
             TokenKind::Fn => {
                 self.advance();
@@ -1831,12 +1913,12 @@ impl Parser {
     fn parse_for(&mut self) -> Result<Expr, ParseError> {
         let span = self.current_span();
         self.expect_token(&TokenKind::For)?;
-        let (var, _) = self.expect_ident()?;
+        let pat = self.parse_pat()?;
         self.expect_token(&TokenKind::In)?;
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
         Ok(Expr::For {
-            var,
+            pat,
             iter: Box::new(iter),
             body: Box::new(body),
             span,
@@ -1902,7 +1984,7 @@ impl Parser {
         self.expect_token(&TokenKind::Arrow)?;
 
         let body = if matches!(self.peek_kind(), TokenKind::LBrace) {
-            self.parse_block()?
+            self.parse_brace_expr()?
         } else {
             self.parse_expr()?
         };
@@ -2475,6 +2557,30 @@ impl Parser {
                 }
                 self.expect_token(&TokenKind::RBrace)?;
                 Ok(Expr::MapLiteral { pairs, span })
+            }
+            BraceExprKind::AnonStruct => {
+                let span = self.current_span();
+                self.expect_token(&TokenKind::LBrace)?;
+                let mut fields = Vec::new();
+                loop {
+                    self.skip_sep();
+                    if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
+                    let (field_name, _) = self.expect_ident()?;
+                    let value = if matches!(self.peek_kind(), TokenKind::Colon) {
+                        self.advance();
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    fields.push((field_name, value));
+                    if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                        self.advance();
+                    }
+                }
+                self.expect_token(&TokenKind::RBrace)?;
+                Ok(Expr::AnonStruct { fields, span })
             }
             BraceExprKind::Set => {
                 let span = self.current_span();
@@ -3237,6 +3343,9 @@ impl Parser {
         if is_block_start_token(&first.kind) {
             return BraceExprKind::Block;
         }
+        if self.is_probable_anon_struct_literal() {
+            return BraceExprKind::AnonStruct;
+        }
 
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -3277,6 +3386,64 @@ impl Parser {
         }
 
         BraceExprKind::Block
+    }
+
+    fn is_probable_anon_struct_literal(&self) -> bool {
+        let mut i = self.pos + 1;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut expect_field = true;
+        let mut saw_any = false;
+
+        while let Some(tok) = self.tokens.get(i) {
+            match &tok.kind {
+                TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    return saw_any && !expect_field;
+                }
+                TokenKind::Ident(_)
+                    if paren_depth == 0
+                        && bracket_depth == 0
+                        && brace_depth == 0
+                        && expect_field =>
+                {
+                    saw_any = true;
+                    let next = self.tokens.get(i + 1).map(|t| &t.kind);
+                    match next {
+                        Some(TokenKind::Colon) => {
+                            i += 2;
+                            expect_field = false;
+                            continue;
+                        }
+                        Some(TokenKind::Comma) | Some(TokenKind::RBrace) => {
+                            expect_field = false;
+                        }
+                        _ => return false,
+                    }
+                }
+                _ if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && expect_field => {
+                    return false;
+                }
+                TokenKind::Comma | TokenKind::Semicolon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    if expect_field {
+                        return false;
+                    }
+                    expect_field = true;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+
+        false
     }
 
     /// validate { field: constraint, constraint, ... } をパース
@@ -3659,7 +3826,7 @@ mod tests {
     fn test_parse_let() {
         match first_stmt("let x = 10") {
             Stmt::Let {
-                name,
+                pat: Pat::Ident(name),
                 value: Expr::Literal(Literal::Int(10), _),
                 ..
             } => {
@@ -3740,7 +3907,10 @@ mod tests {
     #[test]
     fn test_parse_for() {
         match first_stmt("for x in items { print(x) }") {
-            Stmt::Expr(Expr::For { var, .. }) => {
+            Stmt::Expr(Expr::For {
+                pat: Pat::Ident(var),
+                ..
+            }) => {
                 assert_eq!(var, "x");
             }
             other => panic!("expected For, got {:?}", other),
