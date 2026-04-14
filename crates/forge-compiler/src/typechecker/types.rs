@@ -49,6 +49,7 @@ impl Type {
             | TypeAnn::OrderedSet(_)
             | TypeAnn::Unit
             | TypeAnn::Fn { .. }
+            | TypeAnn::AnonStruct(_)
             | TypeAnn::StringLiteralUnion(_) => Type::Unknown,
         }
     }

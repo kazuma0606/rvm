@@ -12,7 +12,13 @@ fn test_full_parse_hello() {
     let src = "let msg = \"Hello!\"\nprint(msg)";
     let module = parse_ok(src);
     assert_eq!(module.stmts.len(), 2);
-    assert!(matches!(&module.stmts[0], Stmt::Let { name, .. } if name == "msg"));
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::Ident(name),
+            ..
+        } if name == "msg"
+    ));
     assert!(matches!(&module.stmts[1], Stmt::Expr(Expr::Call { .. })));
 }
 
@@ -242,6 +248,173 @@ fn test_parse_optional_chain_method() {
             other => panic!("expected OptionalChain, got {:?}", other),
         },
         other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_destructure_tuple_2() {
+    let module = parse_ok("let (a, b) = pair");
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::Tuple(items),
+            ..
+        } if matches!(items.as_slice(), [Pat::Ident(a), Pat::Ident(b)] if a == "a" && b == "b")
+    ));
+}
+
+#[test]
+fn test_parse_destructure_tuple_3() {
+    let module = parse_ok("let (a, b, c) = values");
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::Tuple(items),
+            ..
+        } if matches!(items.as_slice(), [Pat::Ident(a), Pat::Ident(b), Pat::Ident(c)] if a == "a" && b == "b" && c == "c")
+    ));
+}
+
+#[test]
+fn test_parse_destructure_wildcard() {
+    let module = parse_ok("let (_, value) = pair");
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::Tuple(items),
+            ..
+        } if matches!(items.as_slice(), [Pat::Wildcard, Pat::Ident(value)] if value == "value")
+    ));
+}
+
+#[test]
+fn test_parse_destructure_rest() {
+    let module = parse_ok("let (head, ..tail) = nums");
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::Tuple(items),
+            ..
+        } if matches!(items.as_slice(), [Pat::Ident(head), Pat::Rest(tail)] if head == "head" && tail == "tail")
+    ));
+}
+
+#[test]
+fn test_parse_destructure_list_bracket() {
+    let module = parse_ok("let [left, right] = pair");
+    assert!(matches!(
+        &module.stmts[0],
+        Stmt::Let {
+            pat: Pat::List(items),
+            ..
+        } if matches!(items.as_slice(), [Pat::Ident(left), Pat::Ident(right)] if left == "left" && right == "right")
+    ));
+}
+
+#[test]
+fn test_parse_anon_struct_type_return() {
+    let module = parse_ok("fn make() -> { name: string, score: number } { 1 }");
+    match &module.stmts[0] {
+        Stmt::Fn {
+            return_type: Some(TypeAnn::AnonStruct(fields)),
+            ..
+        } => {
+            assert_eq!(fields.len(), 2);
+            assert!(matches!(&fields[0], (name, TypeAnn::String) if name == "name"));
+            assert!(matches!(&fields[1], (name, TypeAnn::Number) if name == "score"));
+        }
+        other => panic!("expected anon struct return type, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_anon_struct_type_in_generic() {
+    let module = parse_ok("fn list_users() -> list<{ id: number, name: string }> { [] }");
+    match &module.stmts[0] {
+        Stmt::Fn {
+            return_type: Some(TypeAnn::List(inner)),
+            ..
+        } => {
+            assert!(matches!(inner.as_ref(), TypeAnn::AnonStruct(fields) if fields.len() == 2));
+        }
+        other => panic!("expected list<anon struct>, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_anon_struct_type_in_state() {
+    let module = parse_ok("state users: list<{ id: number, name: string }> = []");
+    match &module.stmts[0] {
+        Stmt::State {
+            type_ann: Some(TypeAnn::List(inner)),
+            ..
+        } => {
+            assert!(matches!(inner.as_ref(), TypeAnn::AnonStruct(fields) if fields.len() == 2));
+        }
+        other => panic!("expected state list<anon struct>, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_anon_struct_literal() {
+    let module = parse_ok("let user = { name: \"Alice\", score: 92 }");
+    match &module.stmts[0] {
+        Stmt::Let {
+            value: Expr::AnonStruct { fields, .. },
+            ..
+        } => {
+            assert!(
+                matches!(&fields[0], (name, Some(Expr::Literal(Literal::String(_), _))) if name == "name")
+            );
+            assert!(
+                matches!(&fields[1], (name, Some(Expr::Literal(Literal::Int(92), _))) if name == "score")
+            );
+        }
+        other => panic!("expected anon struct literal, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_anon_struct_literal_shorthand() {
+    let module = parse_ok("let user = { name, score }");
+    match &module.stmts[0] {
+        Stmt::Let {
+            value: Expr::AnonStruct { fields, .. },
+            ..
+        } => {
+            assert!(matches!(&fields[0], (name, None) if name == "name"));
+            assert!(matches!(&fields[1], (name, None) if name == "score"));
+        }
+        other => panic!("expected shorthand anon struct, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_anon_struct_literal_mixed() {
+    let module = parse_ok("let user = { name, score: 92 }");
+    match &module.stmts[0] {
+        Stmt::Let {
+            value: Expr::AnonStruct { fields, .. },
+            ..
+        } => {
+            assert!(matches!(&fields[0], (name, None) if name == "name"));
+            assert!(
+                matches!(&fields[1], (name, Some(Expr::Literal(Literal::Int(92), _))) if name == "score")
+            );
+        }
+        other => panic!("expected mixed anon struct, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_block_not_confused_with_struct() {
+    let module = parse_ok("let value = { let x = 1 x }");
+    match &module.stmts[0] {
+        Stmt::Let {
+            value: Expr::Block { .. },
+            ..
+        } => {}
+        other => panic!("expected block, got {:?}", other),
     }
 }
 

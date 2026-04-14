@@ -894,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_anon_struct_type_context() {
+        let got = kinds("fn make() -> { name: string } { 1 }");
+        assert_eq!(
+            got,
+            vec![
+                TokenKind::Fn,
+                TokenKind::Ident("make".to_string()),
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::ThinArrow,
+                TokenKind::LBrace,
+                TokenKind::Ident("name".to_string()),
+                TokenKind::Colon,
+                TokenKind::Ident("string".to_string()),
+                TokenKind::RBrace,
+                TokenKind::LBrace,
+                TokenKind::Int(1),
+                TokenKind::RBrace,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn test_lex_colon_colon() {
         let got = kinds("Foo::bar");
         assert_eq!(

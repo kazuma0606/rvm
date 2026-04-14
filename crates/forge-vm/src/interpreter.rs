@@ -781,9 +781,9 @@ impl Interpreter {
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Value, RuntimeError> {
         match stmt {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { pat, value, .. } => {
                 let v = self.eval_expr(value)?;
-                self.define(name, v, false);
+                self.bind_pat(pat, v)?;
                 Ok(Value::Unit)
             }
             Stmt::State { name, value, .. } => {
@@ -1643,8 +1643,10 @@ impl Interpreter {
                 Stmt::Fn { name, is_pub, .. } if *is_pub => {
                     pub_names.insert(name.clone());
                 }
-                Stmt::Let { name, is_pub, .. } if *is_pub => {
-                    pub_names.insert(name.clone());
+                Stmt::Let { pat, is_pub, .. } if *is_pub => {
+                    if let Pat::Ident(name) = pat {
+                        pub_names.insert(name.clone());
+                    }
                 }
                 Stmt::Const { name, is_pub, .. } if *is_pub => {
                     pub_names.insert(name.clone());
@@ -1712,8 +1714,8 @@ impl Interpreter {
             Expr::Loop { body, .. } => self.eval_loop(body),
             Expr::Break { .. } => Err(RuntimeError::LoopBreak),
             Expr::For {
-                var, iter, body, ..
-            } => self.eval_for(var, iter, body),
+                pat, iter, body, ..
+            } => self.eval_for(pat, iter, body),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.eval_match(scrutinee, arms),
@@ -1757,6 +1759,7 @@ impl Interpreter {
             Expr::OptionalChain { object, chain, .. } => self.eval_optional_chain(object, chain),
             Expr::NullCoalesce { value, default, .. } => self.eval_null_coalesce(value, default),
             Expr::StructInit { name, fields, .. } => self.eval_struct_init(name, fields),
+            Expr::AnonStruct { fields, .. } => self.eval_anon_struct(fields),
             Expr::FieldAssign {
                 object,
                 field,
@@ -1971,7 +1974,7 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
-    fn eval_for(&mut self, var: &str, iter: &Expr, body: &Expr) -> Result<Value, RuntimeError> {
+    fn eval_for(&mut self, pat: &Pat, iter: &Expr, body: &Expr) -> Result<Value, RuntimeError> {
         let iter_val = self.eval_expr(iter)?;
         let items = match iter_val {
             Value::List(list) => list.borrow().clone(),
@@ -1981,7 +1984,7 @@ impl Interpreter {
         let mut results = Vec::new();
         for item in items {
             self.push_scope();
-            self.define(var, item, false);
+            self.bind_pat(pat, item)?;
             let result = self.eval_expr(body);
             self.pop_scope();
             match result {
@@ -1991,6 +1994,92 @@ impl Interpreter {
             }
         }
         Ok(Value::List(Rc::new(RefCell::new(results))))
+    }
+
+    /// Pat に値を束縛する（E2-1）
+    fn bind_pat(&mut self, pat: &Pat, value: Value) -> Result<(), RuntimeError> {
+        match pat {
+            Pat::Ident(name) => {
+                self.define(name, value, false);
+                Ok(())
+            }
+            Pat::Wildcard => Ok(()),
+            Pat::Tuple(pats) | Pat::List(pats) => {
+                let items = match value {
+                    Value::List(ref list) => list.borrow().clone(),
+                    other => {
+                        return Err(RuntimeError::Custom(format!(
+                            "分割代入: list が必要ですが {} が渡されました",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // 残余パターンの数を数える
+                let rest_count = pats.iter().filter(|p| matches!(p, Pat::Rest(_))).count();
+                if rest_count > 1 {
+                    return Err(RuntimeError::Custom(
+                        "分割代入: 残余パターン ..name は1つのみ使用できます".to_string(),
+                    ));
+                }
+                // 残余パターンがない場合は要素数チェック
+                let required = pats.len();
+                if rest_count == 0 && items.len() < required {
+                    return Err(RuntimeError::Custom(format!(
+                        "分割代入: {} 要素が必要ですが {} 要素しかありません",
+                        required,
+                        items.len()
+                    )));
+                }
+                let has_rest = rest_count > 0;
+                let non_rest_count = pats.len() - rest_count;
+                if has_rest && items.len() < non_rest_count {
+                    return Err(RuntimeError::Custom(format!(
+                        "分割代入: 少なくとも {} 要素が必要ですが {} 要素しかありません",
+                        non_rest_count,
+                        items.len()
+                    )));
+                }
+
+                let mut item_idx = 0usize;
+                for sub_pat in pats {
+                    match sub_pat {
+                        Pat::Rest(rest_name) => {
+                            // 残余パターン: このパターンの後に来る non-rest 要素の数を計算
+                            let remaining_non_rest = pats
+                                .iter()
+                                .skip_while(|p| !std::ptr::eq(*p, sub_pat))
+                                .skip(1)
+                                .filter(|p| !matches!(p, Pat::Rest(_)))
+                                .count();
+                            let rest_end = items.len() - remaining_non_rest;
+                            let rest_items = items[item_idx..rest_end].to_vec();
+                            self.define(
+                                rest_name,
+                                Value::List(Rc::new(RefCell::new(rest_items))),
+                                false,
+                            );
+                            item_idx = rest_end;
+                        }
+                        _ => {
+                            let item = items.get(item_idx).cloned().ok_or_else(|| {
+                                RuntimeError::Custom(format!(
+                                    "分割代入: インデックス {} に要素がありません",
+                                    item_idx
+                                ))
+                            })?;
+                            self.bind_pat(sub_pat, item)?;
+                            item_idx += 1;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pat::Rest(name) => {
+                // トップレベルの Rest は全体を束縛
+                self.define(name, value, false);
+                Ok(())
+            }
+        }
     }
 
     fn eval_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<Value, RuntimeError> {
@@ -2237,6 +2326,48 @@ impl Interpreter {
                         Some(inner) => *inner,
                         None => fallback,
                     })
+                }
+                "unwrap" => match opt {
+                    Some(inner) => Ok(*inner),
+                    None => Err(RuntimeError::Custom("unwrap called on none".to_string())),
+                },
+                "map" => {
+                    let f = one_fn_arg(method, arg_vals)?;
+                    match opt {
+                        Some(inner) => {
+                            let result = self.call_value(f, vec![*inner])?;
+                            Ok(Value::Option(Some(Box::new(result))))
+                        }
+                        None => Ok(Value::Option(None)),
+                    }
+                }
+                "and_then" => {
+                    let f = one_fn_arg(method, arg_vals)?;
+                    match opt {
+                        Some(inner) => self.call_value(f, vec![*inner]),
+                        None => Ok(Value::Option(None)),
+                    }
+                }
+                "or" => {
+                    let fallback = arg_vals.into_iter().next().unwrap_or(Value::Option(None));
+                    match opt {
+                        Some(inner) => Ok(Value::Option(Some(inner))),
+                        None => Ok(fallback),
+                    }
+                }
+                "filter" => {
+                    let f = one_fn_arg(method, arg_vals)?;
+                    match opt {
+                        Some(inner) => match self.call_value(f, vec![(*inner).clone()])? {
+                            Value::Bool(true) => Ok(Value::Option(Some(inner))),
+                            Value::Bool(false) => Ok(Value::Option(None)),
+                            other => Err(RuntimeError::Custom(format!(
+                                "filter の述語は bool を返す必要があります。{} が返されました",
+                                other.type_name()
+                            ))),
+                        },
+                        None => Ok(Value::Option(None)),
+                    }
                 }
                 other => Err(RuntimeError::Custom(format!(
                     "メソッド '{}' は option に対して未実装です",
@@ -2823,25 +2954,32 @@ impl Interpreter {
             // ── 追加メソッド ─────────────────────────────────────────────
             "sort" => {
                 let mut list = items.borrow().clone();
-                list.sort_by(|a, b| {
-                    match (a, b) {
-                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-                        (Value::String(x), Value::String(y)) => x.cmp(y),
-                        _ => std::cmp::Ordering::Equal,
+                list.sort_by(|a, b| match (a, b) {
+                    (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::Float(x), Value::Float(y)) => {
+                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                     }
+                    (Value::Int(x), Value::Float(y)) => (*x as f64)
+                        .partial_cmp(y)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float(x), Value::Int(y)) => x
+                        .partial_cmp(&(*y as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::String(x), Value::String(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
                 });
                 Ok(mk_list(list))
             }
             "join" => {
                 let sep = one_string_arg(method, args)?;
                 let list = items.borrow();
-                let parts: Vec<String> = list.iter().map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                }).collect();
+                let parts: Vec<String> = list
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect();
                 Ok(Value::String(parts.join(sep.as_str())))
             }
             "dedup" => {
@@ -2879,19 +3017,21 @@ impl Interpreter {
             "chunk" => {
                 let n = match args.into_iter().next() {
                     Some(Value::Int(n)) if n > 0 => n as usize,
-                    _ => return Err(RuntimeError::Custom("chunk() には正の整数が必要です".into())),
+                    _ => {
+                        return Err(RuntimeError::Custom(
+                            "chunk() には正の整数が必要です".into(),
+                        ))
+                    }
                 };
                 let list = items.borrow().clone();
-                let chunks: Vec<Value> = list.chunks(n)
-                    .map(|c| mk_list(c.to_vec()))
-                    .collect();
+                let chunks: Vec<Value> = list.chunks(n).map(|c| mk_list(c.to_vec())).collect();
                 Ok(mk_list(chunks))
             }
             "partition" => {
                 let f = one_fn_arg(method, args)?;
                 let list = items.borrow().clone();
                 let mut yes = Vec::new();
-                let mut no  = Vec::new();
+                let mut no = Vec::new();
                 for item in list {
                     let matched = self.call_value(f.clone(), vec![item.clone()])?;
                     if matches!(matched, Value::Bool(true)) {
@@ -2905,7 +3045,11 @@ impl Interpreter {
             "take_last" => {
                 let n = match args.into_iter().next() {
                     Some(Value::Int(n)) if n >= 0 => n as usize,
-                    _ => return Err(RuntimeError::Custom("take_last() には非負整数が必要です".into())),
+                    _ => {
+                        return Err(RuntimeError::Custom(
+                            "take_last() には非負整数が必要です".into(),
+                        ))
+                    }
                 };
                 let list = items.borrow().clone();
                 let start = list.len().saturating_sub(n);
@@ -2978,9 +3122,9 @@ impl Interpreter {
                 let pattern = one_string_arg(method, args)?;
                 Ok(Value::Bool(text.contains(pattern.as_str())))
             }
-            "trim"       => Ok(Value::String(text.trim().to_string())),
+            "trim" => Ok(Value::String(text.trim().to_string())),
             "trim_start" => Ok(Value::String(text.trim_start().to_string())),
-            "trim_end"   => Ok(Value::String(text.trim_end().to_string())),
+            "trim_end" => Ok(Value::String(text.trim_end().to_string())),
             "capitalize" => {
                 let mut chars = text.chars();
                 let s = match chars.next() {
@@ -3002,23 +3146,36 @@ impl Interpreter {
                 let mut it = args.into_iter();
                 let from = match it.next() {
                     Some(Value::String(s)) => s,
-                    _ => return Err(RuntimeError::Custom("replace(): 第1引数は string が必要です".into())),
+                    _ => {
+                        return Err(RuntimeError::Custom(
+                            "replace(): 第1引数は string が必要です".into(),
+                        ))
+                    }
                 };
                 let to = match it.next() {
                     Some(Value::String(s)) => s,
-                    _ => return Err(RuntimeError::Custom("replace(): 第2引数は string が必要です".into())),
+                    _ => {
+                        return Err(RuntimeError::Custom(
+                            "replace(): 第2引数は string が必要です".into(),
+                        ))
+                    }
                 };
                 Ok(Value::String(text.replace(from.as_str(), to.as_str())))
             }
             "repeat" => {
                 let n = match args.into_iter().next() {
                     Some(Value::Int(n)) if n >= 0 => n as usize,
-                    _ => return Err(RuntimeError::Custom("repeat() には非負整数が必要です".into())),
+                    _ => {
+                        return Err(RuntimeError::Custom(
+                            "repeat() には非負整数が必要です".into(),
+                        ))
+                    }
                 };
                 Ok(Value::String(text.repeat(n)))
             }
             "chars" => {
-                let char_items = text.chars()
+                let char_items = text
+                    .chars()
                     .map(|c| Value::String(c.to_string()))
                     .collect::<Vec<_>>();
                 Ok(mk_list(char_items))
@@ -4098,6 +4255,24 @@ impl Interpreter {
         }
         Ok(Value::Struct {
             type_name: name.to_string(),
+            fields: Rc::new(RefCell::new(field_map)),
+        })
+    }
+
+    fn eval_anon_struct(
+        &mut self,
+        fields: &[(String, Option<Expr>)],
+    ) -> Result<Value, RuntimeError> {
+        let mut field_map: HashMap<String, Value> = HashMap::new();
+        for (field_name, expr) in fields {
+            let val = match expr {
+                Some(expr) => self.eval_expr(expr)?,
+                None => self.eval_ident(field_name)?,
+            };
+            field_map.insert(field_name.clone(), val);
+        }
+        Ok(Value::Struct {
+            type_name: "<anon>".to_string(),
             fields: Rc::new(RefCell::new(field_map)),
         })
     }
@@ -9738,7 +9913,10 @@ s == "Hello"
             let nums = [1, 2, 3, 4, 5]
             nums.find(n => n > 3)
         "#);
-        assert_eq!(result.unwrap(), Value::Option(Some(Box::new(Value::Int(4)))));
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(4))))
+        );
     }
 
     #[test]
@@ -9855,6 +10033,450 @@ s == "Hello"
             let words = ["banana", "apple", "cherry"]
             words.sort().join(", ")
         "#);
-        assert_eq!(result.unwrap(), Value::String("apple, banana, cherry".into()));
+        assert_eq!(
+            result.unwrap(),
+            Value::String("apple, banana, cherry".into())
+        );
+    }
+
+    // ── Phase E2-2: Option メソッド拡充 ───────────────────────────────────
+
+    #[test]
+    fn test_option_unwrap_or_none() {
+        let result = run(r#"
+            let opt = none
+            opt.unwrap_or(42)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_option_unwrap_or_some() {
+        let result = run(r#"
+            let opt = some(10)
+            opt.unwrap_or(42)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(10));
+    }
+
+    #[test]
+    fn test_option_unwrap_some() {
+        let result = run(r#"
+            let opt = some(99)
+            opt.unwrap()
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn test_option_unwrap_none_panics() {
+        let result = run(r#"
+            let opt = none
+            opt.unwrap()
+        "#);
+        assert!(
+            matches!(result, Err(RuntimeError::Custom(ref msg)) if msg.contains("unwrap called on none"))
+        );
+    }
+
+    #[test]
+    fn test_option_map_some() {
+        let result = run(r#"
+            let opt = some(5)
+            opt.map(x => x * 2)
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(10))))
+        );
+    }
+
+    #[test]
+    fn test_option_map_none() {
+        let result = run(r#"
+            let opt = none
+            opt.map(x => x * 2)
+        "#);
+        assert_eq!(result.unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn test_option_map_chain() {
+        let result = run(r#"
+            let nums = [3, 7, 1, 9, 2]
+            let found = nums |> find(n => n > 5)
+            found |> map(n => n + 1) |> unwrap_or(0)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(8));
+    }
+
+    #[test]
+    fn test_option_and_then_some() {
+        let result = run(r#"
+            let opt = some(4)
+            opt.and_then(x => some(x * 3))
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(12))))
+        );
+    }
+
+    #[test]
+    fn test_option_and_then_none() {
+        let result = run(r#"
+            let opt = none
+            opt.and_then(x => some(x * 3))
+        "#);
+        assert_eq!(result.unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn test_option_and_then_chain() {
+        let result = run(r#"
+            let opt = some(10)
+            opt.and_then(x => if x > 5 { some(x) } else { none }).and_then(x => some(x + 1))
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(11))))
+        );
+    }
+
+    #[test]
+    fn test_option_is_some() {
+        let r1 = run("some(1).is_some()").unwrap();
+        let r2 = run("none.is_some()").unwrap();
+        assert_eq!(r1, Value::Bool(true));
+        assert_eq!(r2, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_option_is_none() {
+        let r1 = run("none.is_none()").unwrap();
+        let r2 = run("some(1).is_none()").unwrap();
+        assert_eq!(r1, Value::Bool(true));
+        assert_eq!(r2, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_option_or_none() {
+        let result = run(r#"
+            let opt = none
+            opt.or(some(99))
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(99))))
+        );
+    }
+
+    #[test]
+    fn test_option_or_some() {
+        let result = run(r#"
+            let opt = some(7)
+            opt.or(some(99))
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(7))))
+        );
+    }
+
+    #[test]
+    fn test_option_filter_true() {
+        let result = run(r#"
+            let opt = some(10)
+            opt.filter(x => x > 5)
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::Option(Some(Box::new(Value::Int(10))))
+        );
+    }
+
+    #[test]
+    fn test_option_filter_false() {
+        let result = run(r#"
+            let opt = some(3)
+            opt.filter(x => x > 5)
+        "#);
+        assert_eq!(result.unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn test_option_pipeline_find_map_unwrap_or() {
+        let result = run(r#"
+            struct Student { name: string, score: number }
+            let students = [
+                Student { name: "Alice", score: 92 },
+                Student { name: "Bob", score: 78 },
+            ]
+            students |> find(s => s.score >= 90) |> map(s => s.name) |> unwrap_or("なし")
+        "#);
+        assert_eq!(result.unwrap(), Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_option_pipeline_none_path() {
+        let result = run(r#"
+            struct Student { name: string, score: number }
+            let students = [
+                Student { name: "Alice", score: 92 },
+                Student { name: "Bob", score: 78 },
+            ]
+            students |> find(s => s.score >= 100) |> map(s => s.name) |> unwrap_or("なし")
+        "#);
+        assert_eq!(result.unwrap(), Value::String("なし".to_string()));
+    }
+
+    #[test]
+    fn test_option_and_then_find_chain() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5]
+            nums |> find(n => n > 3) |> and_then(n => if n > 4 { some(n * 10) } else { none }) |> unwrap_or(0)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn test_eval_destructure_basic() {
+        let result = run(r#"
+            let (a, b) = [10, 20]
+            a + b
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(30));
+    }
+
+    #[test]
+    fn test_eval_destructure_partition() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5, 6]
+            let (evens, odds) = nums.partition(n => n % 2 == 0)
+            if evens == [2, 4, 6] && odds == [1, 3, 5] { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_eval_destructure_wildcard() {
+        let result = run(r#"
+            let (_, value) = [1, 99]
+            value
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn test_eval_destructure_rest() {
+        let result = run(r#"
+            let (head, ..tail) = [1, 2, 3, 4]
+            if head == 1 && tail[0] == 2 && tail[1] == 3 && tail[2] == 4 { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_eval_destructure_zip() {
+        let result = run(r#"
+            let (a, b) = ["a", "b"].zip([1, 2])
+            if a[0] == "a" && a[1] == 1 && b[0] == "b" && b[1] == 2 { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_eval_destructure_too_few_elements_error() {
+        let result = run(r#"
+            let (a, b, c) = [1, 2]
+            a
+        "#);
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Custom(ref msg)) if msg.contains("3 要素が必要ですが 2 要素しかありません")
+        ));
+    }
+
+    #[test]
+    fn test_eval_for_destructure_enumerate() {
+        let result = run(r#"
+            state out = []
+            for (i, v) in [10, 20, 30].enumerate() {
+                out = out.concat(["{i}: {v}"])
+            }
+            out
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::List(Rc::new(RefCell::new(vec![
+                Value::String("0: 10".to_string()),
+                Value::String("1: 20".to_string()),
+                Value::String("2: 30".to_string()),
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_eval_for_destructure_zip() {
+        let result = run(r#"
+            state out = []
+            for (k, v) in ["a", "b"].zip([1, 2]) {
+                out = out.concat(["{k}={v}"])
+            }
+            out
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::List(Rc::new(RefCell::new(vec![
+                Value::String("a=1".to_string()),
+                Value::String("b=2".to_string()),
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_e2e_destructure_partition() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5, 6]
+            let (evens, odds) = nums.partition(n => n % 2 == 0)
+            if evens == [2, 4, 6] && odds == [1, 3, 5] { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_e2e_destructure_zip_for() {
+        let result = run(r#"
+            let keys = ["a", "b", "c"]
+            let values = [1, 2, 3]
+            state result = []
+            for (k, v) in keys.zip(values) {
+                result = result.concat(["{k}={v}"])
+            }
+            result
+        "#);
+        assert_eq!(
+            result.unwrap(),
+            Value::List(Rc::new(RefCell::new(vec![
+                Value::String("a=1".to_string()),
+                Value::String("b=2".to_string()),
+                Value::String("c=3".to_string()),
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_e2e_destructure_chunk() {
+        let result = run(r#"
+            let (first, second, third) = [10, 20, 30]
+            first + second + third
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(60));
+    }
+
+    #[test]
+    fn test_eval_anon_struct_literal() {
+        let result = run(r#"
+            let user = { name: "Alice", score: 92 }
+            user
+        "#);
+        assert!(
+            matches!(result.unwrap(), Value::Struct { type_name, .. } if type_name == "<anon>")
+        );
+    }
+
+    #[test]
+    fn test_eval_anon_struct_field_access() {
+        let result = run(r#"
+            let user = { name: "Alice", score: 92 }
+            user.name
+        "#);
+        assert_eq!(result.unwrap(), Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_eval_anon_struct_shorthand() {
+        let result = run(r#"
+            let name = "Alice"
+            let score = 92
+            let user = { name, score }
+            user.score
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(92));
+    }
+
+    #[test]
+    fn test_eval_anon_struct_in_list() {
+        let result = run(r#"
+            let users = [{ name: "Alice" }, { name: "Bob" }]
+            users[1].name
+        "#);
+        assert_eq!(result.unwrap(), Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_eval_anon_struct_as_return_value() {
+        let result = run(r#"
+            fn make_user() -> { name: string, score: number } {
+                { name: "Alice", score: 92 }
+            }
+            make_user().score
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(92));
+    }
+
+    #[test]
+    fn test_eval_anon_struct_pipe_map() {
+        let result = run(r#"
+            struct Student { name: string, score: number }
+            let students = [
+                Student { name: "Alice", score: 92 },
+                Student { name: "Bob", score: 78 },
+            ]
+            let summaries = students.map(s => {
+                let summary = { name: s.name, passed: s.score >= 80 }
+                summary
+            })
+            if summaries[0].name == "Alice" && summaries[0].passed == true && summaries[1].passed == false { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_e2e_anon_struct_map() {
+        let result = run(r#"
+            struct Student { name: string, score: number }
+            let students = [
+                Student { name: "Alice", score: 92 },
+                Student { name: "Bob", score: 78 },
+            ]
+            let summaries = students.map(s => {
+                let summary = { name: s.name, passed: s.score >= 80 }
+                summary
+            })
+            if summaries[0].name == "Alice" && summaries[0].passed == true && summaries[1].passed == false { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    #[test]
+    fn test_e2e_anon_struct_state() {
+        let result = run(r#"
+            state users: list<{ id: number, name: string }> = []
+            users = users.concat([{ id: 1, name: "Alice" }])
+            users[0].name
+        "#);
+        assert_eq!(result.unwrap(), Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_e2e_anon_struct_shorthand() {
+        let result = run(r#"
+            let name = "Alice"
+            let score = 92
+            let s = { name, score }
+            if s.name == "Alice" && s.score == 92 { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
     }
 }

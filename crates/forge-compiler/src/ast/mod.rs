@@ -47,12 +47,27 @@ pub enum UseSymbols {
     All,
 }
 
+/// 分割代入パターン (E2-1)
+#[derive(Debug, Clone)]
+pub enum Pat {
+    /// 単純な変数束縛: x
+    Ident(String),
+    /// ワイルドカード: _
+    Wildcard,
+    /// タプル風: (a, b, c)
+    Tuple(Vec<Pat>),
+    /// リストパターン: [a, b, c] （Tuple と同義）
+    List(Vec<Pat>),
+    /// 残余パターン: ..name
+    Rest(String),
+}
+
 /// 文
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    /// let x: T = expr
+    /// let x: T = expr  /  let (a, b): T = expr
     Let {
-        name: String,
+        pat: Pat,
         type_ann: Option<TypeAnn>,
         value: Expr,
         is_pub: bool,
@@ -296,7 +311,7 @@ pub enum Expr {
     Break { span: Span },
     /// for 式
     For {
-        var: String,
+        pat: Pat,
         iter: Box<Expr>,
         body: Box<Expr>,
         span: Span,
@@ -383,6 +398,10 @@ pub enum Expr {
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
+        span: Span,
+    },
+    AnonStruct {
+        fields: Vec<(String, Option<Expr>)>,
         span: Span,
     },
     /// enum バリアントのインスタンス化 EnumName::Variant / EnumName::Variant(expr) / EnumName::Variant { field: expr }
@@ -558,6 +577,7 @@ pub enum TypeAnn {
     }, // T => U
     /// generate<T>
     Generate(Box<TypeAnn>),
+    AnonStruct(Vec<(String, TypeAnn)>),
     /// Pick/Omit の Keys 引数: "id" | "name" | "email" 形式
     StringLiteralUnion(Vec<String>),
 }

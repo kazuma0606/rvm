@@ -102,11 +102,18 @@ impl TypeChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let {
-                name,
+                pat,
                 type_ann,
                 value,
                 ..
-            } => self.check_binding(name, type_ann, value),
+            } => {
+                // Pat::Ident の場合のみ型チェック（分割代入は型チェックをスキップ）
+                if let Pat::Ident(name) = pat {
+                    self.check_binding(name, type_ann, value);
+                } else {
+                    self.infer_expr(value);
+                }
+            }
             Stmt::State {
                 name,
                 type_ann,
@@ -312,7 +319,7 @@ impl TypeChecker {
             }
 
             Expr::For {
-                var, iter, body, ..
+                pat, iter, body, ..
             } => {
                 let iter_ty = self.infer_expr(iter);
                 let elem_ty = match iter_ty {
@@ -320,7 +327,10 @@ impl TypeChecker {
                     _ => Type::Unknown,
                 };
                 self.push_scope();
-                self.define(var, elem_ty);
+                // Pat::Ident のみ型定義（分割代入パターンは型チェックをスキップ）
+                if let Pat::Ident(var) = pat {
+                    self.define(var, elem_ty);
+                }
                 self.infer_expr(body);
                 self.pop_scope();
                 Type::List(Box::new(Type::Unknown))

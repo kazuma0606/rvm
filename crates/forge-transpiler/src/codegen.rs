@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use forge_compiler::ast::{
     BinOp, ChainKind, Constraint, DeferBody, EnumInitData, EnumVariant, Expr, FnDef, InterpPart,
-    Literal, MatchArm, Module, OperatorDef, OperatorKind, Param, Pattern, PipelineStep, Stmt,
+    Literal, MatchArm, Module, OperatorDef, OperatorKind, Param, Pat, Pattern, PipelineStep, Stmt,
     TraitMethod, TypeAnn, TypestateMarker, UnaryOp, UsePath, UseSymbols, ValidateRule,
     WhenCondition,
 };
@@ -32,6 +32,8 @@ pub struct CodeGenerator {
     typestate_state_names: HashMap<String, HashSet<String>>,
     fn_cleanup: HashMap<String, String>,
     pipeline_counter: usize,
+    named_struct_defs: HashMap<String, Vec<(String, TypeAnn)>>,
+    anon_struct_defs: HashMap<String, Vec<(String, TypeAnn)>>,
     /// `use forge/http` が宣言されているかどうか
     http_imported: bool,
 }
@@ -73,6 +75,8 @@ impl CodeGenerator {
             typestate_state_names: HashMap::new(),
             fn_cleanup: HashMap::new(),
             pipeline_counter: 0,
+            named_struct_defs: HashMap::new(),
+            anon_struct_defs: HashMap::new(),
             http_imported: false,
         }
     }
@@ -659,6 +663,8 @@ impl CodeGenerator {
         self.analyze_typestates(module)?;
         self.analyze_generic_types(module);
         self.analyze_collections_and_utility_types(module);
+        self.named_struct_defs = collect_struct_defs(module);
+        self.anon_struct_defs = collect_anon_structs(module, &self.named_struct_defs);
         self.rename_main = module
             .stmts
             .iter()
@@ -685,6 +691,10 @@ impl CodeGenerator {
             out.push_str("use std::cmp::Ordering;\n\n");
         }
 
+        out.push_str(&self.gen_anon_structs());
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
         out.push_str(&self.gen_utility_structs(module));
         if !out.is_empty() && !out.ends_with("\n\n") {
             out.push('\n');
@@ -1139,6 +1149,13 @@ impl CodeGenerator {
                     self.scan_expr_codegen_requirements(item);
                 }
             }
+            Expr::AnonStruct { fields, .. } => {
+                for (_, expr) in fields {
+                    if let Some(expr) = expr {
+                        self.scan_expr_codegen_requirements(expr);
+                    }
+                }
+            }
             Expr::BinOp { left, right, .. } => {
                 self.scan_expr_codegen_requirements(left);
                 self.scan_expr_codegen_requirements(right);
@@ -1308,6 +1325,11 @@ impl CodeGenerator {
                 }
                 self.scan_type_ann_codegen_requirements(return_type);
             }
+            TypeAnn::AnonStruct(fields) => {
+                for (_, ann) in fields {
+                    self.scan_type_ann_codegen_requirements(ann);
+                }
+            }
             TypeAnn::Number
             | TypeAnn::Float
             | TypeAnn::String
@@ -1334,6 +1356,21 @@ impl CodeGenerator {
             }
         }
 
+        out
+    }
+
+    fn gen_anon_structs(&self) -> String {
+        let mut defs = self
+            .anon_struct_defs
+            .iter()
+            .map(|(name, fields)| (name.clone(), fields.clone()))
+            .collect::<Vec<_>>();
+        defs.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out = String::new();
+        for (name, fields) in defs {
+            out.push_str(&render_plain_struct(&name, &fields));
+            out.push('\n');
+        }
         out
     }
 
@@ -1395,6 +1432,14 @@ impl CodeGenerator {
     fn ensure_no_await_in_closure(&self, expr: &Expr) -> Result<(), TranspileError> {
         match expr {
             Expr::Closure { body, .. } => self.ensure_no_await_in_closure(body),
+            Expr::AnonStruct { fields, .. } => {
+                for (_, expr) in fields {
+                    if let Some(expr) = expr {
+                        self.ensure_no_await_in_closure(expr)?;
+                    }
+                }
+                Ok(())
+            }
             Expr::Block { stmts, tail, .. } => {
                 for stmt in stmts {
                     self.ensure_no_await_in_stmt_closure(stmt)?;
@@ -1553,6 +1598,10 @@ impl CodeGenerator {
         match expr {
             Expr::Await { .. } => true,
             Expr::Spawn { .. } => false,
+            Expr::AnonStruct { fields, .. } => fields
+                .iter()
+                .filter_map(|(_, expr)| expr.as_ref())
+                .any(|expr| self.expr_contains_await(expr)),
             Expr::Block { stmts, tail, .. } => {
                 stmts.iter().any(|stmt| self.stmt_contains_await(stmt))
                     || tail
@@ -1934,6 +1983,10 @@ impl CodeGenerator {
             }
             Expr::Await { expr, .. } => self.expr_calls_fn(expr, fn_name),
             Expr::Spawn { .. } => false,
+            Expr::AnonStruct { fields, .. } => fields
+                .iter()
+                .filter_map(|(_, expr)| expr.as_ref())
+                .any(|expr| self.expr_calls_fn(expr, fn_name)),
             Expr::Block { stmts, tail, .. } => {
                 stmts.iter().any(|stmt| self.stmt_calls_fn(stmt, fn_name))
                     || tail
@@ -2129,6 +2182,84 @@ impl CodeGenerator {
         }
     }
 
+    fn infer_expr_type_ann(&self, expr: &Expr) -> Option<TypeAnn> {
+        match expr {
+            Expr::Literal(Literal::Int(_), _) => Some(TypeAnn::Number),
+            Expr::Literal(Literal::Float(_), _) => Some(TypeAnn::Float),
+            Expr::Literal(Literal::String(_), _) => Some(TypeAnn::String),
+            Expr::Literal(Literal::Bool(_), _) => Some(TypeAnn::Bool),
+            Expr::Ident(name, _) => self.lookup_var_type(name).cloned(),
+            Expr::StructInit { name, .. } => Some(TypeAnn::Named(name.clone())),
+            Expr::AnonStruct { fields, .. } => Some(TypeAnn::AnonStruct(
+                fields
+                    .iter()
+                    .map(|(field, expr)| {
+                        let ann = expr
+                            .as_ref()
+                            .and_then(|expr| self.infer_expr_type_ann(expr))
+                            .or_else(|| self.lookup_var_type(field).cloned())
+                            .unwrap_or(TypeAnn::Named("unknown".to_string()));
+                        (field.clone(), ann)
+                    })
+                    .collect(),
+            )),
+            Expr::Field { object, field, .. } => match self.infer_expr_type_ann(object) {
+                Some(TypeAnn::Named(name)) => self
+                    .named_struct_defs
+                    .get(&name)
+                    .and_then(|fields| fields.iter().find(|(f, _)| f == field))
+                    .map(|(_, ann)| ann.clone()),
+                Some(TypeAnn::AnonStruct(fields)) => fields
+                    .into_iter()
+                    .find(|(f, _)| f == field)
+                    .map(|(_, ann)| ann),
+                _ => None,
+            },
+            Expr::BinOp {
+                op, left, right, ..
+            } => match op {
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or => Some(TypeAnn::Bool),
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                    let left_ty = self.infer_expr_type_ann(left);
+                    let right_ty = self.infer_expr_type_ann(right);
+                    if matches!(left_ty, Some(TypeAnn::Float))
+                        || matches!(right_ty, Some(TypeAnn::Float))
+                    {
+                        Some(TypeAnn::Float)
+                    } else {
+                        Some(TypeAnn::Number)
+                    }
+                }
+            },
+            Expr::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                let then_ty = self.infer_expr_type_ann(then_block);
+                let else_ty = else_block
+                    .as_ref()
+                    .and_then(|expr| self.infer_expr_type_ann(expr));
+                if then_ty == else_ty {
+                    then_ty
+                } else {
+                    then_ty.or(else_ty)
+                }
+            }
+            Expr::Block { tail, .. } => tail
+                .as_ref()
+                .and_then(|tail| self.infer_expr_type_ann(tail)),
+            _ => None,
+        }
+    }
+
     fn rust_fn_name<'a>(&self, name: &'a str) -> &'a str {
         if name == "use" {
             "r#use"
@@ -2150,37 +2281,92 @@ impl CodeGenerator {
     fn gen_stmt(&mut self, stmt: &Stmt) -> String {
         match stmt {
             Stmt::Let {
-                name,
+                pat,
                 type_ann,
                 value,
                 ..
             } => {
-                let ty = type_ann
-                    .as_ref()
-                    .map(|t| format!(": {}", type_ann_to_rust(t)))
-                    .unwrap_or_default();
-                let val = self.gen_expr(value, false);
-                let binding_kw = match value {
-                    Expr::Closure { params, body, .. }
-                        if self.closure_kind(params, body) == ClosureKind::FnMut =>
-                    {
-                        "let mut"
+                match pat {
+                    Pat::Ident(name) => {
+                        let ty = type_ann
+                            .as_ref()
+                            .map(|t| format!(": {}", type_ann_to_rust(t)))
+                            .unwrap_or_default();
+                        let val = self.gen_expr(value, false);
+                        let binding_kw = match value {
+                            Expr::Closure { params, body, .. }
+                                if self.closure_kind(params, body) == ClosureKind::FnMut =>
+                            {
+                                "let mut"
+                            }
+                            _ => "let",
+                        };
+                        self.declare_var(name, false, type_ann.clone());
+                        let mut result = format!(
+                            "{}{} {}{} = {};\n",
+                            self.indent_str(),
+                            binding_kw,
+                            name,
+                            ty,
+                            val
+                        );
+                        if let Some(guard) = self.maybe_generate_defer_guard(name, value) {
+                            result.push_str(&guard);
+                        }
+                        result
                     }
-                    _ => "let",
-                };
-                self.declare_var(name, false, type_ann.clone());
-                let mut stmt = format!(
-                    "{}{} {}{} = {};\n",
-                    self.indent_str(),
-                    binding_kw,
-                    name,
-                    ty,
-                    val
-                );
-                if let Some(guard) = self.maybe_generate_defer_guard(name, value) {
-                    stmt.push_str(&guard);
+                    Pat::Wildcard => {
+                        // ワイルドカード: _ = expr; → let _tmp = expr; のみ
+                        let val = self.gen_expr(value, false);
+                        format!("{}let _ = {};\n", self.indent_str(), val)
+                    }
+                    Pat::Tuple(pats) | Pat::List(pats) => {
+                        // let (a, b) = expr; → let _destructure = expr; let a = _destructure[0].clone(); ...
+                        let val = self.gen_expr(value, false);
+                        let tmp = "_destructure";
+                        let mut result = format!("{}let {} = {};\n", self.indent_str(), tmp, val);
+                        let mut idx = 0usize;
+                        for sub_pat in pats {
+                            match sub_pat {
+                                Pat::Ident(n) => {
+                                    result.push_str(&format!(
+                                        "{}let {} = {}[{}].clone();\n",
+                                        self.indent_str(),
+                                        n,
+                                        tmp,
+                                        idx
+                                    ));
+                                    self.declare_var(n, false, None);
+                                    idx += 1;
+                                }
+                                Pat::Wildcard => {
+                                    idx += 1;
+                                }
+                                Pat::Rest(rest_name) => {
+                                    result.push_str(&format!(
+                                        "{}let {} = {}[{}..].to_vec();\n",
+                                        self.indent_str(),
+                                        rest_name,
+                                        tmp,
+                                        idx
+                                    ));
+                                    self.declare_var(rest_name, false, None);
+                                    // rest は最後なので終了
+                                    break;
+                                }
+                                _ => {
+                                    idx += 1;
+                                }
+                            }
+                        }
+                        result
+                    }
+                    Pat::Rest(name) => {
+                        let val = self.gen_expr(value, false);
+                        self.declare_var(name, false, type_ann.clone());
+                        format!("{}let {} = {};\n", self.indent_str(), name, val)
+                    }
                 }
-                stmt
             }
             Stmt::State {
                 name,
@@ -3640,8 +3826,8 @@ impl CodeGenerator {
             } => self.gen_if(cond, then_block, else_block),
             Expr::While { cond, body, .. } => self.gen_while(cond, body),
             Expr::For {
-                var, iter, body, ..
-            } => self.gen_for(var, iter, body),
+                pat, iter, body, ..
+            } => self.gen_for(pat, iter, body),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.gen_match(scrutinee, arms),
@@ -3778,6 +3964,31 @@ impl CodeGenerator {
                     rendered_fields.push("_marker: PhantomData".to_string());
                 }
                 format!("{} {{ {} }}", name, rendered_fields.join(", "))
+            }
+            Expr::AnonStruct { fields, .. } => {
+                let field_types = fields
+                    .iter()
+                    .map(|(field, expr)| {
+                        let ann = expr
+                            .as_ref()
+                            .and_then(|expr| self.infer_expr_type_ann(expr))
+                            .or_else(|| self.lookup_var_type(field).cloned())
+                            .unwrap_or(TypeAnn::Named("unknown".to_string()));
+                        (field.clone(), ann)
+                    })
+                    .collect::<Vec<_>>();
+                let type_name = anon_struct_name(&field_types);
+                let rendered_fields = fields
+                    .iter()
+                    .map(|(field, expr)| {
+                        let value = match expr {
+                            Some(expr) => self.gen_expr(expr, false),
+                            None => field.clone(),
+                        };
+                        format!("{}: {}", field, value)
+                    })
+                    .collect::<Vec<_>>();
+                format!("{} {{ {} }}", type_name, rendered_fields.join(", "))
             }
             Expr::EnumInit {
                 enum_name,
@@ -4122,13 +4333,122 @@ impl CodeGenerator {
         )
     }
 
-    fn gen_for(&mut self, var: &str, iter: &Expr, body: &Expr) -> String {
-        format!(
-            "for {} in &{} {}",
-            var,
-            self.gen_expr(iter, false),
-            self.gen_inline_block(body)
-        )
+    fn gen_for(&mut self, pat: &Pat, iter: &Expr, body: &Expr) -> String {
+        match pat {
+            Pat::Ident(var) => format!(
+                "for {} in &{} {}",
+                var,
+                self.gen_expr(iter, false),
+                self.gen_inline_block(body)
+            ),
+            _ => {
+                let iter_expr = self.gen_expr(iter, false);
+                let tmp = "__item";
+                let mut out = format!("for {} in &{} {{\n", tmp, iter_expr);
+                self.indent += 1;
+                out.push_str(&format!(
+                    "{}let {} = {}.clone();\n",
+                    self.indent_str(),
+                    tmp,
+                    tmp
+                ));
+                out.push_str(&self.gen_pat_bindings(pat, tmp));
+                match body {
+                    Expr::Block { stmts, tail, .. } => {
+                        for stmt in stmts {
+                            out.push_str(&self.gen_stmt(stmt));
+                        }
+                        if let Some(tail) = tail {
+                            out.push_str(&format!(
+                                "{}{};\n",
+                                self.indent_str(),
+                                self.gen_expr(tail, false)
+                            ));
+                        }
+                    }
+                    other => {
+                        out.push_str(&format!(
+                            "{}{};\n",
+                            self.indent_str(),
+                            self.gen_expr(other, false)
+                        ));
+                    }
+                }
+                self.indent -= 1;
+                out.push_str(&format!("{}}}", self.indent_str()));
+                out
+            }
+        }
+    }
+
+    fn gen_pat_bindings(&mut self, pat: &Pat, source: &str) -> String {
+        match pat {
+            Pat::Ident(name) => {
+                self.declare_var(name, false, None);
+                format!("{}let {} = {};\n", self.indent_str(), name, source)
+            }
+            Pat::Wildcard => String::new(),
+            Pat::Tuple(pats) | Pat::List(pats) => {
+                let mut out = String::new();
+                let mut idx = 0usize;
+                for sub_pat in pats {
+                    match sub_pat {
+                        Pat::Ident(name) => {
+                            self.declare_var(name, false, None);
+                            out.push_str(&format!(
+                                "{}let {} = {}[{}].clone();\n",
+                                self.indent_str(),
+                                name,
+                                source,
+                                idx
+                            ));
+                            idx += 1;
+                        }
+                        Pat::Wildcard => idx += 1,
+                        Pat::Rest(name) => {
+                            self.declare_var(name, false, None);
+                            out.push_str(&format!(
+                                "{}let {} = {}[{}..].to_vec();\n",
+                                self.indent_str(),
+                                name,
+                                source,
+                                idx
+                            ));
+                            break;
+                        }
+                        nested => {
+                            let nested_tmp = format!("{}_{}", source.replace('.', "_"), idx);
+                            out.push_str(&format!(
+                                "{}let {} = {}[{}].clone();\n",
+                                self.indent_str(),
+                                nested_tmp,
+                                source,
+                                idx
+                            ));
+                            out.push_str(&self.gen_pat_bindings(nested, &nested_tmp));
+                            idx += 1;
+                        }
+                    }
+                }
+                out
+            }
+            Pat::Rest(name) => {
+                self.declare_var(name, false, None);
+                format!("{}let {} = {};\n", self.indent_str(), name, source)
+            }
+        }
+    }
+
+    fn pat_bindings(pat: &Pat, names: &mut Vec<String>) {
+        match pat {
+            Pat::Ident(name) | Pat::Rest(name) => names.push(name.clone()),
+            Pat::Wildcard => {}
+            Pat::Tuple(items) | Pat::List(items) => {
+                for item in items {
+                    Self::pat_bindings(item, names);
+                }
+            }
+        }
     }
 
     fn gen_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> String {
@@ -4677,7 +4997,7 @@ impl CodeGenerator {
         consumed: &mut HashSet<String>,
     ) {
         match stmt {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { pat, value, .. } => {
                 self.analyze_closure_expr(
                     value,
                     outer_names,
@@ -4688,7 +5008,9 @@ impl CodeGenerator {
                     false,
                 );
                 if let Some(scope) = local_scopes.last_mut() {
-                    scope.insert(name.clone());
+                    let mut names = Vec::new();
+                    Self::pat_bindings(pat, &mut names);
+                    scope.extend(names);
                 }
             }
             Stmt::State { name, value, .. } => {
@@ -5102,7 +5424,7 @@ impl CodeGenerator {
                 );
             }
             Expr::For {
-                iter, body, var, ..
+                iter, body, pat, ..
             } => {
                 self.analyze_closure_expr(
                     iter,
@@ -5113,7 +5435,9 @@ impl CodeGenerator {
                     consumed,
                     false,
                 );
-                local_scopes.push(HashSet::from([var.clone()]));
+                let mut names = Vec::new();
+                Self::pat_bindings(pat, &mut names);
+                local_scopes.push(names.into_iter().collect());
                 self.analyze_closure_expr(
                     body,
                     outer_names,
@@ -5650,6 +5974,7 @@ fn type_supports_hash(ann: &TypeAnn) -> bool {
         | TypeAnn::StringLiteralUnion(_) => true,
         TypeAnn::Option(inner) | TypeAnn::Result(inner) => type_supports_hash(inner),
         TypeAnn::ResultWith(ok, err) => type_supports_hash(ok) && type_supports_hash(err),
+        TypeAnn::AnonStruct(fields) => fields.iter().all(|(_, ann)| type_supports_hash(ann)),
         TypeAnn::Generic { .. } => false,
         TypeAnn::List(_)
         | TypeAnn::Map(_, _)
@@ -5678,6 +6003,7 @@ fn type_supports_eq(ann: &TypeAnn) -> bool {
         TypeAnn::Map(key, value) | TypeAnn::OrderedMap(key, value) => {
             type_supports_eq(key) && type_supports_eq(value)
         }
+        TypeAnn::AnonStruct(fields) => fields.iter().all(|(_, ann)| type_supports_eq(ann)),
         TypeAnn::Generic { .. } | TypeAnn::Fn { .. } => false,
         TypeAnn::Generate(inner) => type_supports_eq(inner),
     }
@@ -5700,6 +6026,7 @@ fn type_supports_serde(ann: &TypeAnn) -> bool {
         TypeAnn::ResultWith(ok, err) | TypeAnn::Map(ok, err) | TypeAnn::OrderedMap(ok, err) => {
             type_supports_serde(ok) && type_supports_serde(err)
         }
+        TypeAnn::AnonStruct(fields) => fields.iter().all(|(_, ann)| type_supports_serde(ann)),
         TypeAnn::Generic { .. } | TypeAnn::Fn { .. } => false,
         TypeAnn::Generate(inner) => type_supports_serde(inner),
     }
@@ -5723,6 +6050,7 @@ pub fn type_ann_to_rust(ann: &TypeAnn) -> String {
         TypeAnn::List(inner) => format!("Vec<{}>", type_ann_to_rust(inner)),
         TypeAnn::Generate(inner) => format!("Vec<{}>", type_ann_to_rust(inner)),
         TypeAnn::Named(name) => name.clone(),
+        TypeAnn::AnonStruct(fields) => anon_struct_name(fields),
         TypeAnn::Generic { name, args } => {
             utility_type_ann_to_rust(name, args).unwrap_or_else(|| {
                 format!(
@@ -5858,6 +6186,565 @@ fn collect_struct_defs(module: &Module) -> HashMap<String, Vec<(String, TypeAnn)
         }
     }
     defs
+}
+
+fn anon_struct_name(fields: &[(String, TypeAnn)]) -> String {
+    let mut out = String::from("AnonStruct");
+    for (field, ty) in fields {
+        out.push('_');
+        out.push_str(&sanitize_type_name(field));
+        out.push('_');
+        out.push_str(&sanitize_type_name(&anon_type_fragment(ty)));
+    }
+    out
+}
+
+fn anon_type_fragment(ann: &TypeAnn) -> String {
+    match ann {
+        TypeAnn::Number => "number".to_string(),
+        TypeAnn::Float => "float".to_string(),
+        TypeAnn::String => "string".to_string(),
+        TypeAnn::Bool => "bool".to_string(),
+        TypeAnn::Unit => "unit".to_string(),
+        TypeAnn::Named(name) => name.clone(),
+        TypeAnn::Option(inner) => format!("option_{}", anon_type_fragment(inner)),
+        TypeAnn::Result(inner) => format!("result_{}", anon_type_fragment(inner)),
+        TypeAnn::ResultWith(ok, err) => {
+            format!(
+                "result_{}_{}",
+                anon_type_fragment(ok),
+                anon_type_fragment(err)
+            )
+        }
+        TypeAnn::List(inner) | TypeAnn::Generate(inner) => {
+            format!("list_{}", anon_type_fragment(inner))
+        }
+        TypeAnn::Map(key, value) | TypeAnn::OrderedMap(key, value) => {
+            format!(
+                "map_{}_{}",
+                anon_type_fragment(key),
+                anon_type_fragment(value)
+            )
+        }
+        TypeAnn::Set(inner) | TypeAnn::OrderedSet(inner) => {
+            format!("set_{}", anon_type_fragment(inner))
+        }
+        TypeAnn::Generic { name, args } => format!(
+            "{}_{}",
+            name,
+            args.iter()
+                .map(anon_type_fragment)
+                .collect::<Vec<_>>()
+                .join("_")
+        ),
+        TypeAnn::Fn {
+            params,
+            return_type,
+        } => format!(
+            "fn_{}_to_{}",
+            params
+                .iter()
+                .map(anon_type_fragment)
+                .collect::<Vec<_>>()
+                .join("_"),
+            anon_type_fragment(return_type)
+        ),
+        TypeAnn::AnonStruct(fields) => anon_struct_name(fields),
+        TypeAnn::StringLiteralUnion(keys) => keys.join("_"),
+    }
+}
+
+fn collect_anon_structs(
+    module: &Module,
+    named_struct_defs: &HashMap<String, Vec<(String, TypeAnn)>>,
+) -> HashMap<String, Vec<(String, TypeAnn)>> {
+    let mut out = HashMap::new();
+    let mut scopes = vec![HashMap::new()];
+    for stmt in &module.stmts {
+        collect_anon_structs_stmt(stmt, named_struct_defs, &mut scopes, &mut out);
+    }
+    out
+}
+
+fn collect_anon_structs_stmt(
+    stmt: &Stmt,
+    named_struct_defs: &HashMap<String, Vec<(String, TypeAnn)>>,
+    scopes: &mut Vec<HashMap<String, TypeAnn>>,
+    out: &mut HashMap<String, Vec<(String, TypeAnn)>>,
+) {
+    match stmt {
+        Stmt::Let {
+            pat,
+            type_ann,
+            value,
+            ..
+        } => {
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+            let inferred = type_ann
+                .clone()
+                .or_else(|| infer_expr_type_ann_for_scan(value, named_struct_defs, scopes, out));
+            if let Some(ann) = inferred {
+                register_pat_type(pat, ann, scopes, out);
+            }
+        }
+        Stmt::State {
+            name,
+            type_ann,
+            value,
+            ..
+        }
+        | Stmt::Const {
+            name,
+            type_ann,
+            value,
+            ..
+        } => {
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+            if let Some(ann) = type_ann
+                .clone()
+                .or_else(|| infer_expr_type_ann_for_scan(value, named_struct_defs, scopes, out))
+            {
+                register_anon_ann(&ann, out);
+                if let Some(scope) = scopes.last_mut() {
+                    scope.insert(name.clone(), ann);
+                }
+            }
+        }
+        Stmt::Fn {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            if let Some(ann) = return_type {
+                register_anon_ann(ann, out);
+            }
+            scopes.push(HashMap::new());
+            if let Some(scope) = scopes.last_mut() {
+                for param in params {
+                    if let Some(ann) = &param.type_ann {
+                        register_anon_ann(ann, out);
+                        scope.insert(param.name.clone(), ann.clone());
+                    }
+                }
+            }
+            collect_anon_structs_expr(body, named_struct_defs, scopes, out);
+            scopes.pop();
+        }
+        Stmt::Expr(expr) => collect_anon_structs_expr(expr, named_struct_defs, scopes, out),
+        Stmt::Return(Some(expr), _) => {
+            collect_anon_structs_expr(expr, named_struct_defs, scopes, out)
+        }
+        Stmt::Return(None, _) => {}
+        Stmt::StructDef { fields, .. } | Stmt::DataDef { fields, .. } => {
+            for (_, ann) in fields {
+                register_anon_ann(ann, out);
+            }
+        }
+        Stmt::EnumDef { variants, .. } => {
+            for variant in variants {
+                match variant {
+                    EnumVariant::Unit(_) => {}
+                    EnumVariant::Tuple(_, tys) => {
+                        for ann in tys {
+                            register_anon_ann(ann, out);
+                        }
+                    }
+                    EnumVariant::Struct(_, fields) => {
+                        for (_, ann) in fields {
+                            register_anon_ann(ann, out);
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::ImplBlock {
+            methods, operators, ..
+        } => {
+            for method in methods {
+                if let Some(ann) = &method.return_type {
+                    register_anon_ann(ann, out);
+                }
+                collect_anon_structs_expr(&method.body, named_struct_defs, scopes, out);
+            }
+            for operator in operators {
+                if let Some(ann) = &operator.return_type {
+                    register_anon_ann(ann, out);
+                }
+                collect_anon_structs_expr(&operator.body, named_struct_defs, scopes, out);
+            }
+        }
+        Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => {
+            for method in methods {
+                if let Some(ann) = &method.return_type {
+                    register_anon_ann(ann, out);
+                }
+                collect_anon_structs_expr(&method.body, named_struct_defs, scopes, out);
+            }
+        }
+        Stmt::TraitDef { methods, .. } => {
+            for method in methods {
+                match method {
+                    TraitMethod::Abstract {
+                        params,
+                        return_type,
+                        ..
+                    }
+                    | TraitMethod::Default {
+                        params,
+                        return_type,
+                        ..
+                    } => {
+                        for param in params {
+                            if let Some(ann) = &param.type_ann {
+                                register_anon_ann(ann, out);
+                            }
+                        }
+                        if let Some(ann) = return_type {
+                            register_anon_ann(ann, out);
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::TypestateDef { fields, .. } => {
+            for (_, ann) in fields {
+                register_anon_ann(ann, out);
+            }
+        }
+        Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
+            scopes.push(HashMap::new());
+            for stmt in body {
+                collect_anon_structs_stmt(stmt, named_struct_defs, scopes, out);
+            }
+            scopes.pop();
+        }
+        Stmt::UseDecl { .. } | Stmt::UseRaw { .. } | Stmt::Yield { .. } | Stmt::Defer { .. } => {}
+    }
+}
+
+fn collect_anon_structs_expr(
+    expr: &Expr,
+    named_struct_defs: &HashMap<String, Vec<(String, TypeAnn)>>,
+    scopes: &mut Vec<HashMap<String, TypeAnn>>,
+    out: &mut HashMap<String, Vec<(String, TypeAnn)>>,
+) {
+    match expr {
+        Expr::AnonStruct { fields, .. } => {
+            let anns = fields
+                .iter()
+                .map(|(field, expr)| {
+                    let ann = expr
+                        .as_ref()
+                        .and_then(|expr| {
+                            infer_expr_type_ann_for_scan(expr, named_struct_defs, scopes, out)
+                        })
+                        .or_else(|| lookup_scan_type(scopes, field).cloned())
+                        .unwrap_or(TypeAnn::Named("unknown".to_string()));
+                    (field.clone(), ann)
+                })
+                .collect::<Vec<_>>();
+            register_anon_ann(&TypeAnn::AnonStruct(anns), out);
+            for (_, expr) in fields {
+                if let Some(expr) = expr {
+                    collect_anon_structs_expr(expr, named_struct_defs, scopes, out);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, expr) in fields {
+                collect_anon_structs_expr(expr, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::Field { object, .. }
+        | Expr::Await { expr: object, .. }
+        | Expr::Question(object, _) => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+        }
+        Expr::OptionalChain { object, chain, .. } => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+            if let ChainKind::Method { args, .. } = chain {
+                for arg in args {
+                    collect_anon_structs_expr(arg, named_struct_defs, scopes, out);
+                }
+            }
+        }
+        Expr::NullCoalesce { value, default, .. } => {
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(default, named_struct_defs, scopes, out);
+        }
+        Expr::BinOp { left, right, .. } => {
+            collect_anon_structs_expr(left, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(right, named_struct_defs, scopes, out);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            collect_anon_structs_expr(operand, named_struct_defs, scopes, out);
+        }
+        Expr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_anon_structs_expr(cond, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(then_block, named_struct_defs, scopes, out);
+            if let Some(expr) = else_block {
+                collect_anon_structs_expr(expr, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::For { iter, body, .. }
+        | Expr::While {
+            cond: iter, body, ..
+        } => {
+            collect_anon_structs_expr(iter, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(body, named_struct_defs, scopes, out);
+        }
+        Expr::Loop { body, .. } => collect_anon_structs_expr(body, named_struct_defs, scopes, out),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_anon_structs_expr(scrutinee, named_struct_defs, scopes, out);
+            for arm in arms {
+                collect_anon_structs_expr(&arm.body, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::Block { stmts, tail, .. } => {
+            scopes.push(HashMap::new());
+            for stmt in stmts {
+                collect_anon_structs_stmt(stmt, named_struct_defs, scopes, out);
+            }
+            if let Some(tail) = tail {
+                collect_anon_structs_expr(tail, named_struct_defs, scopes, out);
+            }
+            scopes.pop();
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_anon_structs_expr(callee, named_struct_defs, scopes, out);
+            for arg in args {
+                collect_anon_structs_expr(arg, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::MethodCall { object, args, .. } => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+            for arg in args {
+                collect_anon_structs_expr(arg, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::List(items, _) | Expr::SetLiteral { items, .. } => {
+            for item in items {
+                collect_anon_structs_expr(item, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::MapLiteral { pairs, .. } => {
+            for (key, value) in pairs {
+                collect_anon_structs_expr(key, named_struct_defs, scopes, out);
+                collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+            }
+        }
+        Expr::Assign { value, .. } => {
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out)
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(index, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+        }
+        Expr::Index { object, index, .. } => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(index, named_struct_defs, scopes, out);
+        }
+        Expr::FieldAssign { object, value, .. } => {
+            collect_anon_structs_expr(object, named_struct_defs, scopes, out);
+            collect_anon_structs_expr(value, named_struct_defs, scopes, out);
+        }
+        Expr::EnumInit { data, .. } => match data {
+            EnumInitData::None => {}
+            EnumInitData::Tuple(items) => {
+                for item in items {
+                    collect_anon_structs_expr(item, named_struct_defs, scopes, out);
+                }
+            }
+            EnumInitData::Struct(fields) => {
+                for (_, expr) in fields {
+                    collect_anon_structs_expr(expr, named_struct_defs, scopes, out);
+                }
+            }
+        },
+        Expr::Closure { body, .. } | Expr::Spawn { body, .. } => {
+            collect_anon_structs_expr(body, named_struct_defs, scopes, out);
+        }
+        Expr::Interpolation { .. }
+        | Expr::Range { .. }
+        | Expr::Pipeline { .. }
+        | Expr::Break { .. }
+        | Expr::Ident(_, _)
+        | Expr::Literal(_, _) => {}
+    }
+}
+
+fn infer_expr_type_ann_for_scan(
+    expr: &Expr,
+    named_struct_defs: &HashMap<String, Vec<(String, TypeAnn)>>,
+    scopes: &[HashMap<String, TypeAnn>],
+    out: &mut HashMap<String, Vec<(String, TypeAnn)>>,
+) -> Option<TypeAnn> {
+    match expr {
+        Expr::Literal(Literal::Int(_), _) => Some(TypeAnn::Number),
+        Expr::Literal(Literal::Float(_), _) => Some(TypeAnn::Float),
+        Expr::Literal(Literal::String(_), _) => Some(TypeAnn::String),
+        Expr::Literal(Literal::Bool(_), _) => Some(TypeAnn::Bool),
+        Expr::Ident(name, _) => lookup_scan_type(scopes, name).cloned(),
+        Expr::StructInit { name, .. } => Some(TypeAnn::Named(name.clone())),
+        Expr::AnonStruct { fields, .. } => {
+            let anns = fields
+                .iter()
+                .map(|(field, expr)| {
+                    let ann = expr
+                        .as_ref()
+                        .and_then(|expr| {
+                            infer_expr_type_ann_for_scan(expr, named_struct_defs, scopes, out)
+                        })
+                        .or_else(|| lookup_scan_type(scopes, field).cloned())
+                        .unwrap_or(TypeAnn::Named("unknown".to_string()));
+                    (field.clone(), ann)
+                })
+                .collect::<Vec<_>>();
+            let ann = TypeAnn::AnonStruct(anns);
+            register_anon_ann(&ann, out);
+            Some(ann)
+        }
+        Expr::Field { object, field, .. } => {
+            match infer_expr_type_ann_for_scan(object, named_struct_defs, scopes, out) {
+                Some(TypeAnn::Named(name)) => named_struct_defs
+                    .get(&name)
+                    .and_then(|fields| fields.iter().find(|(f, _)| f == field))
+                    .map(|(_, ann)| ann.clone()),
+                Some(TypeAnn::AnonStruct(fields)) => fields
+                    .into_iter()
+                    .find(|(f, _)| f == field)
+                    .map(|(_, ann)| ann),
+                _ => None,
+            }
+        }
+        Expr::BinOp {
+            op, left, right, ..
+        } => match op {
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Gt
+            | BinOp::Le
+            | BinOp::Ge
+            | BinOp::And
+            | BinOp::Or => Some(TypeAnn::Bool),
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                let left_ty = infer_expr_type_ann_for_scan(left, named_struct_defs, scopes, out);
+                let right_ty = infer_expr_type_ann_for_scan(right, named_struct_defs, scopes, out);
+                if matches!(left_ty, Some(TypeAnn::Float))
+                    || matches!(right_ty, Some(TypeAnn::Float))
+                {
+                    Some(TypeAnn::Float)
+                } else {
+                    Some(TypeAnn::Number)
+                }
+            }
+        },
+        Expr::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            let then_ty = infer_expr_type_ann_for_scan(then_block, named_struct_defs, scopes, out);
+            let else_ty = else_block.as_ref().and_then(|expr| {
+                infer_expr_type_ann_for_scan(expr, named_struct_defs, scopes, out)
+            });
+            if then_ty == else_ty {
+                then_ty
+            } else {
+                then_ty.or(else_ty)
+            }
+        }
+        Expr::Block { tail, .. } => tail
+            .as_ref()
+            .and_then(|tail| infer_expr_type_ann_for_scan(tail, named_struct_defs, scopes, out)),
+        _ => None,
+    }
+}
+
+fn register_pat_type(
+    pat: &Pat,
+    ann: TypeAnn,
+    scopes: &mut [HashMap<String, TypeAnn>],
+    out: &mut HashMap<String, Vec<(String, TypeAnn)>>,
+) {
+    register_anon_ann(&ann, out);
+    if let Some(scope) = scopes.last_mut() {
+        match pat {
+            Pat::Ident(name) | Pat::Rest(name) => {
+                scope.insert(name.clone(), ann);
+            }
+            Pat::Wildcard => {}
+            Pat::Tuple(items) | Pat::List(items) => {
+                if let TypeAnn::List(inner) = ann {
+                    for item in items {
+                        register_pat_type(item, inner.as_ref().clone(), scopes, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn register_anon_ann(ann: &TypeAnn, out: &mut HashMap<String, Vec<(String, TypeAnn)>>) {
+    match ann {
+        TypeAnn::AnonStruct(fields) => {
+            for (_, field_ann) in fields {
+                register_anon_ann(field_ann, out);
+            }
+            out.entry(anon_struct_name(fields))
+                .or_insert_with(|| fields.clone());
+        }
+        TypeAnn::Option(inner)
+        | TypeAnn::Result(inner)
+        | TypeAnn::List(inner)
+        | TypeAnn::Set(inner)
+        | TypeAnn::OrderedSet(inner)
+        | TypeAnn::Generate(inner) => register_anon_ann(inner, out),
+        TypeAnn::ResultWith(a, b) | TypeAnn::Map(a, b) | TypeAnn::OrderedMap(a, b) => {
+            register_anon_ann(a, out);
+            register_anon_ann(b, out);
+        }
+        TypeAnn::Generic { args, .. } => {
+            for arg in args {
+                register_anon_ann(arg, out);
+            }
+        }
+        TypeAnn::Fn {
+            params,
+            return_type,
+        } => {
+            for param in params {
+                register_anon_ann(param, out);
+            }
+            register_anon_ann(return_type, out);
+        }
+        TypeAnn::Number
+        | TypeAnn::Float
+        | TypeAnn::String
+        | TypeAnn::Bool
+        | TypeAnn::Named(_)
+        | TypeAnn::Unit
+        | TypeAnn::StringLiteralUnion(_) => {}
+    }
+}
+
+fn lookup_scan_type<'a>(scopes: &'a [HashMap<String, TypeAnn>], name: &str) -> Option<&'a TypeAnn> {
+    scopes.iter().rev().find_map(|scope| scope.get(name))
 }
 
 fn collect_utility_types(module: &Module) -> Vec<UtilitySpec> {
@@ -6035,6 +6922,11 @@ fn collect_utility_types_ann(ann: &TypeAnn, out: &mut Vec<UtilitySpec>) {
                 collect_utility_types_ann(p, out);
             }
             collect_utility_types_ann(return_type, out);
+        }
+        TypeAnn::AnonStruct(fields) => {
+            for (_, ann) in fields {
+                collect_utility_types_ann(ann, out);
+            }
         }
         TypeAnn::Generate(inner) => collect_utility_types_ann(inner, out),
         TypeAnn::Number
@@ -7341,6 +8233,106 @@ let result = ones().take(3)
             out
         );
         assert!(out.contains(".take(3)"), "take not found: {}", out);
+    }
+
+    #[test]
+    fn test_transpile_destructure_tuple() {
+        let src = r#"
+let (a, b) = [1, 2]
+a + b
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("let _destructure = vec![1_i64, 2];"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let a = _destructure[0].clone();"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let b = _destructure[1].clone();"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_destructure_rest() {
+        let src = r#"
+let (head, ..tail) = [1, 2, 3]
+head
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("let head = _destructure[0].clone();"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let tail = _destructure[1..].to_vec();"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_anon_struct_return_type() {
+        let src = r#"
+fn summarize(name: string, score: number) -> { name: string, score: number } {
+    { name, score }
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("struct AnonStruct_name_string_score_number"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains(
+                "fn summarize(name: String, score: i64) -> AnonStruct_name_string_score_number"
+            ),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_anon_struct_literal() {
+        let src = r#"
+let user = { name: "Alice", score: 92 }
+user
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("struct AnonStruct_name_string_score_number"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("let user = AnonStruct_name_string_score_number { name: \"Alice\".to_string(), score: 92"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_transpile_anon_struct_dedup() {
+        let src = r#"
+fn a() -> { name: string, score: number } { { name: "Alice", score: 92 } }
+fn b() -> { name: string, score: number } { { name: "Bob", score: 78 } }
+"#;
+        let out = transpile(src);
+        assert_eq!(
+            out.matches("struct AnonStruct_name_string_score_number")
+                .count(),
+            1,
+            "got: {}",
+            out
+        );
     }
 
     #[test]
