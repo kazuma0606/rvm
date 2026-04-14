@@ -1,0 +1,177 @@
+// examples/anvil-crud/src/main.forge
+//
+// Anvil REST API — ユーザー CRUD サンプル（Crucible バックエンド）
+//
+// 事前準備:
+//   docker compose -f docker/docker-compose.test.yml up -d
+//
+// 起動:  forge run examples/anvil-crud/
+//
+// エンドポイント:
+//   GET    /health        — ヘルスチェック
+//   GET    /users         — 全ユーザー取得
+//   GET    /users/:id     — ユーザー取得
+//   POST   /users         — ユーザー作成
+//   DELETE /users/:id     — ユーザー削除
+//
+// curl サンプル:
+//   curl http://localhost:8080/health
+//   curl http://localhost:8080/users
+//   curl -X POST http://localhost:8080/users \
+//        -H "Content-Type: application/json" \
+//        -d '{"name":"Alice","email":"alice@example.com","password":"pw"}'
+//   curl http://localhost:8080/users/1
+//   curl -X DELETE http://localhost:8080/users/1
+
+use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
+use forge/std/json.{ parse }
+use anvil/anvil.*
+use anvil/request.*
+use anvil/response.*
+use anvil/middleware.*
+use anvil/cors.*
+use crucible.*
+
+// ----------------------------------------------------------------
+// DB 接続
+// ----------------------------------------------------------------
+
+fn get_conn() -> Connection! {
+    connect("localhost", 5432, "postgres", "test", "crucible_test")
+}
+
+// ----------------------------------------------------------------
+// GET /health
+// ----------------------------------------------------------------
+
+fn health_handler(req: Request<string>) -> Response<string>! {
+    let conn = get_conn()?
+    let rows = query_raw(conn, "SELECT COUNT(*) AS n FROM users")?
+    close(conn)
+    let n = rows[0]["n"]
+    ok(Response::json("\{\"status\":\"ok\",\"users\":{n}}"))
+}
+
+// ----------------------------------------------------------------
+// GET /users — 全件取得
+// ----------------------------------------------------------------
+
+fn list_users_handler(req: Request<string>) -> Response<string>! {
+    let conn = get_conn()?
+    let rows = query_raw(conn, "SELECT id, name, email FROM users ORDER BY id")?
+    close(conn)
+    let items = rows
+        |> map(u => {
+            let id    = u["id"]
+            let name  = u["name"]
+            let email = u["email"]
+            "\{\"id\":{id},\"name\":\"{name}\",\"email\":\"{email}\"}"
+        })
+        |> join(",")
+    ok(Response::json("[{items}]"))
+}
+
+// ----------------------------------------------------------------
+// GET /users/:id — 1件取得
+// ----------------------------------------------------------------
+
+fn get_user_handler(req: Request<string>) -> Response<string>! {
+    let id = match req.params.get("id") {
+        some(v) => v,
+        none    => "0",
+    }
+    let conn = get_conn()?
+    let rows = query_raw(conn, "SELECT id, name, email FROM users WHERE id = {id} LIMIT 1")?
+    close(conn)
+    match rows.first() {
+        some(u) => {
+            let uid   = u["id"]
+            let name  = u["name"]
+            let email = u["email"]
+            ok(Response::json("\{\"id\":{uid},\"name\":\"{name}\",\"email\":\"{email}\"}"))
+        },
+        none => ok(Response::json("\{\"error\":\"user not found\",\"id\":{id}}").status(404)),
+    }
+}
+
+// ----------------------------------------------------------------
+// POST /users — 作成
+// ----------------------------------------------------------------
+
+fn create_user_handler(req: Request<string>) -> Response<string>! {
+    let body     = parse(req.raw_body)?
+    let name     = string(body["name"])
+    let email    = string(body["email"])
+    let password = string(body["password"])
+
+    if name.is_empty() || email.is_empty() {
+        return ok(Response::json("\{\"error\":\"name と email は必須です\"}").status(400))
+    }
+
+    let conn = get_conn()?
+    let rows = query_raw(conn, "INSERT INTO users (name, email, password) VALUES ('{name}', '{email}', '{password}') RETURNING id, name, email")?
+    close(conn)
+
+    match rows.first() {
+        some(u) => {
+            let uid   = u["id"]
+            let uname = u["name"]
+            let uemail = u["email"]
+            ok(Response::json("\{\"id\":{uid},\"name\":\"{uname}\",\"email\":\"{uemail}\"}").status(201))
+        },
+        none => ok(Response::json("\{\"error\":\"insert failed\"}").status(500)),
+    }
+}
+
+// ----------------------------------------------------------------
+// DELETE /users/:id — 削除
+// ----------------------------------------------------------------
+
+fn delete_user_handler(req: Request<string>) -> Response<string>! {
+    let id = match req.params.get("id") {
+        some(v) => v,
+        none    => "0",
+    }
+    let conn = get_conn()?
+    let rows = query_raw(conn, "DELETE FROM users WHERE id = {id} RETURNING id")?
+    close(conn)
+    match rows.first() {
+        some(_) => ok(Response::json("\{\"deleted\":{id}}")),
+        none    => ok(Response::json("\{\"error\":\"user not found\"}").status(404)),
+    }
+}
+
+// ----------------------------------------------------------------
+// アプリケーション定義
+// ----------------------------------------------------------------
+
+let APP = Anvil::new()
+    .use(logger())
+    .use(cors(CorsOptions::any()))
+    .use(json_parser())
+    .get("/health",        health_handler)
+    .get("/users",         list_users_handler)
+    .get("/users/:id",     get_user_handler)
+    .post("/users",        create_user_handler)
+    .delete("/users/:id",  delete_user_handler)
+
+fn dispatch(raw: RawRequest) -> RawResponse! {
+    APP.dispatch_async(raw).await?
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+
+fn main() -> number! {
+    println("Anvil CRUD API 起動中... http://localhost:8080")
+    println("  GET    /health")
+    println("  GET    /users")
+    println("  GET    /users/:id")
+    println("  POST   /users  (name, email, password)")
+    println("  DELETE /users/:id")
+    tcp_listen_async(8080, dispatch)?
+    ok(0)
+}
+
+main()?

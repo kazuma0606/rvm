@@ -1,0 +1,192 @@
+// examples/pattern/tests/pattern.test.forge
+// forge test examples/pattern/
+
+// ── enum: Direction ─────────────────────────────────────────────
+
+enum Direction { North, South, East, West }
+
+fn opposite(d: Direction) -> Direction {
+    match d {
+        Direction::North => Direction::South,
+        Direction::South => Direction::North,
+        Direction::East  => Direction::West,
+        Direction::West  => Direction::East,
+    }
+}
+
+fn describe_direction(d: Direction) -> string {
+    match d {
+        Direction::North => "北へ進む",
+        Direction::South => "南へ進む",
+        Direction::East  => "東へ進む",
+        Direction::West  => "西へ進む",
+    }
+}
+
+test "enum: Direction 反対方向" {
+    assert_eq(opposite(Direction::North), Direction::South)
+    assert_eq(opposite(Direction::South), Direction::North)
+    assert_eq(opposite(Direction::East),  Direction::West)
+    assert_eq(opposite(Direction::West),  Direction::East)
+    assert_eq(opposite(opposite(Direction::North)), Direction::North)
+}
+
+test "enum: describe_direction" {
+    assert_eq(describe_direction(Direction::North), "北へ進む")
+    assert_eq(describe_direction(Direction::East),  "東へ進む")
+}
+
+// ── enum: Shape ──────────────────────────────────────────────────
+
+enum Shape {
+    Circle(number)
+    Rectangle(number, number)
+    Triangle(number, number, number)
+}
+
+fn area(s: Shape) -> number {
+    match s {
+        Shape::Circle(r)         => r * r * 3,
+        Shape::Rectangle(w, h)   => w * h,
+        Shape::Triangle(a, b, c) => (a + b + c),
+    }
+}
+
+fn perimeter(s: Shape) -> number {
+    match s {
+        Shape::Circle(r)         => 6 * r,
+        Shape::Rectangle(w, h)   => 2 * (w + h),
+        Shape::Triangle(a, b, c) => a + b + c,
+    }
+}
+
+fn describe_shape(s: Shape) -> string {
+    match s {
+        Shape::Circle(r)         => "円（半径 {r}）",
+        Shape::Rectangle(w, h)   => "長方形（{w} × {h}）",
+        Shape::Triangle(a, b, c) => "三角形（{a}, {b}, {c}）",
+    }
+}
+
+test "enum: Shape 面積" {
+    assert_eq(area(Shape::Rectangle(4, 5)), 20)
+    assert_eq(area(Shape::Circle(3)),       27)   // 3*3*3
+    assert_eq(area(Shape::Triangle(3, 4, 5)), 12) // 周長代用
+}
+
+test "enum: Shape 周長" {
+    assert_eq(perimeter(Shape::Rectangle(3, 4)), 14)
+    assert_eq(perimeter(Shape::Triangle(3, 4, 5)), 12)
+    assert_eq(perimeter(Shape::Circle(5)), 30)    // 6*5
+}
+
+test "enum: describe_shape" {
+    assert_eq(describe_shape(Shape::Circle(5)),         "円（半径 5）")
+    assert_eq(describe_shape(Shape::Rectangle(3, 4)),   "長方形（3 × 4）")
+    assert_eq(describe_shape(Shape::Triangle(3, 4, 5)), "三角形（3, 4, 5）")
+}
+
+// ── Result パターン ───────────────────────────────────────────────
+
+fn divide(a: number, b: number) -> number! {
+    if b == 0 { err("ゼロ除算エラー") }
+    else       { ok(a / b) }
+}
+
+fn safe_sqrt(n: number) -> number! {
+    if n < 0 { err("負の数の平方根は実数ではありません: {n}") }
+    else     { ok(n / 2) }   // 整数の簡易近似
+}
+
+test "Result: divide 正常系" {
+    match divide(10, 2) {
+        ok(v)  => assert_eq(v, 5),
+        err(_) => assert(false),
+    }
+}
+
+test "Result: divide ゼロ除算" {
+    match divide(5, 0) {
+        ok(_)    => assert(false),
+        err(msg) => assert(msg.contains("ゼロ除算")),
+    }
+}
+
+test "Result: ? 演算子で伝播" {
+    fn chain() -> number! {
+        let a = divide(20, 4)?   // 5
+        let b = divide(a, 0)?    // エラー
+        ok(b)
+    }
+    match chain() {
+        ok(_)    => assert(false),
+        err(msg) => assert(msg.contains("ゼロ除算")),
+    }
+}
+
+test "Result: safe_sqrt 正常系" {
+    match safe_sqrt(16) {
+        ok(v)  => assert_eq(v, 8),   // 16/2
+        err(_) => assert(false),
+    }
+}
+
+test "Result: safe_sqrt 負の数" {
+    match safe_sqrt(-4) {
+        ok(_)    => assert(false),
+        err(msg) => assert(msg.contains("負の数")),
+    }
+}
+
+// ── Option パターン ────────────────────────────────────────────────
+
+struct User {
+    id:   number
+    name: string
+    role: string
+}
+
+let users = [
+    User { id: 1, name: "Alice", role: "admin" },
+    User { id: 2, name: "Bob",   role: "user"  },
+    User { id: 3, name: "Carol", role: "user"  },
+]
+
+fn find_user(id: number) -> User? {
+    users |> find(u => u.id == id)
+}
+
+test "Option: find_user 存在する" {
+    match find_user(1) {
+        some(u) => assert_eq(u.name, "Alice"),
+        none    => assert(false),
+    }
+}
+
+test "Option: find_user 存在しない" {
+    match find_user(99) {
+        some(_) => assert(false),
+        none    => assert(true),
+    }
+}
+
+test "Option: find_user role" {
+    match find_user(1) {
+        some(u) => assert_eq(u.role, "admin"),
+        none    => assert(false),
+    }
+}
+
+test "Option: none の場合はデフォルト値" {
+    match find_user(99) {
+        some(_) => assert(false),
+        none    => assert_eq("ゲスト", "ゲスト"),
+    }
+}
+
+test "Option: some の場合は値を取得" {
+    match find_user(2) {
+        some(u) => assert_eq(u.name, "Bob"),
+        none    => assert(false),
+    }
+}

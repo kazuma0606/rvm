@@ -1,0 +1,185 @@
+// examples/crucible-crud/src/main.forge
+//
+// Crucible（PostgreSQL クライアント）CRUD サンプル
+//
+// 事前準備:
+//   docker compose -f docker/docker-compose.test.yml up -d
+//
+// 実行:  forge run examples/crucible-crud/
+// テスト: forge test examples/crucible-crud/
+//
+// テーブル構成（packages/crucible/migrations/ 参照）:
+//   users   (id, name, email, password, created_at)
+//   posts   (id, user_id, title, body, created_at)
+
+use crucible.*
+
+// ----------------------------------------------------------------
+// 接続設定
+// ----------------------------------------------------------------
+
+fn connect_db() -> Connection! {
+    connect("localhost", 5432, "postgres", "test", "crucible_test")
+}
+
+// ----------------------------------------------------------------
+// ヘルパー: テスト用データをクリーンアップ
+// ----------------------------------------------------------------
+
+fn cleanup(conn: Connection) -> unit! {
+    query_raw(conn, "DELETE FROM posts WHERE title LIKE 'DEMO:%'")?
+    query_raw(conn, "DELETE FROM users WHERE email LIKE '%@demo.example'")?
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 1. INSERT + RETURNING
+// ----------------------------------------------------------------
+
+fn demo_insert(conn: Connection) -> unit! {
+    println("-- INSERT --")
+
+    let rows = query_raw(conn, "INSERT INTO users (name, email, password) VALUES ('Taro Yamada', 'taro@demo.example', 'hashed_pw') RETURNING id, name, email")?
+
+    let user = rows[0]
+    let uid  = user["id"]
+    let uname = user["name"]
+    let email = user["email"]
+    println("  作成: id={uid} name={uname} email={email}")
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 2. SELECT + WHERE
+// ----------------------------------------------------------------
+
+fn demo_select(conn: Connection) -> unit! {
+    println("-- SELECT --")
+
+    // 全件取得
+    let all = query_raw(conn, "SELECT id, name, email FROM users ORDER BY id")?
+    println("  全ユーザー数: {all.len()}")
+
+    // 条件付き
+    let demos = query_raw(conn, "SELECT id, name FROM users WHERE email LIKE '%@demo.example' ORDER BY name")?
+    demos |> each(u => {
+        let uname = u["name"]
+        println("  demo ユーザー: {uname}")
+    })
+
+    // 一件取得
+    let found = query_raw(conn, "SELECT * FROM users WHERE email = 'taro@demo.example' LIMIT 1")?
+    match found.first() {
+        some(u) => {
+            let uname = u["name"]
+            println("  取得: {uname}")
+        },
+        none => println("  見つかりません"),
+    }
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 3. UPDATE
+// ----------------------------------------------------------------
+
+fn demo_update(conn: Connection) -> unit! {
+    println("-- UPDATE --")
+
+    let updated = query_raw(conn, "UPDATE users SET name = 'Taro Yamada (updated)' WHERE email = 'taro@demo.example' RETURNING id, name")?
+    match updated.first() {
+        some(u) => {
+            let uname = u["name"]
+            println("  更新後: {uname}")
+        },
+        none => println("  対象なし"),
+    }
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 4. リレーション（JOIN）
+// ----------------------------------------------------------------
+
+fn demo_relation(conn: Connection) -> unit! {
+    println("-- JOIN --")
+
+    // 投稿を作成
+    let urows = query_raw(conn, "SELECT id FROM users WHERE email = 'taro@demo.example' LIMIT 1")?
+    let uid = urows[0]["id"]
+
+    query_raw(conn, "INSERT INTO posts (user_id, title, body) VALUES ({uid}, 'DEMO: ForgeScript 入門', 'ForgeScript は楽しい言語です。')")?
+
+    // JOIN で取得
+    let posts = query_raw(conn, "SELECT p.title, u.name AS author FROM posts p JOIN users u ON u.id = p.user_id WHERE p.title LIKE 'DEMO:%' ORDER BY p.created_at DESC")?
+    posts |> each(p => {
+        let author = p["author"]
+        let title  = p["title"]
+        println("  [{author}] {title}")
+    })
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 5. トランザクション
+// ----------------------------------------------------------------
+
+fn demo_transaction(conn: Connection) -> unit! {
+    println("-- TRANSACTION --")
+
+    query_raw(conn, "BEGIN")?
+    query_raw(conn, "INSERT INTO users (name, email, password) VALUES ('Hanako Suzuki', 'hanako@demo.example', 'pw2')")?
+    query_raw(conn, "INSERT INTO users (name, email, password) VALUES ('Jiro Tanaka', 'jiro@demo.example', 'pw3')")?
+    query_raw(conn, "COMMIT")?
+    println("  コミット完了")
+
+    // 確認
+    let rows = query_raw(conn, "SELECT COUNT(*) AS n FROM users WHERE email LIKE '%@demo.example'")?
+    let n = rows[0]["n"]
+    println("  demo ユーザー数: {n}")
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// 6. DELETE
+// ----------------------------------------------------------------
+
+fn demo_delete(conn: Connection) -> unit! {
+    println("-- DELETE --")
+
+    let deleted = query_raw(conn, "DELETE FROM users WHERE email = 'jiro@demo.example' RETURNING name")?
+    match deleted.first() {
+        some(u) => {
+            let uname = u["name"]
+            println("  削除: {uname}")
+        },
+        none => println("  対象なし"),
+    }
+    ok(unit)
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+
+fn main() -> unit! {
+    println("=== Crucible CRUD デモ ===\n")
+    println("PostgreSQL: localhost:5432 / crucible_test\n")
+
+    let conn = connect_db()?
+
+    cleanup(conn)?
+    demo_insert(conn)?
+    demo_select(conn)?
+    demo_update(conn)?
+    demo_relation(conn)?
+    demo_transaction(conn)?
+    demo_delete(conn)?
+    cleanup(conn)?
+
+    close(conn)
+    println("\ndone.")
+    ok(unit)
+}
+
+main()?

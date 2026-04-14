@@ -1,0 +1,234 @@
+// examples/collections/tests/collections.test.forge
+// forge test examples/collections/
+
+struct Student {
+    name:  string
+    grade: number
+    score: number
+}
+
+let students = [
+    Student { name: "Alice",  grade: 3, score: 92 },
+    Student { name: "Bob",    grade: 2, score: 78 },
+    Student { name: "Carol",  grade: 3, score: 88 },
+    Student { name: "Dave",   grade: 1, score: 95 },
+    Student { name: "Eve",    grade: 2, score: 71 },
+    Student { name: "Frank",  grade: 1, score: 83 },
+]
+
+// ── 基本操作 ──────────────────────────────────────────────────────
+
+test "sort: 数値" {
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6]
+    assert_eq(nums |> sort(), [1, 1, 2, 3, 4, 5, 6, 9])
+}
+
+test "sort: 文字列" {
+    let words = ["banana", "apple", "cherry"]
+    assert_eq(words |> sort(), ["apple", "banana", "cherry"])
+}
+
+test "dedup: 連続重複を除去" {
+    let nums = [1, 1, 2, 3, 3, 3, 4]
+    assert_eq(nums |> dedup(), [1, 2, 3, 4])
+}
+
+test "sort + dedup: 全重複除去" {
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+    assert_eq(nums |> sort() |> dedup(), [1, 2, 3, 4, 5, 6, 9])
+}
+
+test "unique: 順序保持の重複除去" {
+    let nums = [1, 2, 2, 3, 1, 4]
+    assert_eq(nums |> unique(), [1, 2, 3, 4])
+}
+
+test "reverse: リスト逆順" {
+    assert_eq([1, 2, 3] |> reverse(), [3, 2, 1])
+    assert_eq([1] |> reverse(), [1])
+}
+
+test "concat: リスト結合" {
+    let a = [1, 2, 3]
+    let b = [4, 5, 6]
+    assert_eq(a |> concat(b), [1, 2, 3, 4, 5, 6])
+}
+
+test "contains: 要素の存在確認" {
+    let nums = [1, 2, 3, 4, 5]
+    assert_eq(nums |> contains(3), true)
+    assert_eq(nums |> contains(9), false)
+}
+
+// ── 変換 ──────────────────────────────────────────────────────────
+
+test "flat_map: ネストを展開" {
+    let words = ["ab", "cd"]
+    let chars = words |> flat_map(w => w.chars())
+    assert_eq(chars, ["a", "b", "c", "d"])
+}
+
+test "flatten: 一段階フラット化" {
+    let nested = [[1, 2], [3], [4, 5, 6]]
+    assert_eq(nested |> flatten(), [1, 2, 3, 4, 5, 6])
+}
+
+test "chunk: n 個ずつ分割" {
+    let nums = [1, 2, 3, 4, 5]
+    let chunks = nums |> chunk(2)
+    assert_eq(chunks.len(), 3)
+    assert_eq(chunks[0], [1, 2])
+    assert_eq(chunks[1], [3, 4])
+    assert_eq(chunks[2], [5])
+}
+
+test "zip: 2リストを組み合わせ" {
+    let a = [1, 2, 3]
+    let b = ["x", "y", "z"]
+    let zipped = a |> zip(b)
+    assert_eq(zipped.len(), 3)
+    assert_eq(zipped[0][0], 1)
+    assert_eq(zipped[0][1], "x")
+    assert_eq(zipped[2][0], 3)
+    assert_eq(zipped[2][1], "z")
+}
+
+test "take_last: 末尾 n 件" {
+    let nums = [10, 20, 30, 40, 50]
+    assert_eq(nums |> take_last(3), [30, 40, 50])
+    assert_eq(nums |> take_last(1), [50])
+    assert_eq(nums |> take_last(0), [])
+}
+
+// ── 検索・集約 ────────────────────────────────────────────────────
+
+test "find: 最初にマッチした要素" {
+    let nums = [1, 2, 3, 4, 5]
+    match nums |> find(n => n > 3) {
+        some(v) => assert_eq(v, 4),
+        none    => assert(false),
+    }
+}
+
+test "find: マッチなし" {
+    let nums = [1, 2, 3]
+    match nums |> find(n => n > 10) {
+        some(_) => assert(false),
+        none    => assert(true),
+    }
+}
+
+test "count: 引数なしは長さ" {
+    assert_eq([1, 2, 3, 4, 5] |> count(), 5)
+}
+
+test "count: 条件に一致する件数" {
+    let nums = [1, 2, 3, 4, 5, 6]
+    assert_eq(nums |> count(n => n % 2 == 0), 3)
+    assert_eq(nums |> count(n => n > 4),       2)
+}
+
+test "all / any" {
+    let nums = [2, 4, 6, 8]
+    assert_eq(nums |> all(n => n % 2 == 0), true)
+    assert_eq(nums |> all(n => n > 5),      false)
+    assert_eq(nums |> any(n => n > 7),      true)
+    assert_eq(nums |> any(n => n > 10),     false)
+}
+
+test "partition: 条件で二分割" {
+    let nums  = [1, 2, 3, 4, 5, 6]
+    let parts = nums |> partition(n => n % 2 == 0)
+    assert_eq(parts[0], [2, 4, 6])  // 偶数
+    assert_eq(parts[1], [1, 3, 5])  // 奇数
+}
+
+test "sum / min / max" {
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6]
+    assert_eq(nums |> sum(), 31)
+    match nums |> min() {
+        some(v) => assert_eq(v, 1),
+        none    => assert(false),
+    }
+    match nums |> max() {
+        some(v) => assert_eq(v, 9),
+        none    => assert(false),
+    }
+}
+
+test "join: 文字列結合" {
+    let words = ["apple", "banana", "cherry"]
+    assert_eq(words |> join(", "), "apple, banana, cherry")
+    assert_eq(words |> join(""),   "applebananacherry")
+}
+
+// ── group_by ─────────────────────────────────────────────────────
+
+test "group_by: 学年別グループ" {
+    let groups = students |> group_by(s => s.grade)
+    let g3 = groups |> find(g => g.key == 3)
+    match g3 {
+        some(g) => {
+            assert_eq(g.values.len(), 2)
+            let names = g.values |> map(s => s.name) |> sort()
+            assert_eq(names, ["Alice", "Carol"])
+        },
+        none => assert(false),
+    }
+}
+
+test "group_by → 各グループを集計" {
+    let groups = students |> group_by(s => s.grade)
+    let avgs = groups
+        |> map(g => {
+            let total = g.values |> map(s => s.score) |> sum()
+            total / g.values.len()
+        })
+    // 3年生: (92+88)/2=90, 2年生: (78+71)/2=74, 1年生: (95+83)/2=89
+    assert_eq(avgs[0], 90)
+    assert_eq(avgs[1], 74)
+    assert_eq(avgs[2], 89)
+}
+
+// ── 文字列メソッド ────────────────────────────────────────────────
+
+test "string: trim" {
+    assert_eq("  hello  ".trim(),       "hello")
+    assert_eq("  hello  ".trim_start(), "hello  ")
+    assert_eq("  hello  ".trim_end(),   "  hello")
+}
+
+test "string: to_upper / to_lower / capitalize" {
+    assert_eq("hello".to_upper(),   "HELLO")
+    assert_eq("HELLO".to_lower(),   "hello")
+    assert_eq("hello".capitalize(), "Hello")
+}
+
+test "string: ends_with / starts_with / contains" {
+    assert_eq("hello world".ends_with("world"),   true)
+    assert_eq("hello world".starts_with("hello"), true)
+    assert_eq("hello world".contains("lo wo"),    true)
+    assert_eq("hello world".ends_with("xyz"),     false)
+}
+
+test "string: replace" {
+    assert_eq("hello world".replace("world", "forge"), "hello forge")
+    assert_eq("aaa".replace("a", "b"),                 "bbb")
+}
+
+test "string: repeat" {
+    assert_eq("ab".repeat(3), "ababab")
+    assert_eq("x".repeat(0),  "")
+}
+
+test "string: is_empty" {
+    assert_eq("".is_empty(),    true)
+    assert_eq("a".is_empty(),   false)
+    assert_eq("  ".is_empty(),  false)
+}
+
+test "string: chars" {
+    let chars = "abc".chars()
+    assert_eq(chars, ["a", "b", "c"])
+    assert_eq(chars.len(), 3)
+}

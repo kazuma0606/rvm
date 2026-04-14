@@ -1,0 +1,8 @@
+[package]
+name    = "crucible-crud"
+version = "0.1.0"
+forge   = "0.1.0"
+entry   = "src/main.forge"
+
+[dependencies]
+crucible = { path = "../../packages/crucible" }

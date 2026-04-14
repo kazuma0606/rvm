@@ -1,0 +1,304 @@
+// examples/pattern/src/main.forge
+//
+// パターンマッチ / enum / typestate のサンプル集
+//
+// 実行:  forge run examples/pattern/
+// テスト: forge test examples/pattern/
+
+// ----------------------------------------------------------------
+// 1. enum + match — 基本
+// ----------------------------------------------------------------
+
+enum Direction { North, South, East, West }
+
+fn describe_direction(d: Direction) -> string {
+    match d {
+        Direction::North => "北へ進む",
+        Direction::South => "南へ進む",
+        Direction::East  => "東へ進む",
+        Direction::West  => "西へ進む",
+    }
+}
+
+fn opposite(d: Direction) -> Direction {
+    match d {
+        Direction::North => Direction::South,
+        Direction::South => Direction::North,
+        Direction::East  => Direction::West,
+        Direction::West  => Direction::East,
+    }
+}
+
+// ----------------------------------------------------------------
+// 2. enum — データを持つバリアント
+// ----------------------------------------------------------------
+
+enum Shape {
+    Circle(number)
+    Rectangle(number, number)
+    Triangle(number, number, number)
+}
+
+fn area(s: Shape) -> number {
+    match s {
+        Shape::Circle(r)         => r * r * 3,   // π≈3 で整数近似
+        Shape::Rectangle(w, h)   => w * h,
+        Shape::Triangle(a, b, c) => (a + b + c), // 周長で代用（デモ用）
+    }
+}
+
+fn perimeter(s: Shape) -> number {
+    match s {
+        Shape::Circle(r)         => 6 * r,   // 2π≈6 で整数近似
+        Shape::Rectangle(w, h)   => 2 * (w + h),
+        Shape::Triangle(a, b, c) => a + b + c,
+    }
+}
+
+fn describe_shape(s: Shape) -> string {
+    match s {
+        Shape::Circle(r)        => "円（半径 {r}）",
+        Shape::Rectangle(w, h)  => "長方形（{w} × {h}）",
+        Shape::Triangle(a, b, c) => "三角形（{a}, {b}, {c}）",
+    }
+}
+
+// ----------------------------------------------------------------
+// 3. Result 型パターン
+// ----------------------------------------------------------------
+
+fn divide(a: number, b: number) -> number! {
+    if b == 0 { err("ゼロ除算エラー") }
+    else       { ok(a / b) }
+}
+
+fn safe_sqrt(n: number) -> number! {
+    if n < 0 { err("負の数の平方根は実数ではありません: {n}") }
+    else      { ok(n / 2) }   // 整数の簡易近似（デモ用）
+}
+
+fn demo_result() {
+    println("-- Result パターン --")
+
+    let results = [divide(10, 2), divide(7, 0), divide(9, 3)]
+    results |> each(r => {
+        match r {
+            ok(v)    => println("  成功: {v}"),
+            err(msg) => println("  失敗: {msg}"),
+        }
+    })
+
+    // ? 演算子でエラーを伝播
+    fn compute(x: number) -> number! {
+        let a = divide(x, 2)?
+        let b = safe_sqrt(a)?
+        ok(b)
+    }
+
+    match compute(16) {
+        ok(v)    => println("  compute(16) = {v}"),   // → 4 (16/2=8, 8/2=4)
+        err(msg) => println("  エラー: {msg}"),
+    }
+    match compute(-4) {
+        ok(v)    => println("  compute(-4) = {v}"),
+        err(msg) => println("  エラー: {msg}"),        // → 負の数エラー
+    }
+}
+
+// ----------------------------------------------------------------
+// 4. Option パターン
+// ----------------------------------------------------------------
+
+struct User {
+    id:   number
+    name: string
+    role: string
+}
+
+let users = [
+    User { id: 1, name: "Alice", role: "admin" },
+    User { id: 2, name: "Bob",   role: "user"  },
+    User { id: 3, name: "Carol", role: "user"  },
+]
+
+fn find_user(id: number) -> User? {
+    users |> find(u => u.id == id)
+}
+
+fn demo_option() {
+    println("-- Option パターン --")
+
+    for id in [1, 2, 99] {
+        match find_user(id) {
+            some(u) => println("  ID={id}: {u.name} ({u.role})"),
+            none    => println("  ID={id}: 見つかりません"),
+        }
+    }
+}
+
+// ----------------------------------------------------------------
+// 5. typestate — コンパイル時に状態遷移を保証
+// ----------------------------------------------------------------
+
+typestate TrafficLight {
+    states: [Red, Yellow, Green]
+
+    Red {
+        fn go()    -> Green
+    }
+
+    Green {
+        fn slow()  -> Yellow
+    }
+
+    Yellow {
+        fn stop()  -> Red
+    }
+}
+
+typestate Order {
+    states: [Draft, Submitted, Paid, Shipped, Delivered, Cancelled]
+
+    Draft {
+        fn submit()  -> Submitted
+        fn cancel()  -> Cancelled
+    }
+
+    Submitted {
+        fn pay()     -> Paid
+        fn cancel()  -> Cancelled
+    }
+
+    Paid {
+        fn ship()    -> Shipped
+    }
+
+    Shipped {
+        fn deliver() -> Delivered
+    }
+}
+
+fn demo_typestate() {
+    println("-- typestate --")
+
+    // 信号機: Red → Green → Yellow → Red
+    let light = TrafficLight::new<Red>()
+    let green  = light.go()
+    let yellow = green.slow()
+    let red    = yellow.stop()
+    println("  信号: Red → Green → Yellow → Red ✓")
+
+    // 注文ワークフロー
+    let order     = Order::new<Draft>()
+    let submitted = order.submit()
+    let paid      = submitted.pay()
+    let shipped   = paid.ship()
+    let delivered = shipped.deliver()
+    println("  注文: Draft → Submitted → Paid → Shipped → Delivered ✓")
+
+    // キャンセルパス
+    let order2     = Order::new<Draft>()
+    let cancelled  = order2.cancel()
+    println("  キャンセル: Draft → Cancelled ✓")
+
+    // ↓ これはコンパイルエラー（Paid から cancel は呼べない）
+    // paid.cancel()
+}
+
+// ----------------------------------------------------------------
+// テスト
+// ----------------------------------------------------------------
+
+test "enum: Direction 反対方向" {
+    assert_eq(opposite(Direction::North), Direction::South)
+    assert_eq(opposite(Direction::East),  Direction::West)
+    assert_eq(opposite(opposite(Direction::North)), Direction::North)
+}
+
+test "enum: Shape 面積" {
+    // 整数値で比較
+    assert_eq(area(Shape::Rectangle(4, 5)), 20)
+    assert_eq(perimeter(Shape::Rectangle(3, 4)), 14)
+    assert_eq(perimeter(Shape::Triangle(3, 4, 5)), 12)
+}
+
+test "enum: describe_shape" {
+    assert_eq(describe_shape(Shape::Circle(5)),        "円（半径 5）")
+    assert_eq(describe_shape(Shape::Rectangle(3, 4)), "長方形（3 × 4）")
+}
+
+test "Result: divide 正常系" {
+    match divide(10, 2) {
+        ok(v)    => assert_eq(v, 5),
+        err(_)   => assert(false),
+    }
+}
+
+test "Result: divide ゼロ除算" {
+    match divide(5, 0) {
+        ok(_)    => assert(false),
+        err(msg) => assert(msg.contains("ゼロ除算")),
+    }
+}
+
+test "Result: ? 演算子で伝播" {
+    fn chain() -> number! {
+        let a = divide(20, 4)?   // 5
+        let b = divide(a, 0)?    // エラー
+        ok(b)
+    }
+    match chain() {
+        ok(_)    => assert(false),
+        err(msg) => assert(msg.contains("ゼロ除算")),
+    }
+}
+
+test "Option: find_user 存在する" {
+    match find_user(1) {
+        some(u) => assert_eq(u.name, "Alice"),
+        none    => assert(false),
+    }
+}
+
+test "Option: find_user 存在しない" {
+    match find_user(99) {
+        some(_) => assert(false),
+        none    => assert(true),
+    }
+}
+
+test "Option: unwrap_or" {
+    let name = find_user(99) |> map(u => u.name) |> unwrap_or("ゲスト")
+    assert_eq(name, "ゲスト")
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+
+fn main() {
+    println("=== パターンマッチ / enum / typestate デモ ===\n")
+
+    println("-- Direction --")
+    for d in [Direction::North, Direction::East, Direction::South, Direction::West] {
+        println("  {describe_direction(d)}")
+    }
+
+    println("\n-- Shape --")
+    let shapes = [
+        Shape::Circle(5),
+        Shape::Rectangle(3, 4),
+        Shape::Triangle(3, 4, 5),
+    ]
+    shapes |> each(s => {
+        println("  {describe_shape(s)}  面積: {area(s)}  周長: {perimeter(s)}")
+    })
+
+    demo_result()
+    demo_option()
+    demo_typestate()
+
+    println("\ndone.")
+}
+
+main()

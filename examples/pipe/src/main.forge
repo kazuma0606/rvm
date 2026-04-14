@@ -1,0 +1,226 @@
+// examples/pipe/src/main.forge
+//
+// パイプ演算子 |> のサンプル集
+//
+// x |> method(args)  は  x.method(args)  と等価。
+// 変換の流れを上から下に読めるのが利点。
+//
+// 実行:  forge run examples/pipe/
+// テスト: forge test examples/pipe/
+
+// ----------------------------------------------------------------
+// 1. 基本：数値リストの変換
+// ----------------------------------------------------------------
+
+fn demo_basic() {
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    // メソッドチェーンで書くと右に伸びる
+    let old_way = nums.filter(n => n % 2 == 0).map(n => n * n).fold(0, (acc, n) => acc + n)
+
+    // |> で書くと変換の流れが縦に読める
+    let result = nums
+        |> filter(n => n % 2 == 0)   // 偶数だけ: [2,4,6,8,10]
+        |> map(n => n * n)            // 二乗:     [4,16,36,64,100]
+        |> fold(0, (acc, n) => acc + n) // 合計:   220
+
+    println("偶数の二乗の合計: {result}")   // → 220
+}
+
+// ----------------------------------------------------------------
+// 2. 文字列処理
+// ----------------------------------------------------------------
+
+fn demo_strings() {
+    let words = ["  Forge  ", "  Script  ", "  is  ", "  fun  "]
+
+    let sentence = words
+        |> map(w => w.trim())         // 両端の空白を除去
+        |> filter(w => w.len() > 2)  // 短い単語を除外
+        |> map(w => w.capitalize())  // 先頭を大文字
+        |> join(" ")                 // スペースで結合
+
+    println(sentence)   // → "Forge Script Fun"
+}
+
+// ----------------------------------------------------------------
+// 3. 構造体のデータ処理
+// ----------------------------------------------------------------
+
+struct Product {
+    name:     string
+    category: string
+    price:    number
+    stock:    number
+}
+
+let products = [
+    Product { name: "Laptop",  category: "Electronics", price: 98000, stock: 5  },
+    Product { name: "Mouse",   category: "Electronics", price: 2800,  stock: 50 },
+    Product { name: "Desk",    category: "Furniture",   price: 45000, stock: 3  },
+    Product { name: "Chair",   category: "Furniture",   price: 38000, stock: 8  },
+    Product { name: "Monitor", category: "Electronics", price: 52000, stock: 12 },
+    Product { name: "Pen",     category: "Stationery",  price: 200,   stock: 200 },
+    Product { name: "Notepad", category: "Stationery",  price: 500,   stock: 100 },
+]
+
+fn demo_products() {
+    // 電子機器の在庫総額を計算（価格 × 在庫）
+    let electronics_value = products
+        |> filter(p => p.category == "Electronics")
+        |> map(p => p.price * p.stock)
+        |> fold(0, (acc, v) => acc + v)
+
+    println("電子機器 在庫総額: ¥{electronics_value}")
+
+    // 高額商品（3万円以上）の名前一覧
+    let expensive = products
+        |> filter(p => p.price >= 30000)
+        |> map(p => p.name)
+        |> join(", ")
+
+    println("高額商品: {expensive}")
+
+    // カテゴリ別の平均価格
+    let by_cat = products |> group_by(p => p.category)
+    by_cat |> each(g => {
+        let total = g.values |> map(p => p.price) |> fold(0, (acc, p) => acc + p)
+        let avg   = total / g.values.len()
+        println("{g.key}: 平均 ¥{avg}")
+    })
+}
+
+// ----------------------------------------------------------------
+// 4. パイプの途中で let に束縛（デバッグに便利）
+// ----------------------------------------------------------------
+
+fn demo_intermediate() {
+    let raw = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+
+    // 途中経過を変数に保存しながらパイプする
+    let deduped = raw |> sort() |> dedup()
+    println("重複除去後: {deduped}")    // → [1,2,3,4,5,6,9]
+
+    let result = deduped
+        |> filter(n => n > 3)          // [4,5,6,9]
+        |> map(n => n * 2)             // [8,10,12,18]
+        |> take(3)                     // [8,10,12]
+
+    println("結果: {result}")
+}
+
+// ----------------------------------------------------------------
+// 5. ネストしたパイプ（パイプの中でパイプ）
+// ----------------------------------------------------------------
+
+struct ProductValue {
+    name:  string
+    value: number
+}
+
+struct Order {
+    customer: string
+    items:    list<number>
+}
+
+let orders = [
+    Order { customer: "Alice", items: [1000, 2500, 800] },
+    Order { customer: "Bob",   items: [5000, 1200] },
+    Order { customer: "Carol", items: [300, 700, 1100, 2200] },
+]
+
+fn demo_nested() {
+    let totals = orders
+        |> map(o => {
+            let total = o.items |> fold(0, (acc, p) => acc + p)
+            "{o.customer}: ¥{total}"
+        })
+        |> join("\n")
+
+    println("注文合計:\n{totals}")
+}
+
+// ----------------------------------------------------------------
+// テスト
+// ----------------------------------------------------------------
+
+fn sum_of_squares_of_evens(nums: list<number>) -> number {
+    nums
+        |> filter(n => n % 2 == 0)
+        |> map(n => n * n)
+        |> fold(0, (acc, n) => acc + n)
+}
+
+fn top_products_by_value(limit: number) -> list<string> {
+    products
+        |> map(p => ProductValue { name: p.name, value: p.price * p.stock })
+        |> order_by(p => -p.value)
+        |> take(limit)
+        |> map(p => p.name)
+}
+
+test "|>: 偶数の二乗和" {
+    assert_eq(sum_of_squares_of_evens([1, 2, 3, 4]),    20)  // 4+16
+    assert_eq(sum_of_squares_of_evens([1, 3, 5]),         0)  // 偶数なし
+    assert_eq(sum_of_squares_of_evens([2, 4, 6]),        56)  // 4+16+36
+    assert_eq(sum_of_squares_of_evens([]),                0)  // 空リスト
+}
+
+test "|>: 空リストは空を返す" {
+    let empty: list<number> = []
+    let result = empty |> filter(n => n > 0) |> map(n => n * 2)
+    assert_eq(result.len(), 0)
+}
+
+test "|>: 上位商品（在庫総額）" {
+    let top2 = top_products_by_value(2)
+    assert_eq(top2.len(), 2)
+    assert_eq(top2[0], "Monitor")   // 52000 × 12 = 624000
+    assert_eq(top2[1], "Laptop")    // 98000 × 5  = 490000
+}
+
+test "|>: filter → map の順序" {
+    let nums = [1, 2, 3, 4, 5]
+
+    // filter してから map
+    let a = nums |> filter(n => n > 2) |> map(n => n * 10)
+    assert_eq(a, [30, 40, 50])
+
+    // map してから filter
+    let b = nums |> map(n => n * 10) |> filter(n => n > 20)
+    assert_eq(b, [30, 40, 50])
+}
+
+test "|>: fold で合計" {
+    let nums = [1, 2, 3, 4, 5]
+    let total = nums |> fold(0, (acc, n) => acc + n)
+    assert_eq(total, 15)
+}
+
+test "|>: take / skip" {
+    let nums = [10, 20, 30, 40, 50]
+    assert_eq(nums |> take(3),   [10, 20, 30])
+    assert_eq(nums |> skip(2),   [30, 40, 50])
+    assert_eq(nums |> skip(2) |> take(2), [30, 40])
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+
+fn main() {
+    println("=== パイプ演算子 |> デモ ===\n")
+    println("-- 1. 基本 --")
+    demo_basic()
+    println("\n-- 2. 文字列処理 --")
+    demo_strings()
+    println("\n-- 3. 商品データ処理 --")
+    demo_products()
+    println("\n-- 4. 中間束縛 --")
+    demo_intermediate()
+    println("\n-- 5. ネストしたパイプ --")
+    demo_nested()
+    println("\ndone.")
+}
+
+main()

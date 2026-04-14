@@ -1,0 +1,224 @@
+// examples/collections/src/main.forge
+//
+// コレクション操作のサンプル集
+// list / map / set の基本操作をテスト付きで示す。
+//
+// 実行:  forge run examples/collections/
+// テスト: forge test examples/collections/
+
+// ----------------------------------------------------------------
+// list — 基本操作
+// ----------------------------------------------------------------
+
+fn demo_list_basics() {
+    println("-- list 基本操作 --")
+
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6]
+
+    println("元のリスト:   {nums}")
+    println("ソート:       {nums |> sort()}")
+    println("逆順:         {nums |> sort() |> reverse()}")
+    println("重複除去:     {nums |> sort() |> dedup()}")
+    println("最大値:       {nums |> max()}")
+    println("最小値:       {nums |> min()}")
+    println("合計:         {nums |> sum()}")
+    println("要素数:       {nums.len()}")
+    println("先頭3件:      {nums |> take(3)}")
+    println("末尾3件:      {nums |> take_last(3)}")
+    println("含む(5)?:     {nums |> contains(5)}")
+    println("含む(7)?:     {nums |> contains(7)}")
+}
+
+// ----------------------------------------------------------------
+// list — 変換
+// ----------------------------------------------------------------
+
+fn demo_list_transform() {
+    println("\n-- list 変換 --")
+
+    let words = ["forge", "script", "is", "awesome"]
+
+    // flat_map: 各単語を文字のリストに分解して平坦化
+    let chars = words
+        |> flat_map(w => w.chars())
+        |> sort()
+        |> dedup()        // sort してから dedup で重複除去
+    println("ユニーク文字: {chars}")
+
+    // zip: 二つのリストを組み合わせる
+    let keys   = ["a", "b", "c"]
+    let values = [1,   2,   3  ]
+    let pairs  = keys |> zip(values)
+    println("zip: {pairs}")   // → [("a",1), ("b",2), ("c",3)]
+
+    // enumerate: インデックス付きで反復
+    words |> enumerate() |> each(pair => println("  [{pair[0]}] {pair[1]}"))
+
+    // flatten: ネストしたリストを平坦化
+    let nested = [[1, 2], [3, 4], [5, 6]]
+    println("flatten: {nested |> flatten()}")   // → [1,2,3,4,5,6]
+
+    // chunk: 指定サイズで分割
+    let nums = [1, 2, 3, 4, 5, 6, 7]
+    println("chunk(3): {nums |> chunk(3)}")   // → [[1,2,3],[4,5,6],[7]]
+}
+
+// ----------------------------------------------------------------
+// list — 検索・集約
+// ----------------------------------------------------------------
+
+struct Student {
+    name:  string
+    grade: number
+    score: number
+}
+
+let students = [
+    Student { name: "Alice",   grade: 3, score: 92 },
+    Student { name: "Bob",     grade: 2, score: 78 },
+    Student { name: "Carol",   grade: 3, score: 88 },
+    Student { name: "Dave",    grade: 1, score: 95 },
+    Student { name: "Eve",     grade: 2, score: 71 },
+    Student { name: "Frank",   grade: 1, score: 83 },
+]
+
+fn demo_search_aggregate() {
+    println("\n-- 検索・集約 --")
+
+    // find: 最初にマッチした要素
+    let top = students |> find(s => s.score >= 90)
+    match top {
+        some(s) => println("最初に90点以上: {s.name}({s.score})"),
+        none    => println("見つからず"),
+    }
+
+    // all / any
+    let all_pass  = students |> all(s => s.score >= 60)
+    let any_over95 = students |> any(s => s.score >= 95)
+    println("全員 60 点以上?: {all_pass}")    // → true
+    println("95 点以上いる?: {any_over95}")   // → true
+
+    // count
+    let grade3_count = students |> count(s => s.grade == 3)
+    println("3年生の人数: {grade3_count}")    // → 2
+
+    // group_by
+    let by_grade = students
+        |> group_by(s => s.grade)
+        |> map(g => {
+            let avg = g.values |> map(s => s.score) |> sum() / g.values.len()
+            "{g.key}年生: {g.values.len()}名 平均{avg}点"
+        })
+        |> join(", ")
+    println("学年別: {by_grade}")
+
+    // partition: 条件で二分割 → [matching, non_matching] のリスト
+    let parts  = students |> partition(s => s.score >= 85)
+    let honor  = parts[0]
+    let normal = parts[1]
+    println("優等生: {honor  |> map(s => s.name) |> join(", ")}")
+    println("一般:   {normal |> map(s => s.name) |> join(", ")}")
+}
+
+// ----------------------------------------------------------------
+// テスト
+// ----------------------------------------------------------------
+
+test "list: filter + map + fold" {
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    let result = nums
+        |> filter(n => n % 3 == 0)   // [3, 6, 9]
+        |> map(n => n * 2)            // [6, 12, 18]
+        |> fold(0, (acc, n) => acc + n)
+
+    assert_eq(result, 36)
+}
+
+test "list: sort + dedup + reverse" {
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+    let result = nums |> sort() |> dedup() |> reverse()
+    assert_eq(result, [9, 6, 5, 4, 3, 2, 1])
+}
+
+test "list: take + skip" {
+    let nums = [10, 20, 30, 40, 50]
+    assert_eq(nums |> take(3),         [10, 20, 30])
+    assert_eq(nums |> skip(2),         [30, 40, 50])
+    assert_eq(nums |> skip(1) |> take(3), [20, 30, 40])
+}
+
+test "list: flat_map" {
+    let lists = [[1, 2], [3], [4, 5, 6]]
+    assert_eq(lists |> flatten(), [1, 2, 3, 4, 5, 6])
+}
+
+test "list: all / any / count" {
+    let nums = [2, 4, 6, 8]
+    assert_eq(nums |> all(n => n % 2 == 0),  true)
+    assert_eq(nums |> any(n => n > 7),        true)
+    assert_eq(nums |> any(n => n > 10),       false)
+    assert_eq(nums |> count(n => n > 4),      2)
+}
+
+test "list: zip" {
+    let a = [1, 2, 3]
+    let b = ["a", "b", "c"]
+    let zipped = a |> zip(b)
+    assert_eq(zipped.len(), 3)
+    // zip は [x, y] の2要素リストを返す
+    assert_eq(zipped[0][0], 1)
+    assert_eq(zipped[0][1], "a")
+    assert_eq(zipped[2][0], 3)
+    assert_eq(zipped[2][1], "c")
+}
+
+test "list: partition" {
+    let nums  = [1, 2, 3, 4, 5, 6]
+    let parts = nums |> partition(n => n % 2 == 0)
+    let evens = parts[0]
+    let odds  = parts[1]
+    assert_eq(evens, [2, 4, 6])
+    assert_eq(odds,  [1, 3, 5])
+}
+
+test "list: group_by" {
+    let nums = [1, 2, 3, 4, 5, 6]
+    let groups = nums |> group_by(n => if n % 2 == 0 { "even" } else { "odd" })
+    let evens = groups |> find(g => g.key == "even")
+    match evens {
+        some(g) => assert_eq(g.values |> sort(), [2, 4, 6]),
+        none    => assert(false),
+    }
+}
+
+test "student: 優等生フィルタ" {
+    let honor = students
+        |> filter(s => s.score >= 85)
+        |> map(s => s.name)
+        |> sort()
+    assert_eq(honor, ["Alice", "Carol", "Dave"])
+}
+
+test "student: 学年別平均点" {
+    let grade1_avg = students
+        |> filter(s => s.grade == 1)
+        |> map(s => s.score)
+        |> sum()
+        / (students |> count(s => s.grade == 1))
+    assert_eq(grade1_avg, 89)   // (95 + 83) / 2
+}
+
+// ----------------------------------------------------------------
+// エントリポイント
+// ----------------------------------------------------------------
+
+fn main() {
+    println("=== コレクション操作 デモ ===\n")
+    demo_list_basics()
+    demo_list_transform()
+    demo_search_aggregate()
+    println("\ndone.")
+}
+
+main()

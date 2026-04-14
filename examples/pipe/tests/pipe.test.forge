@@ -1,0 +1,144 @@
+// examples/pipe/tests/pipe.test.forge
+// forge test examples/pipe/
+
+// テストデータ
+struct Product {
+    name:     string
+    category: string
+    price:    number
+    stock:    number
+}
+
+struct Order {
+    customer: string
+    items:    list<number>
+}
+
+let products = [
+    Product { name: "Laptop",  category: "Electronics", price: 98000, stock: 5  },
+    Product { name: "Mouse",   category: "Electronics", price: 2800,  stock: 50 },
+    Product { name: "Desk",    category: "Furniture",   price: 45000, stock: 3  },
+    Product { name: "Chair",   category: "Furniture",   price: 38000, stock: 8  },
+    Product { name: "Monitor", category: "Electronics", price: 52000, stock: 12 },
+    Product { name: "Pen",     category: "Stationery",  price: 200,   stock: 200 },
+]
+
+let orders = [
+    Order { customer: "Alice", items: [1000, 2500, 800] },
+    Order { customer: "Bob",   items: [5000, 1200] },
+    Order { customer: "Carol", items: [300, 700, 1100, 2200] },
+]
+
+// ── 基本演算 ──────────────────────────────────────────────────────
+
+test "|>: filter → map → fold" {
+    let nums = [1, 2, 3, 4, 5, 6]
+    let result = nums
+        |> filter(n => n % 2 == 0)   // [2, 4, 6]
+        |> map(n => n * n)            // [4, 16, 36]
+        |> fold(0, (acc, n) => acc + n)
+    assert_eq(result, 56)
+}
+
+test "|>: 空リストは空を返す" {
+    let empty: list<number> = []
+    let result = empty |> filter(n => n > 0) |> map(n => n * 2)
+    assert_eq(result.len(), 0)
+}
+
+test "|>: take + skip の組み合わせ" {
+    let nums = [10, 20, 30, 40, 50]
+    assert_eq(nums |> take(3),            [10, 20, 30])
+    assert_eq(nums |> skip(2),            [30, 40, 50])
+    assert_eq(nums |> skip(2) |> take(2), [30, 40])
+}
+
+test "|>: fold で合計" {
+    let nums = [1, 2, 3, 4, 5]
+    assert_eq(nums |> fold(0, (acc, n) => acc + n), 15)
+}
+
+test "|>: filter の順序が結果に影響する" {
+    let nums = [1, 2, 3, 4, 5]
+    // filter → map
+    let a = nums |> filter(n => n > 2) |> map(n => n * 10)
+    assert_eq(a, [30, 40, 50])
+    // map → filter
+    let b = nums |> map(n => n * 10) |> filter(n => n > 20)
+    assert_eq(b, [30, 40, 50])
+}
+
+// ── 商品データ ────────────────────────────────────────────────────
+
+test "|>: 電子機器フィルタ" {
+    let names = products
+        |> filter(p => p.category == "Electronics")
+        |> map(p => p.name)
+        |> sort()
+    assert_eq(names, ["Laptop", "Monitor", "Mouse"])
+}
+
+test "|>: 在庫総額で上位2件" {
+    // Monitor: 52000×12=624000, Laptop: 98000×5=490000
+    struct PV { name: string, value: number }
+    let top2 = products
+        |> map(p => PV { name: p.name, value: p.price * p.stock })
+        |> order_by(p => -p.value)
+        |> take(2)
+        |> map(p => p.name)
+    assert_eq(top2[0], "Monitor")
+    assert_eq(top2[1], "Laptop")
+}
+
+test "|>: 高額商品（3万円以上）の件数" {
+    let count = products
+        |> filter(p => p.price >= 30000)
+        |> map(p => p.name)
+        |> len()
+    assert_eq(count, 4)   // Laptop, Desk, Chair, Monitor
+}
+
+test "|>: カテゴリ別グループ" {
+    let groups = products |> group_by(p => p.category)
+    let elec = groups |> find(g => g.key == "Electronics")
+    match elec {
+        some(g) => assert_eq(g.values.len(), 3),
+        none    => assert(false),
+    }
+}
+
+// ── 文字列パイプ ──────────────────────────────────────────────────
+
+test "|>: sort + join" {
+    let words = ["banana", "apple", "cherry"]
+    assert_eq(words |> sort() |> join(", "), "apple, banana, cherry")
+}
+
+test "|>: trim + capitalize + join" {
+    let words = ["  forge  ", "  script  ", "  is  ", "  fun  "]
+    let result = words
+        |> map(w => w.trim())
+        |> filter(w => w.len() > 2)
+        |> map(w => w.capitalize())
+        |> join(" ")
+    assert_eq(result, "Forge Script Fun")
+}
+
+// ── ネストパイプ ──────────────────────────────────────────────────
+
+test "|>: ネストパイプで注文合計" {
+    let totals = orders
+        |> map(o => o.items |> fold(0, (acc, p) => acc + p))
+    assert_eq(totals[0], 4300)   // Alice: 1000+2500+800
+    assert_eq(totals[1], 6200)   // Bob:   5000+1200
+    assert_eq(totals[2], 4300)   // Carol: 300+700+1100+2200
+}
+
+test "|>: 注文合計の最大値" {
+    let totals = orders
+        |> map(o => o.items |> fold(0, (acc, p) => acc + p))
+    match totals |> max() {
+        some(v) => assert_eq(v, 6200),
+        none    => assert(false),
+    }
+}

@@ -2586,7 +2586,23 @@ impl Interpreter {
                     Value::Int(int_sum)
                 })
             }
-            "count" | "len" => Ok(Value::Int(items.borrow().len() as i64)),
+            "count" => {
+                if args.is_empty() {
+                    Ok(Value::Int(items.borrow().len() as i64))
+                } else {
+                    let f = one_fn_arg(method, args)?;
+                    let list = items.borrow().clone();
+                    let mut n = 0i64;
+                    for item in list {
+                        let matched = self.call_value(f.clone(), vec![item])?;
+                        if matches!(matched, Value::Bool(true)) {
+                            n += 1;
+                        }
+                    }
+                    Ok(Value::Int(n))
+                }
+            }
+            "len" => Ok(Value::Int(items.borrow().len() as i64)),
             "fold" => {
                 if args.len() < 2 {
                     return Err(RuntimeError::Custom("fold() は引数が2つ必要です".into()));
@@ -2804,6 +2820,120 @@ impl Interpreter {
                     .collect::<Vec<_>>();
                 Ok(mk_list(groups))
             }
+            // ── 追加メソッド ─────────────────────────────────────────────
+            "sort" => {
+                let mut list = items.borrow().clone();
+                list.sort_by(|a, b| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::String(x), Value::String(y)) => x.cmp(y),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                Ok(mk_list(list))
+            }
+            "join" => {
+                let sep = one_string_arg(method, args)?;
+                let list = items.borrow();
+                let parts: Vec<String> = list.iter().map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }).collect();
+                Ok(Value::String(parts.join(sep.as_str())))
+            }
+            "dedup" => {
+                let list = items.borrow().clone();
+                let mut result: Vec<Value> = Vec::new();
+                for item in list {
+                    if result.last().map_or(true, |last| last != &item) {
+                        result.push(item);
+                    }
+                }
+                Ok(mk_list(result))
+            }
+            "find" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                for item in list {
+                    let matched = self.call_value(f.clone(), vec![item.clone()])?;
+                    if matches!(matched, Value::Bool(true)) {
+                        return Ok(Value::Option(Some(Box::new(item))));
+                    }
+                }
+                Ok(Value::Option(None))
+            }
+            "flatten" => {
+                let list = items.borrow().clone();
+                let mut result = Vec::new();
+                for item in list {
+                    match item {
+                        Value::List(inner) => result.extend(inner.borrow().clone()),
+                        other => result.push(other),
+                    }
+                }
+                Ok(mk_list(result))
+            }
+            "chunk" => {
+                let n = match args.into_iter().next() {
+                    Some(Value::Int(n)) if n > 0 => n as usize,
+                    _ => return Err(RuntimeError::Custom("chunk() には正の整数が必要です".into())),
+                };
+                let list = items.borrow().clone();
+                let chunks: Vec<Value> = list.chunks(n)
+                    .map(|c| mk_list(c.to_vec()))
+                    .collect();
+                Ok(mk_list(chunks))
+            }
+            "partition" => {
+                let f = one_fn_arg(method, args)?;
+                let list = items.borrow().clone();
+                let mut yes = Vec::new();
+                let mut no  = Vec::new();
+                for item in list {
+                    let matched = self.call_value(f.clone(), vec![item.clone()])?;
+                    if matches!(matched, Value::Bool(true)) {
+                        yes.push(item);
+                    } else {
+                        no.push(item);
+                    }
+                }
+                Ok(mk_list(vec![mk_list(yes), mk_list(no)]))
+            }
+            "take_last" => {
+                let n = match args.into_iter().next() {
+                    Some(Value::Int(n)) if n >= 0 => n as usize,
+                    _ => return Err(RuntimeError::Custom("take_last() には非負整数が必要です".into())),
+                };
+                let list = items.borrow().clone();
+                let start = list.len().saturating_sub(n);
+                Ok(mk_list(list[start..].to_vec()))
+            }
+            "unique" => {
+                let list = items.borrow().clone();
+                let mut seen: Vec<Value> = Vec::new();
+                let mut result = Vec::new();
+                for item in list {
+                    if !seen.contains(&item) {
+                        seen.push(item.clone());
+                        result.push(item);
+                    }
+                }
+                Ok(mk_list(result))
+            }
+            "concat" => {
+                let other = one_list_arg(method, args)?;
+                let mut result = items.borrow().clone();
+                result.extend(other.borrow().clone());
+                Ok(mk_list(result))
+            }
+            "contains" => {
+                let value = one_value_arg(method, args)?;
+                let list = items.borrow();
+                Ok(Value::Bool(list.iter().any(|item| item == &value)))
+            }
             other => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は list に対して未実装です",
                 other
@@ -2848,6 +2978,52 @@ impl Interpreter {
                 let pattern = one_string_arg(method, args)?;
                 Ok(Value::Bool(text.contains(pattern.as_str())))
             }
+            "trim"       => Ok(Value::String(text.trim().to_string())),
+            "trim_start" => Ok(Value::String(text.trim_start().to_string())),
+            "trim_end"   => Ok(Value::String(text.trim_end().to_string())),
+            "capitalize" => {
+                let mut chars = text.chars();
+                let s = match chars.next() {
+                    None => String::new(),
+                    Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                };
+                Ok(Value::String(s))
+            }
+            "to_upper" | "upper" => Ok(Value::String(text.to_uppercase())),
+            "to_lower" | "lower" => Ok(Value::String(text.to_lowercase())),
+            "ends_with" => {
+                let suffix = one_string_arg(method, args)?;
+                Ok(Value::Bool(text.ends_with(suffix.as_str())))
+            }
+            "replace" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::Custom("replace() は引数が2つ必要です".into()));
+                }
+                let mut it = args.into_iter();
+                let from = match it.next() {
+                    Some(Value::String(s)) => s,
+                    _ => return Err(RuntimeError::Custom("replace(): 第1引数は string が必要です".into())),
+                };
+                let to = match it.next() {
+                    Some(Value::String(s)) => s,
+                    _ => return Err(RuntimeError::Custom("replace(): 第2引数は string が必要です".into())),
+                };
+                Ok(Value::String(text.replace(from.as_str(), to.as_str())))
+            }
+            "repeat" => {
+                let n = match args.into_iter().next() {
+                    Some(Value::Int(n)) if n >= 0 => n as usize,
+                    _ => return Err(RuntimeError::Custom("repeat() には非負整数が必要です".into())),
+                };
+                Ok(Value::String(text.repeat(n)))
+            }
+            "chars" => {
+                let char_items = text.chars()
+                    .map(|c| Value::String(c.to_string()))
+                    .collect::<Vec<_>>();
+                Ok(mk_list(char_items))
+            }
+            "is_empty" => Ok(Value::Bool(text.is_empty())),
             _ => Err(RuntimeError::Custom(format!(
                 "メソッド '{}' は string に対して未実装です",
                 method
@@ -9534,5 +9710,151 @@ s == "Hello"
 "#;
         let result = eval_source(src).expect("eval failed");
         assert_eq!(result, Value::Bool(true), "round-trip");
+    }
+
+    // ── 追加リスト・文字列メソッド テスト ────────────────────────────────
+
+    #[test]
+    fn test_list_sort() {
+        let result = run(r#"
+            let nums = [3, 1, 4, 1, 5, 9, 2]
+            nums.sort()
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_list_join() {
+        let result = run(r#"
+            let words = ["hello", "world"]
+            words.join(", ")
+        "#);
+        assert_eq!(result.unwrap(), Value::String("hello, world".into()));
+    }
+
+    #[test]
+    fn test_list_find() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5]
+            nums.find(n => n > 3)
+        "#);
+        assert_eq!(result.unwrap(), Value::Option(Some(Box::new(Value::Int(4)))));
+    }
+
+    #[test]
+    fn test_list_find_none() {
+        let result = run(r#"
+            let nums = [1, 2, 3]
+            nums.find(n => n > 10)
+        "#);
+        assert_eq!(result.unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn test_list_flatten() {
+        let result = run(r#"
+            let nested = [[1, 2], [3, 4], [5]]
+            nested.flatten()
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_list_chunk() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5]
+            nums.chunk(2)
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_list_partition() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5, 6]
+            nums.partition(n => n % 2 == 0)
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_list_unique() {
+        let result = run(r#"
+            let nums = [1, 2, 2, 3, 1, 4]
+            nums.unique()
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_list_count_with_fn() {
+        let result = run(r#"
+            let nums = [1, 2, 3, 4, 5]
+            nums.count(n => n > 3)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(2));
+    }
+
+    #[test]
+    fn test_list_concat() {
+        let result = run(r#"
+            let a = [1, 2, 3]
+            let b = [4, 5, 6]
+            a.concat(b)
+        "#);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_string_trim() {
+        let result = run(r#""  hello  ".trim()"#);
+        assert_eq!(result.unwrap(), Value::String("hello".into()));
+    }
+
+    #[test]
+    fn test_string_to_upper() {
+        let result = run(r#""hello".to_upper()"#);
+        assert_eq!(result.unwrap(), Value::String("HELLO".into()));
+    }
+
+    #[test]
+    fn test_string_to_lower() {
+        let result = run(r#""HELLO".to_lower()"#);
+        assert_eq!(result.unwrap(), Value::String("hello".into()));
+    }
+
+    #[test]
+    fn test_string_ends_with() {
+        let result = run(r#""hello world".ends_with("world")"#);
+        assert_eq!(result.unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_string_replace() {
+        let result = run(r#""hello world".replace("world", "forge")"#);
+        assert_eq!(result.unwrap(), Value::String("hello forge".into()));
+    }
+
+    #[test]
+    fn test_string_repeat() {
+        let result = run(r#""ab".repeat(3)"#);
+        assert_eq!(result.unwrap(), Value::String("ababab".into()));
+    }
+
+    #[test]
+    fn test_string_is_empty() {
+        let r1 = run(r#""".is_empty()"#);
+        assert_eq!(r1.unwrap(), Value::Bool(true));
+        let r2 = run(r#""a".is_empty()"#);
+        assert_eq!(r2.unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_pipe_sort_join() {
+        let result = run(r#"
+            let words = ["banana", "apple", "cherry"]
+            words.sort().join(", ")
+        "#);
+        assert_eq!(result.unwrap(), Value::String("apple, banana, cherry".into()));
     }
 }
