@@ -305,6 +305,83 @@ Rustの難しい部分（borrow checker・lifetime・`Box<dyn Trait>`・`Pin`・
 
 ---
 
+## アーキテクチャ
+
+Forge は大きく 2 系統で動きます。
+
+- `forge run` / `forge test`: AST を `forge-vm` がそのまま実行します
+- `forge build` / `forge transpile`: AST を `forge-transpiler` が Rust に変換し、`cargo build` でネイティブバイナリにします
+
+### 処理フロー
+
+```mermaid
+flowchart TD
+    A[".forge source"] --> B["forge-cli"]
+    B --> C["forge-compiler::lexer"]
+    C --> D["forge-compiler::parser"]
+    D --> E["AST (`Module` / `Stmt` / `Expr`)"]
+
+    E --> F["forge check"]
+    F --> G["forge-compiler::typechecker"]
+    G --> H["Type errors"]
+
+    E --> I["forge run"]
+    I --> J["forge-vm::Interpreter"]
+    J --> K["Runtime execution"]
+
+    E --> L["forge test"]
+    L --> M["forge-vm::Interpreter::run_tests"]
+    M --> N["Test results"]
+
+    E --> O["forge transpile / forge build"]
+    O --> P["forge-transpiler::CodeGenerator"]
+    P --> Q["Generated Rust code"]
+    Q --> R["cargo build"]
+    R --> S["Native binary"]
+```
+
+### クレート依存
+
+```mermaid
+flowchart LR
+    CLI["forge-cli"]
+    COMP["forge-compiler"]
+    VM["forge-vm"]
+    STD["forge-stdlib"]
+    TRANS["forge-transpiler"]
+    MCP["forge-mcp"]
+
+    CLI --> COMP
+    CLI --> VM
+    CLI --> TRANS
+    CLI --> MCP
+
+    VM --> COMP
+    VM --> STD
+
+    TRANS --> COMP
+
+    MCP --> VM
+```
+
+### 実行系とビルド系
+
+```mermaid
+flowchart TB
+    SRC["Forge source"] --> AST["AST"]
+
+    AST --> RUN["Interpreter path"]
+    RUN --> RUNVM["forge-vm"]
+    RUNVM --> RUNOUT["forge run / forge test"]
+
+    AST --> BUILD["Codegen path"]
+    BUILD --> RUST["Rust code"]
+    RUST --> CARGO["cargo build"]
+    CARGO --> BIN["native executable"]
+```
+
+現状、Forge 独自のバイトコード VM はありません。実行時は AST を直接評価し、ビルド時は Rust を生成して Rust toolchain に渡します。
+
 ## プロジェクト構成
 
 ```
