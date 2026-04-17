@@ -1,0 +1,20 @@
+struct User {
+  name: string
+  score: number
+}
+
+fn top_name(users: list<User>) -> string {
+  users
+    |> filter(u => u.score > 80)
+    |> map(u => u.name)
+    |> first()
+    |> unwrap_or("none")
+}
+
+let users: list<User> = [
+  User { name: "Ada", score: 91 },
+  User { name: "Bob", score: 72 }
+]
+
+let result = top_name(users)
+let broken = users.mapp(u => u.name)

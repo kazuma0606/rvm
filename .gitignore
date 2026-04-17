@@ -23,12 +23,16 @@
 *.dll
 *.exe
 
+.vscode-test/
+
 # Zig build cache
 .zig-cache/
 .zig-global-cache/
 
 # Alternate build targets
 target-anvil/
+
+target-g5/
 
 # Local MCP config (machine-specific paths)
 .mcp.json

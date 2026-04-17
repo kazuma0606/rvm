@@ -1,0 +1,113 @@
+// examples/goblet/src/main.forge
+// forge run examples/goblet/
+// forge goblet graph examples/goblet/src/main.forge --format text
+
+struct Student {
+    name:  string
+    grade: number
+    score: number
+}
+
+struct Badge {
+    title: string
+}
+
+let students = [
+    Student { name: "Alice", grade: 3, score: 92 },
+    Student { name: "Bob",   grade: 2, score: 78 },
+    Student { name: "Carol", grade: 3, score: 88 },
+    Student { name: "Dave",  grade: 1, score: 95 },
+]
+
+fn find_student(name: string) -> Student? {
+    students |> find(s => s.name == name)
+}
+
+fn badge_title(score: number) -> string! {
+    if score >= 90 { ok("Honor") }
+    else           { err("score too low: {score}") }
+}
+
+fn summarize_roster() -> string {
+    students
+        |> group_by(s => if s.score >= 90 { "star" } else { "member" })
+        |> map(group => "{group.key}:{group.values.len()}")
+        |> join(", ")
+}
+
+fn roster_cards() -> string {
+    students
+        |> map(s => { name: s.name, grade: s.grade })
+        |> map(card => "{card.name}-{card.grade}")
+        |> join(", ")
+}
+
+fn top_cards() -> string {
+    students
+        |> map(s => { name: s.name, grade: s.grade, score: s.score })
+        |> filter(card => card.score >= 90)
+        |> map(card => card.name)
+        |> join(", ")
+}
+
+fn preferred_badge(name: string) -> string {
+    find_student(name)
+        |> map(s => Badge { title: "{s.name}-{s.grade}" })
+        |> map(b => b.title)
+        |> unwrap_or("guest")
+}
+
+fn promoted_badge(name: string) -> string {
+    find_student(name)
+        |> and_then(s => if s.score >= 90 { some(Badge { title: "top-{s.name}" }) } else { none })
+        |> map(b => b.title)
+        |> unwrap_or("guest")
+}
+
+fn has_student(name: string) -> bool {
+    find_student(name).is_some()
+}
+
+fn missing_student(name: string) -> bool {
+    find_student(name).is_none()
+}
+
+fn resolved_badge(score: number) -> string {
+    badge_title(score).unwrap_or("standard")
+}
+
+fn optional_badge(score: number) -> string {
+    badge_title(score).ok().unwrap_or("none")
+}
+
+fn main() {
+    let summary = summarize_roster()
+    let cards = roster_cards()
+    let top = top_cards()
+    let alice = preferred_badge("Alice")
+    let nobody = preferred_badge("Nobody")
+    let promoted = promoted_badge("Dave")
+    let blocked = promoted_badge("Bob")
+    let badge95 = resolved_badge(95)
+    let badge70 = resolved_badge(70)
+    let optional95 = optional_badge(95)
+    let optional70 = optional_badge(70)
+    let has_alice = has_student("Alice")
+    let missing_zed = missing_student("Zed")
+
+    println("summary={summary}")
+    println("cards={cards}")
+    println("top={top}")
+    println("alice={alice}")
+    println("nobody={nobody}")
+    println("promoted={promoted}")
+    println("blocked={blocked}")
+    println("badge95={badge95}")
+    println("badge70={badge70}")
+    println("optional95={optional95}")
+    println("optional70={optional70}")
+    println("has_alice={has_alice}")
+    println("missing_zed={missing_zed}")
+}
+
+main()

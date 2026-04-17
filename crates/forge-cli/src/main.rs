@@ -16,8 +16,16 @@ use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
 use forge_compiler::typechecker::type_check_source;
+use forge_goblet::{
+    analyze_source as goblet_analyze_source,
+    expand_closure_details as goblet_expand_closure_details, render_json as goblet_render_json,
+    render_mermaid as goblet_render_mermaid, render_text as goblet_render_text, NodeStatus,
+    PipelineGraph,
+};
 use forge_transpiler::transpile;
-use forge_vm::interpreter::Interpreter;
+use forge_vm::interpreter::{
+    Interpreter, PipelineTraceEvent, PipelineTraceNodeRef, PipelineTraceOutcome,
+};
 use forge_vm::value::Value;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +93,12 @@ fn main() {
                 .position(|s| s == "-o")
                 .and_then(|i| args.get(i + 1));
             build_entry(args.get(2).map(|s| s.as_str()), output.map(|s| s.as_str()));
+        }
+        Some("goblet") => {
+            goblet_entry(&args);
+        }
+        Some("lsp") => {
+            forge_lsp::run_stdio_blocking();
         }
         Some("test") => {
             let filter = args
@@ -507,6 +521,434 @@ fn check_file(path: &str) {
         }
         std::process::exit(1);
     }
+}
+
+fn goblet_entry(args: &[String]) {
+    let code = match args.get(2).map(|s| s.as_str()) {
+        Some("graph") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!(
+                    "使用方法: forge goblet graph <file> [--format text|json|mermaid] [--output <file>] [--function <name>] [--include-closures]"
+                );
+                std::process::exit(1);
+            };
+            let format = args
+                .iter()
+                .position(|arg| arg == "--format")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("text");
+            let output = args
+                .iter()
+                .position(|arg| arg == "--output")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            let function = args
+                .iter()
+                .position(|arg| arg == "--function")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            let include_closures = args.iter().any(|arg| arg == "--include-closures");
+            run_goblet_graph(path, format, output, function, include_closures)
+        }
+        Some("explain") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge goblet explain <file> [--function <name>] [--line N]");
+                std::process::exit(1);
+            };
+            let function = args
+                .iter()
+                .position(|arg| arg == "--function")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            let line = args
+                .iter()
+                .position(|arg| arg == "--line")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse::<usize>().ok());
+            run_goblet_explain(path, function, line)
+        }
+        Some("dump") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge goblet dump <file>");
+                std::process::exit(1);
+            };
+            run_goblet_dump(path)
+        }
+        _ => {
+            eprintln!("エラー: 未知の goblet サブコマンドです");
+            eprintln!("使用可能: forge goblet graph / explain / dump");
+            std::process::exit(1);
+        }
+    };
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// 終了コード: 0=正常, 1=型エラーあり, 2=解析失敗
+fn run_goblet_graph(
+    path: &str,
+    format: &str,
+    output: Option<&str>,
+    function: Option<&str>,
+    include_closures: bool,
+) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            return 2;
+        }
+    };
+    let graphs = match goblet_analyze_source(&source) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("解析エラー: {}", e);
+            return 2;
+        }
+    };
+    if graphs.is_empty() {
+        eprintln!("pipeline が見つかりませんでした");
+        return 2;
+    }
+
+    let graphs: Vec<_> = graphs
+        .into_iter()
+        .filter(|graph| graph_matches_function(graph, function))
+        .map(|graph| {
+            if include_closures {
+                goblet_expand_closure_details(&graph)
+            } else {
+                graph
+            }
+        })
+        .collect();
+
+    if graphs.is_empty() {
+        eprintln!("条件に一致する pipeline が見つかりませんでした");
+        return 2;
+    }
+
+    let has_type_errors = graphs
+        .iter()
+        .any(|g| g.nodes.iter().any(|n| n.status == NodeStatus::Error));
+
+    let rendered = match format {
+        "text" => render_graph_collection_text(&graphs),
+        "json" => format!(
+            "[\n{}\n]",
+            graphs
+                .iter()
+                .map(goblet_render_json)
+                .collect::<Vec<_>>()
+                .join(",\n")
+        ),
+        "mermaid" => render_graph_collection_mermaid(&graphs),
+        other => {
+            eprintln!("未対応の format です: {} (text|json|mermaid)", other);
+            return 2;
+        }
+    };
+
+    if let Some(out) = output {
+        let content = if format == "mermaid" {
+            render_graph_collection_mermaid_markdown(&graphs)
+        } else {
+            rendered
+        };
+        if let Err(e) = fs::write(out, content) {
+            eprintln!("ファイル書き込みエラー: {}", e);
+            return 2;
+        }
+    } else {
+        print!("{rendered}");
+    }
+
+    if has_type_errors {
+        1
+    } else {
+        0
+    }
+}
+
+fn graph_matches_function(graph: &PipelineGraph, function: Option<&str>) -> bool {
+    let Some(function) = function else {
+        return true;
+    };
+
+    graph.function_name.as_deref() == Some(function)
+        || graph.roots.iter().any(|rid| {
+            graph
+                .nodes
+                .iter()
+                .find(|n| n.id == *rid)
+                .is_some_and(|n| n.label == function)
+        })
+}
+
+fn pipeline_heading(graph: &PipelineGraph, idx: usize) -> String {
+    match graph.function_name.as_deref() {
+        Some(name) => format!(
+            "=== Pipeline {} [{}] ({} nodes) ===",
+            idx + 1,
+            name,
+            graph.nodes.len()
+        ),
+        None => format!("=== Pipeline {} ({} nodes) ===", idx + 1, graph.nodes.len()),
+    }
+}
+
+fn render_graph_collection_text(graphs: &[PipelineGraph]) -> String {
+    if graphs.len() == 1 {
+        return goblet_render_text(&graphs[0]);
+    }
+
+    graphs
+        .iter()
+        .enumerate()
+        .map(|(idx, graph)| {
+            format!(
+                "{}\n{}",
+                pipeline_heading(graph, idx),
+                goblet_render_text(graph)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_graph_collection_mermaid(graphs: &[PipelineGraph]) -> String {
+    if graphs.len() == 1 {
+        return goblet_render_mermaid(&graphs[0]);
+    }
+
+    graphs
+        .iter()
+        .enumerate()
+        .map(|(idx, graph)| {
+            format!(
+                "%% {}\n{}",
+                pipeline_heading(graph, idx),
+                goblet_render_mermaid(graph)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_graph_collection_mermaid_markdown(graphs: &[PipelineGraph]) -> String {
+    graphs
+        .iter()
+        .enumerate()
+        .map(|(idx, graph)| {
+            if graphs.len() == 1 {
+                format!("```mermaid\n{}```\n", goblet_render_mermaid(graph))
+            } else {
+                format!(
+                    "## {}\n```mermaid\n{}```\n",
+                    pipeline_heading(graph, idx),
+                    goblet_render_mermaid(graph)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// パイプラインの詳細を人間向けテキストで表示する。
+/// --function <name> で特定の root ラベルを持つグラフに絞り込める。
+/// --line N でそのノードのスパンに行 N を含むグラフに絞り込める。
+/// 終了コード: 0=正常, 1=型エラーあり, 2=解析失敗
+fn run_goblet_explain(path: &str, function: Option<&str>, line: Option<usize>) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            return 2;
+        }
+    };
+    let graphs = match goblet_analyze_source(&source) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("解析エラー: {}", e);
+            return 2;
+        }
+    };
+
+    let filtered: Vec<_> = graphs
+        .iter()
+        .filter(|g| graph_matches_function(g, function))
+        .filter(|g| {
+            if let Some(ln) = line {
+                g.nodes.iter().any(|n| {
+                    n.span
+                        .as_ref()
+                        .map_or(false, |s| s.line <= ln && ln <= s.line)
+                })
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        eprintln!("条件に一致する pipeline が見つかりませんでした");
+        return 2;
+    }
+
+    let trace_events = collect_goblet_runtime_trace(path, &source, &filtered);
+    let mut has_type_errors = false;
+    for (idx, graph) in filtered.iter().enumerate() {
+        println!("=== Pipeline {} ({} nodes) ===", idx + 1, graph.nodes.len());
+        for node in &graph.nodes {
+            let status_str = match node.status {
+                NodeStatus::Ok => "ok",
+                NodeStatus::Warning => "warning",
+                NodeStatus::Error => {
+                    has_type_errors = true;
+                    "ERROR"
+                }
+                NodeStatus::Unknown => "unknown",
+            };
+            println!(
+                "[N{}] {:<28} {:?}  [{}]",
+                node.id.0, node.label, node.kind, status_str
+            );
+            if let Some(it) = &node.input_type {
+                println!("     input:  {}", it.display);
+            }
+            if let Some(ot) = &node.output_type {
+                println!("     output: {}", ot.display);
+            }
+            if let Some(di) = &node.data_info {
+                let shape_str = format!("{:?}", di.shape);
+                println!("     shape:  {}  state: {:?}", shape_str, di.state);
+                if let Some(pname) = &di.param_name {
+                    println!("     param:  {}", pname);
+                }
+            }
+            for note in &node.notes {
+                println!("     note:   {}", note);
+            }
+            if let Some(span) = &node.span {
+                println!("     span:   line {}, col {}", span.line, span.col);
+            }
+            for event in trace_events
+                .iter()
+                .filter(|event| event.node_id == Some(node.id.0))
+            {
+                println!(
+                    "     trace:  outcome={} items={}",
+                    trace_outcome_label(&event.outcome),
+                    event
+                        .item_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                );
+                if let Some(message) = &event.message {
+                    println!("     trace:  message={}", message);
+                }
+            }
+            println!();
+        }
+        if graph.diagnostics.is_empty() {
+            println!("  Diagnostics: none\n");
+        } else {
+            println!("  Diagnostics:");
+            for d in &graph.diagnostics {
+                let node_ref = d.node_id.map_or("—".to_string(), |id| format!("N{}", id.0));
+                println!("  [{}] {} at {}: {}", d.code, d.code, node_ref, d.message);
+                if let Some(exp) = &d.expected {
+                    println!("      expected: {}", exp);
+                }
+                if let Some(act) = &d.actual {
+                    println!("      actual:   {}", act);
+                }
+            }
+            println!();
+        }
+    }
+
+    if has_type_errors {
+        1
+    } else {
+        0
+    }
+}
+
+fn collect_goblet_runtime_trace(
+    path: &str,
+    source: &str,
+    graphs: &[&PipelineGraph],
+) -> Vec<PipelineTraceEvent> {
+    let module = match parse_source(source) {
+        Ok(module) => module,
+        Err(_) => return Vec::new(),
+    };
+
+    let node_refs = graphs
+        .iter()
+        .flat_map(|graph| {
+            graph.nodes.iter().filter_map(|node| {
+                node.span.as_ref().map(|span| PipelineTraceNodeRef {
+                    node_id: node.id.0,
+                    start: span.start,
+                    end: span.end,
+                    line: span.line,
+                    col: span.col,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let (mut interp, _) = Interpreter::with_file_path_and_output_capture(Path::new(path));
+    interp.set_pipeline_trace_nodes(node_refs);
+    if interp.eval(&module).is_err() {
+        return interp.take_pipeline_trace_events();
+    }
+    interp.take_pipeline_trace_events()
+}
+
+fn trace_outcome_label(outcome: &PipelineTraceOutcome) -> &'static str {
+    match outcome {
+        PipelineTraceOutcome::Ok => "ok",
+        PipelineTraceOutcome::FindNone => "find_none",
+        PipelineTraceOutcome::ResultErr => "result_err",
+    }
+}
+
+/// パイプライングラフを JSON で生ダンプする（デバッグ用）。
+/// 終了コード: 0=正常, 2=解析失敗
+fn run_goblet_dump(path: &str) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            return 2;
+        }
+    };
+    let graphs = match goblet_analyze_source(&source) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("解析エラー: {}", e);
+            return 2;
+        }
+    };
+
+    let json = format!(
+        "[\n{}\n]",
+        graphs
+            .iter()
+            .map(goblet_render_json)
+            .collect::<Vec<_>>()
+            .join(",\n")
+    );
+    println!("{json}");
+    0
 }
 
 fn transpile_file(path: &str, output: Option<&str>) {
@@ -1298,6 +1740,8 @@ fn print_help() {
     println!("  forge check <file.forge>            型チェックのみ（実行しない）");
     println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
     println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");
+    println!("  forge goblet graph <file.forge>     パイプライン可視化を出力");
+    println!("  forge lsp                           LSP サーバをstdioモードで起動");
     println!("  forge build                         forge.toml からバイナリを生成");
     println!("  forge build <dir/>                  指定ディレクトリの forge.toml を使用");
     println!("  forge build <file.forge>            単一ファイルからバイナリを生成");

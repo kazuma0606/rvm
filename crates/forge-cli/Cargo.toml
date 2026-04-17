@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 forge-compiler = { path = "../forge-compiler" }
+forge-goblet = { path = "../forge-goblet" }
+forge-lsp = { path = "../forge-lsp" }
 forge-vm = { path = "../forge-vm" }
 forge-stdlib = { path = "../forge-stdlib" }
 forge-transpiler = { path = "../forge-transpiler" }

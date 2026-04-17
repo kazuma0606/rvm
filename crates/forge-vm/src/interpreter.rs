@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 use forge_compiler::ast::*;
 use forge_compiler::deps::DepsManager;
+use forge_compiler::lexer::Span;
 use forge_compiler::loader::{ModForgeExport, ModuleLoader};
 use wasmtime::{Engine, Instance, Module as WasmModule, Store};
 
@@ -182,6 +183,35 @@ pub struct ImportInfo {
     pub used: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineTraceOutcome {
+    Ok,
+    FindNone,
+    ResultErr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineTraceNodeRef {
+    pub node_id: usize,
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineTraceEvent {
+    pub node_id: Option<usize>,
+    pub method: String,
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub col: usize,
+    pub item_count: Option<usize>,
+    pub outcome: PipelineTraceOutcome,
+    pub message: Option<String>,
+}
+
 // ── インタプリタ ─────────────────────────────────────────────────────────────
 
 pub struct Interpreter {
@@ -208,6 +238,10 @@ pub struct Interpreter {
     pub loaded_modules: HashMap<String, Vec<String>>,
     /// 出力バッファ: Some の場合 print/println はここに書き込む（MCP 等でのキャプチャ用）
     pub output_buffer: Option<Arc<Mutex<String>>>,
+    /// Goblet 用のパイプライントレース設定
+    pipeline_trace_nodes: Vec<PipelineTraceNodeRef>,
+    /// Goblet 用の実行時トレースイベント
+    pub pipeline_trace_events: Vec<PipelineTraceEvent>,
 }
 
 impl Interpreter {
@@ -224,6 +258,8 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            pipeline_trace_nodes: Vec::new(),
+            pipeline_trace_events: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -235,6 +271,16 @@ impl Interpreter {
         let mut interp = Self::new();
         interp.output_buffer = Some(Arc::clone(&buf));
         // output_buffer が設定されているので register_builtins を再実行して print を上書き
+        interp.register_print_builtins();
+        (interp, buf)
+    }
+
+    pub fn with_file_path_and_output_capture(
+        path: &std::path::Path,
+    ) -> (Self, Arc<Mutex<String>>) {
+        let buf = Arc::new(Mutex::new(String::new()));
+        let mut interp = Self::with_file_path(path);
+        interp.output_buffer = Some(Arc::clone(&buf));
         interp.register_print_builtins();
         (interp, buf)
     }
@@ -291,6 +337,8 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            pipeline_trace_nodes: Vec::new(),
+            pipeline_trace_events: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -310,6 +358,8 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            pipeline_trace_nodes: Vec::new(),
+            pipeline_trace_events: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -336,9 +386,20 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            pipeline_trace_nodes: Vec::new(),
+            pipeline_trace_events: Vec::new(),
         };
         interp.register_builtins();
         interp
+    }
+
+    pub fn set_pipeline_trace_nodes(&mut self, nodes: Vec<PipelineTraceNodeRef>) {
+        self.pipeline_trace_nodes = nodes;
+        self.pipeline_trace_events.clear();
+    }
+
+    pub fn take_pipeline_trace_events(&mut self) -> Vec<PipelineTraceEvent> {
+        std::mem::take(&mut self.pipeline_trace_events)
     }
 
     /// 未使用インポートの警告を stderr に出力する（M-4-C）
@@ -351,6 +412,55 @@ impl Interpreter {
                 );
             }
         }
+    }
+
+    fn record_pipeline_trace(&mut self, span: &Span, method: &str, value: &Value) {
+        self.pipeline_trace_events.push(PipelineTraceEvent {
+            node_id: self.resolve_pipeline_trace_node_id(span, method),
+            method: method.to_string(),
+            start: span.start,
+            end: span.end,
+            line: span.line,
+            col: span.col,
+            item_count: pipeline_item_count(value),
+            outcome: pipeline_trace_outcome(method, value),
+            message: pipeline_trace_message(value),
+        });
+    }
+
+    fn resolve_pipeline_trace_node_id(&self, span: &Span, method: &str) -> Option<usize> {
+        self.pipeline_trace_nodes
+            .iter()
+            .find(|node| {
+                node.line == span.line
+                    && node.col == span.col
+                    && node.start == span.start
+                    && node.end == span.end
+            })
+            .map(|node| node.node_id)
+            .or_else(|| {
+                self.pipeline_trace_nodes
+                    .iter()
+                    .find(|node| {
+                        node.line == span.line
+                            && node.col == span.col
+                            && span.start >= node.start
+                            && span.end <= node.end
+                    })
+                    .map(|node| node.node_id)
+            })
+            .or_else(|| {
+                self.pipeline_trace_nodes
+                    .iter()
+                    .find(|node| node.line == span.line && node.col == span.col)
+                    .map(|node| node.node_id)
+            })
+            .or_else(|| {
+                self.pipeline_trace_nodes
+                    .iter()
+                    .find(|node| node.line == span.line && method == "?")
+                    .map(|node| node.node_id)
+            })
     }
 
     /// REPL 用: 指定モジュールをアンロードし、そのシンボルをスコープから削除する（M-7-A）
@@ -1725,15 +1835,15 @@ impl Interpreter {
                 object,
                 method,
                 args,
-                ..
-            } => self.eval_method_call(object, method, args),
+                span,
+            } => self.eval_method_call(object, method, args, Some(span)),
             Expr::Closure { params, body, .. } => self.eval_closure(params, body),
             Expr::Await { expr, .. } => self.eval_expr(expr),
             Expr::Spawn { body, .. } => {
                 let result = self.eval_expr(body)?;
                 Ok(Value::Option(Some(Box::new(result))))
             }
-            Expr::Question(inner, _) => self.eval_question(inner),
+            Expr::Question(inner, span) => self.eval_question(inner, Some(span)),
             Expr::Interpolation { parts, .. } => self.eval_interpolation(parts),
             Expr::Range {
                 start,
@@ -2255,6 +2365,7 @@ impl Interpreter {
         object: &Expr,
         method: &str,
         args: &[Expr],
+        span: Option<&Span>,
     ) -> Result<Value, RuntimeError> {
         if let Expr::Ident(type_name, _) = object {
             if is_utility_type_name(type_name) {
@@ -2316,7 +2427,7 @@ impl Interpreter {
             return Ok(obj.clone());
         }
 
-        match obj {
+        let result = match obj {
             Value::Option(opt) => match method {
                 "is_some" => Ok(Value::Bool(opt.is_some())),
                 "is_none" => Ok(Value::Bool(opt.is_none())),
@@ -2377,6 +2488,37 @@ impl Interpreter {
             Value::Result(result) => match method {
                 "is_ok" => Ok(Value::Bool(result.is_ok())),
                 "is_err" => Ok(Value::Bool(result.is_err())),
+                "map" => {
+                    let f = one_fn_arg(method, arg_vals)?;
+                    match result {
+                        Ok(inner) => {
+                            let mapped = self.call_value(f, vec![*inner])?;
+                            Ok(Value::Result(Ok(Box::new(mapped))))
+                        }
+                        Err(msg) => Ok(Value::Result(Err(msg))),
+                    }
+                }
+                "and_then" => {
+                    let f = one_fn_arg(method, arg_vals)?;
+                    match result {
+                        Ok(inner) => match self.call_value(f, vec![*inner])? {
+                            Value::Result(result) => Ok(Value::Result(result)),
+                            other => Err(type_err("result", other.type_name())),
+                        },
+                        Err(msg) => Ok(Value::Result(Err(msg))),
+                    }
+                }
+                "unwrap_or" => {
+                    let fallback = arg_vals.into_iter().next().unwrap_or(Value::Unit);
+                    Ok(match result {
+                        Ok(inner) => *inner,
+                        Err(_) => fallback,
+                    })
+                }
+                "ok" => Ok(match result {
+                    Ok(inner) => Value::Option(Some(inner)),
+                    Err(_) => Value::Option(None),
+                }),
                 other => Err(RuntimeError::Custom(format!(
                     "メソッド '{}' は result に対して未実装です",
                     other
@@ -2415,7 +2557,13 @@ impl Interpreter {
                 method,
                 other.type_name()
             ))),
+        };
+
+        if let (Some(span), Ok(value)) = (span, result.as_ref()) {
+            self.record_pipeline_trace(span, method, value);
         }
+
+        result
     }
 
     /// TypeName::method() のような静的メソッド呼び出し
@@ -3214,10 +3362,25 @@ impl Interpreter {
         })
     }
 
-    fn eval_question(&mut self, inner: &Expr) -> Result<Value, RuntimeError> {
+    fn eval_question(&mut self, inner: &Expr, span: Option<&Span>) -> Result<Value, RuntimeError> {
         match self.eval_expr(inner)? {
             Value::Result(Ok(v)) => Ok(*v),
-            Value::Result(Err(e)) => Err(RuntimeError::PropagateErr(e)),
+            Value::Result(Err(e)) => {
+                if let Some(span) = span {
+                    self.pipeline_trace_events.push(PipelineTraceEvent {
+                        node_id: self.resolve_pipeline_trace_node_id(span, "?"),
+                        method: "?".to_string(),
+                        start: span.start,
+                        end: span.end,
+                        line: span.line,
+                        col: span.col,
+                        item_count: Some(0),
+                        outcome: PipelineTraceOutcome::ResultErr,
+                        message: Some(e.clone()),
+                    });
+                }
+                Err(RuntimeError::PropagateErr(e))
+            }
             v => Err(type_err("result", v.type_name())),
         }
     }
@@ -4356,6 +4519,10 @@ impl Interpreter {
             Value::Result(result) => match method {
                 "is_ok" => Ok(Value::Bool(result.is_ok())),
                 "is_err" => Ok(Value::Bool(result.is_err())),
+                "ok" => Ok(match result {
+                    Ok(inner) => Value::Option(Some(inner)),
+                    Err(_) => Value::Option(None),
+                }),
                 other => Err(RuntimeError::Custom(format!(
                     "オプショナルチェーン経由では result で '{}' は使えません",
                     other
@@ -4980,6 +5147,32 @@ impl Default for Interpreter {
 /// 新しいリスト Value を生成する
 fn mk_list(items: Vec<Value>) -> Value {
     Value::List(Rc::new(RefCell::new(items)))
+}
+
+fn pipeline_item_count(value: &Value) -> Option<usize> {
+    match value {
+        Value::List(items) => Some(items.borrow().len()),
+        Value::Option(Some(_)) => Some(1),
+        Value::Option(None) => Some(0),
+        Value::Result(Ok(_)) => Some(1),
+        Value::Result(Err(_)) => Some(0),
+        _ => None,
+    }
+}
+
+fn pipeline_trace_outcome(method: &str, value: &Value) -> PipelineTraceOutcome {
+    match (method, value) {
+        ("find", Value::Option(None)) => PipelineTraceOutcome::FindNone,
+        (_, Value::Result(Err(_))) => PipelineTraceOutcome::ResultErr,
+        _ => PipelineTraceOutcome::Ok,
+    }
+}
+
+fn pipeline_trace_message(value: &Value) -> Option<String> {
+    match value {
+        Value::Result(Err(message)) => Some(message.clone()),
+        _ => None,
+    }
 }
 
 /// 2つの Value を大小比較する（Int / Float / String / @derive(Ord) な Struct 対応）
@@ -7142,6 +7335,28 @@ mod tests {
 
     fn run(src: &str) -> Result<Value, RuntimeError> {
         eval_source(src)
+    }
+
+    fn run_with_trace(
+        src: &str,
+        nodes: Vec<PipelineTraceNodeRef>,
+    ) -> Result<(Value, Vec<PipelineTraceEvent>), RuntimeError> {
+        let module = parse_source(src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let mut interp = Interpreter::new();
+        interp.set_pipeline_trace_nodes(nodes);
+        let value = interp.eval(&module)?;
+        Ok((value, interp.take_pipeline_trace_events()))
+    }
+
+    fn first_method_span(module: &Module) -> Span {
+        match &module.stmts[0] {
+            Stmt::Expr(Expr::MethodCall { span, .. }) => span.clone(),
+            Stmt::Let {
+                value: Expr::MethodCall { span, .. },
+                ..
+            } => span.clone(),
+            other => panic!("expected method call, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10111,6 +10326,53 @@ s == "Hello"
     }
 
     #[test]
+    fn test_pipeline_trace_records_find_none() {
+        let src = "let missing = [1, 2, 3].find(n => n > 10)";
+        let module = parse_source(src).expect("parse");
+        let span = first_method_span(&module);
+        let (_, trace) = run_with_trace(
+            src,
+            vec![PipelineTraceNodeRef {
+                node_id: 7,
+                start: span.start,
+                end: span.end,
+                line: span.line,
+                col: span.col,
+            }],
+        )
+        .expect("run");
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].node_id, Some(7));
+        assert_eq!(trace[0].method, "find");
+        assert_eq!(trace[0].item_count, Some(0));
+        assert_eq!(trace[0].outcome, PipelineTraceOutcome::FindNone);
+    }
+
+    #[test]
+    fn test_pipeline_trace_records_result_err() {
+        let src = r#"let value = err("oops").map(x => x)"#;
+        let module = parse_source(src).expect("parse");
+        let span = first_method_span(&module);
+        let (_, trace) = run_with_trace(
+            src,
+            vec![PipelineTraceNodeRef {
+                node_id: 9,
+                start: span.start,
+                end: span.end,
+                line: span.line,
+                col: span.col,
+            }],
+        )
+        .expect("run");
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].node_id, Some(9));
+        assert_eq!(trace[0].method, "map");
+        assert_eq!(trace[0].item_count, Some(0));
+        assert_eq!(trace[0].outcome, PipelineTraceOutcome::ResultErr);
+        assert_eq!(trace[0].message.as_deref(), Some("oops"));
+    }
+
+    #[test]
     fn test_option_and_then_some() {
         let result = run(r#"
             let opt = some(4)
@@ -10237,6 +10499,32 @@ s == "Hello"
             nums |> find(n => n > 3) |> and_then(n => if n > 4 { some(n * 10) } else { none }) |> unwrap_or(0)
         "#);
         assert_eq!(result.unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn test_result_unwrap_or_ok() {
+        let result = run(r#"
+            let value = ok(42)
+            value.unwrap_or(0)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_result_unwrap_or_err() {
+        let result = run(r#"
+            let value = err("oops")
+            value.unwrap_or(99)
+        "#);
+        assert_eq!(result.unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn test_result_ok_some_and_none() {
+        let ok_value = run(r#"ok(7).ok().unwrap_or(0)"#).unwrap();
+        let err_value = run(r#"err("oops").ok().unwrap_or(0)"#).unwrap();
+        assert_eq!(ok_value, Value::Int(7));
+        assert_eq!(err_value, Value::Int(0));
     }
 
     #[test]

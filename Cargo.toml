@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     # 言語コア
     "crates/forge-compiler",
+    "crates/forge-goblet",
+    "crates/forge-lsp",
     "crates/forge-vm",
     "crates/forge-stdlib",
     "crates/forge-transpiler",

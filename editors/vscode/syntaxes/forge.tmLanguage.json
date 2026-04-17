@@ -1,0 +1,100 @@
+{
+  "scopeName": "source.forge",
+  "name": "ForgeScript",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#types"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.forge",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.forge",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.forge",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.forge",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "include": "#keywords"
+                },
+                {
+                  "include": "#operators"
+                },
+                {
+                  "include": "#numbers"
+                },
+                {
+                  "include": "#types"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.forge",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.forge",
+          "match": "\\b(let|fn|if|else|match|for|in|use|struct|enum|return|some|none|ok|err)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.forge",
+          "match": "\\|>|=>|\\?|!|\\.\\."
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.annotation.forge",
+          "match": ":\\s*[A-Za-z][A-Za-z0-9_<>?!]*"
+        }
+      ]
+    }
+  }
+}

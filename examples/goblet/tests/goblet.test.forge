@@ -1,0 +1,177 @@
+// examples/goblet/tests/goblet.test.forge
+// forge test examples/goblet/
+
+struct Student {
+    name:  string
+    grade: number
+    score: number
+}
+
+struct Badge {
+    title: string
+}
+
+let students = [
+    Student { name: "Alice", grade: 3, score: 92 },
+    Student { name: "Bob",   grade: 2, score: 78 },
+    Student { name: "Carol", grade: 3, score: 88 },
+    Student { name: "Dave",  grade: 1, score: 95 },
+]
+
+fn find_student(name: string) -> Student? {
+    students |> find(s => s.name == name)
+}
+
+fn badge_title(score: number) -> string! {
+    if score >= 90 { ok("Honor") }
+    else           { err("score too low: {score}") }
+}
+
+fn summarize_roster() -> string {
+    students
+        |> group_by(s => if s.score >= 90 { "star" } else { "member" })
+        |> map(group => "{group.key}:{group.values.len()}")
+        |> join(", ")
+}
+
+fn roster_cards() -> string {
+    students
+        |> map(s => { name: s.name, grade: s.grade })
+        |> map(card => "{card.name}-{card.grade}")
+        |> join(", ")
+}
+
+fn top_cards() -> string {
+    students
+        |> map(s => { name: s.name, grade: s.grade, score: s.score })
+        |> filter(card => card.score >= 90)
+        |> map(card => card.name)
+        |> join(", ")
+}
+
+fn preferred_badge(name: string) -> string {
+    find_student(name)
+        |> map(s => Badge { title: "{s.name}-{s.grade}" })
+        |> map(b => b.title)
+        |> unwrap_or("guest")
+}
+
+fn promoted_badge(name: string) -> string {
+    find_student(name)
+        |> and_then(s => if s.score >= 90 { some(Badge { title: "top-{s.name}" }) } else { none })
+        |> map(b => b.title)
+        |> unwrap_or("guest")
+}
+
+fn has_student(name: string) -> bool {
+    find_student(name).is_some()
+}
+
+fn missing_student(name: string) -> bool {
+    find_student(name).is_none()
+}
+
+fn resolved_badge(score: number) -> string {
+    badge_title(score).unwrap_or("standard")
+}
+
+fn optional_badge(score: number) -> string {
+    badge_title(score).ok().unwrap_or("none")
+}
+
+test "goblet: roster summary" {
+    let summary = summarize_roster()
+    assert(summary.contains("star:2"))
+    assert(summary.contains("member:2"))
+}
+
+test "goblet: anon struct transform" {
+    let cards = roster_cards()
+    assert(cards.contains("Alice-3"))
+    assert(cards.contains("Dave-1"))
+}
+
+test "goblet: anon struct filter" {
+    let top = top_cards()
+    assert_eq(top, "Alice, Dave")
+}
+
+test "goblet: option pipeline fallback" {
+    assert_eq(preferred_badge("Alice"), "Alice-3")
+    assert_eq(preferred_badge("Nobody"), "guest")
+}
+
+test "goblet: option and_then chain" {
+    assert_eq(promoted_badge("Dave"), "top-Dave")
+    assert_eq(promoted_badge("Bob"), "guest")
+    assert_eq(promoted_badge("Nobody"), "guest")
+}
+
+test "goblet: option predicates" {
+    assert_eq(has_student("Alice"), true)
+    assert_eq(has_student("Nobody"), false)
+    assert_eq(missing_student("Alice"), false)
+    assert_eq(missing_student("Nobody"), true)
+}
+
+test "goblet: result fallback" {
+    assert_eq(resolved_badge(95), "Honor")
+    assert_eq(resolved_badge(70), "standard")
+}
+
+test "goblet: result ok option" {
+    assert_eq(optional_badge(95), "Honor")
+    assert_eq(optional_badge(70), "none")
+}
+
+// G-E2E-D: Option.filter
+test "goblet: option filter" {
+    let high = find_student("Alice") |> filter(s => s.score >= 90)
+    let low  = find_student("Bob")   |> filter(s => s.score >= 90)
+    let miss = find_student("Zed")   |> filter(s => s.score >= 90)
+    assert(high.is_some())
+    assert(low.is_none())
+    assert(miss.is_none())
+}
+
+// G-E2E-F: 分割代入
+test "goblet: tuple destructuring" {
+    let pair = [10, 20]
+    let (a, b) = pair
+    assert_eq(a, 10)
+    assert_eq(b, 20)
+}
+
+test "goblet: enumerate destructuring" {
+    let words = ["x", "y", "z"]
+    let result = words |> enumerate() |> map(pair => {
+        let (i, v) = pair
+        "{i}:{v}"
+    })
+    assert_eq(result, ["0:x", "1:y", "2:z"])
+}
+
+test "goblet: rest pattern" {
+    let nums = [1, 2, 3, 4, 5]
+    let (head, ..tail) = nums
+    assert_eq(head, 1)
+    assert_eq(tail, [2, 3, 4, 5])
+}
+
+// G-E2E-G: ? 演算子
+fn safe_head(nums: list<number>) -> number! {
+    match nums |> first() {
+        some(n) => ok(n),
+        none    => err("empty list"),
+    }
+}
+
+fn double_head(nums: list<number>) -> number! {
+    let n = safe_head(nums)?
+    ok(n * 2)
+}
+
+test "goblet: question operator propagation" {
+    assert_eq(double_head([5, 6, 7]), ok(10))
+    assert_eq(double_head([]),        err("empty list"))
+}

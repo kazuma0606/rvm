@@ -1,0 +1,74 @@
+{
+  "name": "forge-vscode",
+  "displayName": "ForgeScript",
+  "description": "VS Code support for ForgeScript via forge-lsp.",
+  "version": "0.1.0",
+  "publisher": "forge",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kazuma0606/rvm.git"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "files": [
+    "out/**",
+    "syntaxes/**",
+    "language-configuration.json",
+    "package.json"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:forge"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "forge",
+        "aliases": [
+          "ForgeScript",
+          "forge"
+        ],
+        "extensions": [
+          ".forge"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "forge",
+        "scopeName": "source.forge",
+        "path": "./syntaxes/forge.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "ForgeScript",
+      "properties": {
+        "forge.languageServer.path": {
+          "type": "string",
+          "default": "forge",
+          "description": "Command used to launch forge-lsp. The extension runs `<path> lsp`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.2.2",
+    "typescript": "^5.5.4"
+  }
+}

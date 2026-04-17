@@ -491,6 +491,178 @@ fn run_check(source: &str) -> (String, String, bool) {
     )
 }
 
+fn run_goblet_graph(source: &str, format: &str) -> (String, String, bool) {
+    run_goblet_graph_with_args(source, format, &[])
+}
+
+fn run_goblet_graph_with_args(
+    source: &str,
+    format: &str,
+    extra_args: &[&str],
+) -> (String, String, bool) {
+    let tid = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let mut path = std::env::temp_dir();
+    path.push(format!("forge_goblet_{}.forge", tid));
+
+    std::fs::write(&path, source).expect("write temp file");
+
+    let mut args = vec![
+        "goblet",
+        "graph",
+        path.to_str().unwrap_or(""),
+        "--format",
+        format,
+    ];
+    args.extend_from_slice(extra_args);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args(args)
+        .output()
+        .expect("run forge-new goblet graph");
+
+    let _ = std::fs::remove_file(&path);
+
+    (
+        String::from_utf8_lossy(&result.stdout).to_string(),
+        String::from_utf8_lossy(&result.stderr).to_string(),
+        result.status.success(),
+    )
+}
+
+fn run_goblet_graph_to_file(source: &str, format: &str) -> (String, String, bool, String) {
+    let tid = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let mut src_path = std::env::temp_dir();
+    src_path.push(format!("forge_goblet_out_{}.forge", tid));
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("forge_goblet_out_{}.md", tid));
+
+    std::fs::write(&src_path, source).expect("write temp source");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_forge-new"))
+        .args([
+            "goblet",
+            "graph",
+            src_path.to_str().unwrap_or(""),
+            "--format",
+            format,
+            "--output",
+            out_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .expect("run forge-new goblet graph output");
+
+    let content = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&out_path);
+
+    (
+        String::from_utf8_lossy(&result.stdout).to_string(),
+        String::from_utf8_lossy(&result.stderr).to_string(),
+        result.status.success(),
+        content,
+    )
+}
+
+#[test]
+fn test_cli_graph_text() {
+    let src = r#"
+struct Student { name: string, score: number }
+let students: list<Student> = [Student { name: "A", score: 90 }]
+let names = students |> filter(s => s.score >= 80) |> map(s => s.name)
+"#;
+    let (out, err, ok) = run_goblet_graph(src, "text");
+    assert!(ok, "stderr: {}", err);
+    assert!(out.contains("[1] names"));
+    assert!(out.contains("list<string>"));
+}
+
+#[test]
+fn test_cli_graph_mermaid() {
+    let src = r#"
+let nums: list<number> = [1, 2, 3]
+let out = nums |> map(n => n * 2)
+"#;
+    let (out, err, ok) = run_goblet_graph(src, "mermaid");
+    assert!(ok, "stderr: {}", err);
+    assert!(out.starts_with("flowchart LR"));
+}
+
+#[test]
+fn test_cli_graph_json() {
+    let src = r#"
+let nums: list<number> = [1, 2, 3]
+let out = nums |> take(2)
+"#;
+    let (out, err, ok) = run_goblet_graph(src, "json");
+    assert!(ok, "stderr: {}", err);
+    assert!(out.trim_start().starts_with('['));
+    assert!(out.contains("\"nodes\""));
+}
+
+#[test]
+fn test_cli_graph_output_file() {
+    let src = r#"
+let nums: list<number> = [1, 2, 3]
+let out = nums |> map(n => n * 2)
+"#;
+    let (out, err, ok, content) = run_goblet_graph_to_file(src, "mermaid");
+    assert!(ok, "stderr: {}", err);
+    assert!(out.is_empty());
+    assert!(content.contains("```mermaid"));
+    assert!(content.contains("flowchart LR"));
+}
+
+#[test]
+fn test_cli_graph_multiple_pipelines_are_numbered() {
+    let src = r#"
+let numbers: list<number> = [1, 2, 3]
+let doubled = numbers |> map(n => n * 2)
+let names = numbers |> map(n => "{n}")
+"#;
+    let (out, err, ok) = run_goblet_graph(src, "text");
+    assert!(ok, "stderr: {}", err);
+    assert!(out.contains("=== Pipeline 1"));
+    assert!(out.contains("=== Pipeline 2"));
+}
+
+#[test]
+fn test_cli_graph_can_filter_by_function() {
+    let src = r#"
+let xs: list<number> = [1, 2, 3]
+
+fn first() -> list<number> {
+    xs |> map(n => n * 2)
+}
+
+fn second() -> list<number> {
+    xs |> map(n => n * 3)
+}
+"#;
+    let (out, err, ok) = run_goblet_graph_with_args(src, "text", &["--function", "second"]);
+    assert!(ok, "stderr: {}", err);
+    assert!(out.contains("map(n => n Mul 3)"));
+    assert!(!out.contains("map(n => n Mul 2)"));
+}
+
+#[test]
+fn test_cli_graph_include_closures_expands_detail_nodes() {
+    let src = r#"
+struct Student { score: number }
+let students: list<Student> = [Student { score: 90 }]
+let picked = students |> filter(s => s.score >= 80)
+"#;
+    let (out, err, ok) = run_goblet_graph_with_args(src, "text", &["--include-closures"]);
+    assert!(ok, "stderr: {}", err);
+    assert!(out.contains("body: s.score"));
+    assert!(out.contains("field: s.score"));
+}
+
 #[test]
 fn e2e_check_no_error() {
     let src = r#"
