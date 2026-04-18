@@ -16,8 +16,8 @@
 - Phase B-4: 11/12 完了（DOM Morphing）
 - Phase B-5: 10/10 完了（typestate ストア + DevTools）
 - Phase B-6: 16/16 完了（CLI スキャフォールド）
-- **Milestone M-0: 0/2 完了（E2E 起動画面確認）** ← 全フェーズ完了後の最終確認
-- **合計: 105/110 完了**
+- **Milestone M-0: 2/2 完了（E2E 起動画面確認）** ✅
+- **合計: 110/110 完了** 🎉
 
 ---
 
@@ -247,5 +247,5 @@
 > 必ずテンプレート側（`packages/bloom/templates/starter/src/app/page.bloom` および関連する `.bloom` ファイル）を修正すること。
 > 生成コードへの直接修正は次回ビルド時に上書きされるため無意味であり、根本原因の特定も困難になる。
 
-- [ ] `forge new hello-bloom --bloom` を実行 → `spec.md §12` のディレクトリ構造が生成され、`forge dev` でブラウザが開き、`web-ui/bloom-image.png` と視覚的に一致することを確認（ダーク背景・グラデーション "Bloom" ロゴ・"on ForgeScript" サブタイトル・Docs / Learn / Templates 3 カード）
-- [ ] `examples/bloom-starter/` にテンプレートを展開した状態でも同じ起動画面が確認できること
+- [x] `forge new hello-bloom --bloom` を実行 → `spec.md §12` のディレクトリ構造が生成され、`forge dev` でブラウザが開き、`web-ui/bloom-image.png` と視覚的に一致することを確認（ダーク背景・グラデーション "Bloom" ロゴ・"on ForgeScript" サブタイトル・Docs / Learn / Templates 3 カード）
+- [x] `examples/bloom-starter/` にテンプレートを展開した状態でも同じ起動画面が確認できること

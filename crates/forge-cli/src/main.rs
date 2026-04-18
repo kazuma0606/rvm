@@ -2399,6 +2399,71 @@ fn dev_entry(args: &[String]) {
         let _ = stream.write_all(response.as_bytes());
     }
 
+    fn send_html(mut stream: TcpStream, html: &str) {
+        let bytes = html.as_bytes();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(bytes);
+    }
+
+    fn startup_page_html() -> String {
+        r##"<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bloom on ForgeScript</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: oklch(0.145 0 0); color: white; font-family: ui-sans-serif, system-ui, sans-serif; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+  <header class="flex items-center justify-between px-6 py-4 border-b border-white/10">
+    <div class="flex items-center gap-2 text-sm text-white/50">
+      <span>&#128196;</span>
+      <span>Get started by editing
+        <code class="font-mono text-white bg-white/10 px-1.5 py-0.5 rounded">src/app/page.bloom</code>
+      </span>
+    </div>
+    <a href="https://github.com/kazuma0606/rvm" target="_blank"
+       class="text-sm text-white/50 hover:text-white transition-colors">GitHub</a>
+  </header>
+
+  <div class="flex-1 flex flex-col items-center justify-center gap-8 px-6">
+    <div class="text-center">
+      <h1 class="text-7xl font-bold tracking-tight mb-2"
+          style="background: linear-gradient(to right, #fb7185, #d946ef, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
+        Bloom
+      </h1>
+      <p class="text-xl" style="color: rgba(255,255,255,0.5)">
+        on <span style="font-weight:700; color:white">ForgeScript</span>
+      </p>
+    </div>
+  </div>
+
+  <footer style="display:grid; grid-template-columns: repeat(3, 1fr); gap:1rem; padding: 2rem 1.5rem; border-top: 1px solid rgba(255,255,255,0.1); max-width:56rem; margin:0 auto; width:100%">
+    <a href="#" style="display:flex; flex-direction:column; gap:0.25rem; padding:1rem; border-radius:0.5rem; border:1px solid rgba(255,255,255,0.1); text-decoration:none; transition:all 0.15s">
+      <div style="display:flex; align-items:center; gap:0.25rem; color:white; font-weight:500">Docs &#8594;</div>
+      <p style="font-size:0.875rem; color:rgba(255,255,255,0.5); margin:0">Bloom&#12398;&#27231;&#33021;&#12392;API&#12398;&#35443;&#32048;</p>
+    </a>
+    <a href="#" style="display:flex; flex-direction:column; gap:0.25rem; padding:1rem; border-radius:0.5rem; border:1px solid rgba(255,255,255,0.1); text-decoration:none; transition:all 0.15s">
+      <div style="display:flex; align-items:center; gap:0.25rem; color:white; font-weight:500">Learn &#8594;</div>
+      <p style="font-size:0.875rem; color:rgba(255,255,255,0.5); margin:0">&#12452;&#12531;&#12479;&#12521;&#12463;&#12486;&#12451;&#12502;&#12394;&#12467;&#12540;&#12473;&#12391;&#23398;&#12406;</p>
+    </a>
+    <a href="#" style="display:flex; flex-direction:column; gap:0.25rem; padding:1rem; border-radius:0.5rem; border:1px solid rgba(255,255,255,0.1); text-decoration:none; transition:all 0.15s">
+      <div style="display:flex; align-items:center; gap:0.25rem; color:white; font-weight:500">Templates &#8594;</div>
+      <p style="font-size:0.875rem; color:rgba(255,255,255,0.5); margin:0">&#12473;&#12479;&#12540;&#12479;&#12540;&#12486;&#12531;&#12503;&#12524;&#12540;&#12488;&#38598;</p>
+    </a>
+  </footer>
+</body>
+</html>"##.to_string()
+    }
+
+
     for stream in listener.incoming() {
         let snapshots = snapshots.clone();
         match stream {
@@ -2411,7 +2476,9 @@ fn dev_entry(args: &[String]) {
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let first_line = req.lines().next().unwrap_or("");
 
-                if first_line.contains("GET /devtools/snapshots") {
+                if first_line == "GET / HTTP/1.1" || first_line == "GET / HTTP/1.0" || first_line.starts_with("GET / ") {
+                    send_html(stream, &startup_page_html());
+                } else if first_line.contains("GET /devtools/snapshots") {
                     let snaps = snapshots.lock().unwrap();
                     let body = format!("[{}]", snaps.join(","));
                     send_response(stream, "200 OK", &body);
