@@ -1,0 +1,610 @@
+// morph.forge — DOM Morphing アルゴリズム
+// 既存 DOM ツリーと新しい HTML の差分を計算し最小の DOM op 列を生成する。
+
+// ---------------------------------------------------------------------------
+// 内部ヘルパー: 文字列操作
+// ---------------------------------------------------------------------------
+
+fn str_trim(s: string) -> string {
+    let start = 0
+    let end = s.len()
+    start = _trim_start_idx(s, start)
+    end   = _trim_end_idx(s, end)
+    if start >= end {
+        ""
+    } else {
+        s.slice(start, end)
+    }
+}
+
+fn _trim_start_idx(s: string, i: number) -> number {
+    if i >= s.len() {
+        i
+    } else {
+        let c = s.char_at(i)
+        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+            _trim_start_idx(s, i + 1)
+        } else {
+            i
+        }
+    }
+}
+
+fn _trim_end_idx(s: string, i: number) -> number {
+    if i <= 0 {
+        0
+    } else {
+        let c = s.char_at(i - 1)
+        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+            _trim_end_idx(s, i - 1)
+        } else {
+            i
+        }
+    }
+}
+
+fn str_starts_with(s: string, prefix: string) -> bool {
+    if prefix.len() > s.len() {
+        false
+    } else {
+        s.slice(0, prefix.len()) == prefix
+    }
+}
+
+fn str_contains(s: string, sub: string) -> bool {
+    if sub.len() == 0 {
+        true
+    } else if sub.len() > s.len() {
+        false
+    } else {
+        _str_contains_at(s, sub, 0)
+    }
+}
+
+fn _str_contains_at(s: string, sub: string, i: number) -> bool {
+    if i + sub.len() > s.len() {
+        false
+    } else if s.slice(i, i + sub.len()) == sub {
+        true
+    } else {
+        _str_contains_at(s, sub, i + 1)
+    }
+}
+
+fn str_index_of(s: string, sub: string, from: number) -> number {
+    if from + sub.len() > s.len() {
+        -1
+    } else if s.slice(from, from + sub.len()) == sub {
+        from
+    } else {
+        str_index_of(s, sub, from + 1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTML パーサー補助
+// ---------------------------------------------------------------------------
+
+// タグ名を取り出す。"<div class=...>" → "div"
+fn extract_tag_name(html: string) -> string {
+    let s = str_trim(html)
+    if s.len() == 0 || s.char_at(0) != "<" {
+        ""
+    } else {
+        let inner = s.slice(1, s.len())
+        // 閉じタグの "/" を除去
+        let inner2 = if inner.len() > 0 && inner.char_at(0) == "/" {
+            inner.slice(1, inner.len())
+        } else {
+            inner
+        }
+        _collect_tag_name(inner2, 0)
+    }
+}
+
+fn _collect_tag_name(s: string, i: number) -> string {
+    if i >= s.len() {
+        s
+    } else {
+        let c = s.char_at(i)
+        if c == " " || c == "\t" || c == "\n" || c == "/" || c == ">" {
+            s.slice(0, i)
+        } else {
+            _collect_tag_name(s, i + 1)
+        }
+    }
+}
+
+// "id" 属性値を取り出す。見つからなければ空文字列。
+fn extract_attr(html: string, attr_name: string) -> string {
+    let search = attr_name + "=\""
+    let pos = str_index_of(html, search, 0)
+    if pos == -1 {
+        ""
+    } else {
+        let start = pos + search.len()
+        let end_pos = str_index_of(html, "\"", start)
+        if end_pos == -1 {
+            ""
+        } else {
+            html.slice(start, end_pos)
+        }
+    }
+}
+
+// タグ開始部分（最初の ">" まで）を返す
+fn extract_open_tag(html: string) -> string {
+    let pos = str_index_of(html, ">", 0)
+    if pos == -1 {
+        html
+    } else {
+        html.slice(0, pos + 1)
+    }
+}
+
+// タグの中身（テキストノード）を取り出す
+fn extract_inner_text(html: string) -> string {
+    let open_end = str_index_of(html, ">", 0)
+    if open_end == -1 {
+        ""
+    } else {
+        let after_open = html.slice(open_end + 1, html.len())
+        let close_start = str_index_of(after_open, "<", 0)
+        if close_start == -1 {
+            str_trim(after_open)
+        } else {
+            str_trim(after_open.slice(0, close_start))
+        }
+    }
+}
+
+// 子要素 HTML を取り出す（タグ開始・終了を除いた内側）
+fn extract_children_html(html: string) -> string {
+    let open_end = str_index_of(html, ">", 0)
+    if open_end == -1 {
+        ""
+    } else {
+        let rest = html.slice(open_end + 1, html.len())
+        // 最後の </tag> を除去
+        let last_close = str_index_of(rest, "</", 0)
+        if last_close == -1 {
+            ""
+        } else {
+            str_trim(rest.slice(0, last_close))
+        }
+    }
+}
+
+// 属性マップを抽出する（シンプルな key="value" 形式のみ対応）
+fn extract_attrs_map(open_tag: string) -> map<string, string> {
+    let space_pos = str_index_of(open_tag, " ", 0)
+    if space_pos == -1 {
+        {}
+    } else {
+        let attrs_str = open_tag.slice(space_pos + 1, open_tag.len())
+        _parse_attrs(attrs_str, {})
+    }
+}
+
+fn _parse_attrs(s: string, acc: map<string, string>) -> map<string, string> {
+    let s2 = str_trim(s)
+    if s2.len() == 0 || s2 == ">" || s2 == "/>" {
+        acc
+    } else {
+        let eq_pos = str_index_of(s2, "=", 0)
+        if eq_pos == -1 {
+            acc
+        } else {
+            let key = str_trim(s2.slice(0, eq_pos))
+            let after_eq = s2.slice(eq_pos + 1, s2.len())
+            let after_eq2 = str_trim(after_eq)
+            if after_eq2.len() > 0 && after_eq2.char_at(0) == "\"" {
+                let val_start = 1
+                let val_end = str_index_of(after_eq2, "\"", val_start)
+                if val_end == -1 {
+                    acc
+                } else {
+                    let val = after_eq2.slice(val_start, val_end)
+                    let rest = after_eq2.slice(val_end + 1, after_eq2.len())
+                    let new_acc = acc.insert(key, val)
+                    _parse_attrs(rest, new_acc)
+                }
+            } else {
+                acc
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ノードツリー表現
+// ノード: { tag: string, id: string, key: string, text: string,
+//           open_tag: string, html: string, children_html: string }
+// ---------------------------------------------------------------------------
+
+pub fn parse_html_to_tree(html: string) -> list<map<string, string>> {
+    let html2 = str_trim(html)
+    if html2.len() == 0 {
+        []
+    } else {
+        _parse_siblings(html2, [])
+    }
+}
+
+fn _parse_siblings(html: string, acc: list<map<string, string>>) -> list<map<string, string>> {
+    let h = str_trim(html)
+    if h.len() == 0 {
+        acc
+    } else if h.char_at(0) != "<" {
+        // テキストノード
+        let node = {
+            "tag": "#text",
+            "id": "",
+            "key": "",
+            "text": h,
+            "open_tag": "",
+            "html": h,
+            "children_html": "",
+        }
+        acc.push(node)
+    } else {
+        let tag = extract_tag_name(h)
+        let open_tag = extract_open_tag(h)
+        let id = extract_attr(open_tag, "id")
+        let key = extract_attr(open_tag, "key")
+        let text = extract_inner_text(h)
+        let children_html = extract_children_html(h)
+        let node = {
+            "tag": tag,
+            "id": id,
+            "key": key,
+            "text": text,
+            "open_tag": open_tag,
+            "html": h,
+            "children_html": children_html,
+        }
+        let rest = _skip_first_element(h)
+        _parse_siblings(rest, acc.push(node))
+    }
+}
+
+// 最初のトップレベル要素をスキップして残りを返す（単純な実装）
+fn _skip_first_element(html: string) -> string {
+    let tag = extract_tag_name(html)
+    if tag == "" || tag == "#text" {
+        ""
+    } else {
+        let close_tag = "</" + tag + ">"
+        let pos = str_index_of(html, close_tag, 1)
+        if pos == -1 {
+            // 自己終了タグの場合
+            let gt = str_index_of(html, ">", 0)
+            if gt == -1 {
+                ""
+            } else {
+                str_trim(html.slice(gt + 1, html.len()))
+            }
+        } else {
+            str_trim(html.slice(pos + close_tag.len(), html.len()))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 属性差分
+// ---------------------------------------------------------------------------
+
+pub fn diff_attrs(current_attrs: map<string, string>, next_attrs: map<string, string>, target_id: string) -> list<map<string, string>> {
+    let changed = _collect_changed_attrs(next_attrs, current_attrs, [])
+    if changed.len() == 0 {
+        []
+    } else {
+        let op = {
+            "op": "PATCH_ATTRS",
+            "target_id": target_id,
+        }
+        // attrs は JSON-like 文字列として埋め込む（実装上の制約）
+        let op2 = _embed_attrs_in_op(op, changed)
+        [op2]
+    }
+}
+
+fn _collect_changed_attrs(next: map<string, string>, current: map<string, string>, acc: list<list<string>>) -> list<list<string>> {
+    let keys = next.keys()
+    _check_attr_keys(keys, 0, next, current, acc)
+}
+
+fn _check_attr_keys(keys: list<string>, i: number, next: map<string, string>, current: map<string, string>, acc: list<list<string>>) -> list<list<string>> {
+    if i >= keys.len() {
+        acc
+    } else {
+        let k = keys[i]
+        if k == "key" {
+            // key 属性は DOM op に含めない
+            _check_attr_keys(keys, i + 1, next, current, acc)
+        } else {
+            let next_val = next.get(k).unwrap_or("")
+            let cur_val = current.get(k).unwrap_or("")
+            if next_val != cur_val {
+                _check_attr_keys(keys, i + 1, next, current, acc.push([k, next_val]))
+            } else {
+                _check_attr_keys(keys, i + 1, next, current, acc)
+            }
+        }
+    }
+}
+
+fn _embed_attrs_in_op(op: map<string, string>, pairs: list<list<string>>) -> map<string, string> {
+    // attrs を "key1=val1;key2=val2" 形式で格納
+    let attrs_str = _join_attr_pairs(pairs, 0, "")
+    op.insert("attrs", attrs_str)
+}
+
+fn _join_attr_pairs(pairs: list<list<string>>, i: number, acc: string) -> string {
+    if i >= pairs.len() {
+        acc
+    } else {
+        let pair = pairs[i]
+        let entry = pair[0] + "=" + pair[1]
+        let new_acc = if acc == "" { entry } else { acc + ";" + entry }
+        _join_attr_pairs(pairs, i + 1, new_acc)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ノード単位の差分計算
+// ---------------------------------------------------------------------------
+
+pub fn morph_node(current: map<string, string>, next: map<string, string>) -> list<map<string, string>> {
+    let target_id = current["id"]
+    let cur_tag = current["tag"]
+    let nxt_tag = next["tag"]
+
+    // アニメーション中ノードはスキップ
+    if str_contains(current["open_tag"], "data-bloom-animate") {
+        []
+    } else if cur_tag != nxt_tag {
+        // タグが変わった → INSERT + REMOVE
+        let remove_op = { "op": "REMOVE_NODE", "target_id": target_id, "html": "", "value": "", "preserve_focus": "false" }
+        let parent_id = ""
+        let insert_op = { "op": "INSERT_NODE", "target_id": parent_id, "html": next["html"], "value": "", "preserve_focus": "false" }
+        [remove_op, insert_op]
+    } else {
+        let is_input = cur_tag == "input" || cur_tag == "textarea"
+        let preserve = if is_input { "true" } else { "false" }
+
+        let cur_open = current["open_tag"]
+        let nxt_open = next["open_tag"]
+        let cur_attrs = extract_attrs_map(cur_open)
+        let nxt_attrs = extract_attrs_map(nxt_open)
+        let attr_ops = diff_attrs(cur_attrs, nxt_attrs, target_id)
+
+        let cur_text = current["text"]
+        let nxt_text = next["text"]
+        let text_ops = if cur_text != nxt_text && nxt_text != "" {
+            let op = {
+                "op": "SET_TEXT",
+                "target_id": target_id,
+                "value": nxt_text,
+                "html": "",
+                "preserve_focus": preserve,
+            }
+            [op]
+        } else {
+            []
+        }
+
+        // 子要素に変化があれば MORPH_NODE
+        let cur_children = current["children_html"]
+        let nxt_children = next["children_html"]
+        let children_ops = if cur_children != nxt_children && nxt_children != "" {
+            let op = {
+                "op": "MORPH_NODE",
+                "target_id": target_id,
+                "html": next["html"],
+                "value": "",
+                "preserve_focus": preserve,
+            }
+            [op]
+        } else {
+            []
+        }
+
+        _concat_ops(attr_ops, _concat_ops(text_ops, children_ops))
+    }
+}
+
+fn _concat_ops(a: list<map<string, string>>, b: list<map<string, string>>) -> list<map<string, string>> {
+    if b.len() == 0 {
+        a
+    } else if a.len() == 0 {
+        b
+    } else {
+        _append_list(a, b, 0)
+    }
+}
+
+fn _append_list(base: list<map<string, string>>, extra: list<map<string, string>>, i: number) -> list<map<string, string>> {
+    if i >= extra.len() {
+        base
+    } else {
+        _append_list(base.push(extra[i]), extra, i + 1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// キー追跡: MOVE_NODE 生成
+// ---------------------------------------------------------------------------
+
+fn build_key_map(nodes: list<map<string, string>>) -> map<string, number> {
+    _build_key_map_loop(nodes, 0, {})
+}
+
+fn _build_key_map_loop(nodes: list<map<string, string>>, i: number, acc: map<string, number>) -> map<string, number> {
+    if i >= nodes.len() {
+        acc
+    } else {
+        let node = nodes[i]
+        let k = node["key"]
+        if k != "" {
+            _build_key_map_loop(nodes, i + 1, acc.insert(k, i))
+        } else {
+            _build_key_map_loop(nodes, i + 1, acc)
+        }
+    }
+}
+
+fn gen_move_ops(current_nodes: list<map<string, string>>, next_nodes: list<map<string, string>>) -> list<map<string, string>> {
+    let next_key_map = build_key_map(next_nodes)
+    let cur_key_map = build_key_map(current_nodes)
+    _gen_move_ops_loop(next_nodes, 0, cur_key_map, next_key_map, current_nodes, [])
+}
+
+fn _gen_move_ops_loop(next_nodes: list<map<string, string>>, i: number, cur_key_map: map<string, number>, next_key_map: map<string, number>, current_nodes: list<map<string, string>>, acc: list<map<string, string>>) -> list<map<string, string>> {
+    if i >= next_nodes.len() {
+        acc
+    } else {
+        let nxt = next_nodes[i]
+        let k = nxt["key"]
+        if k == "" {
+            _gen_move_ops_loop(next_nodes, i + 1, cur_key_map, next_key_map, current_nodes, acc)
+        } else {
+            let cur_idx_opt = cur_key_map.get(k)
+            let cur_idx = cur_idx_opt.unwrap_or(-1)
+            if cur_idx == -1 || cur_idx == i {
+                // 新規ノードか位置不変
+                _gen_move_ops_loop(next_nodes, i + 1, cur_key_map, next_key_map, current_nodes, acc)
+            } else {
+                // 位置が変わった → MOVE_NODE
+                let target_node = current_nodes[cur_idx]
+                let target_id = target_node["id"]
+                // before_id: i 番目に来るべき次の位置のノード id
+                let before_id = if i + 1 < next_nodes.len() {
+                    let before_node = next_nodes[i + 1]
+                    let bk = before_node["key"]
+                    if bk != "" {
+                        let bi = cur_key_map.get(bk).unwrap_or(-1)
+                        if bi != -1 { current_nodes[bi]["id"] } else { "" }
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+                let op = {
+                    "op": "MOVE_NODE",
+                    "target_id": target_id,
+                    "before_id": before_id,
+                    "html": "",
+                    "value": "",
+                    "preserve_focus": "false",
+                }
+                _gen_move_ops_loop(next_nodes, i + 1, cur_key_map, next_key_map, current_nodes, acc.push(op))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// メイン公開 API
+// ---------------------------------------------------------------------------
+
+pub fn morph(current_html: string, next_html: string) -> list<map<string, string>> {
+    let current_nodes = parse_html_to_tree(current_html)
+    let next_nodes    = parse_html_to_tree(next_html)
+
+    let move_ops = gen_move_ops(current_nodes, next_nodes)
+    let patch_ops = _morph_node_list(current_nodes, next_nodes, 0, [])
+
+    _concat_ops(move_ops, patch_ops)
+}
+
+fn _morph_node_list(current: list<map<string, string>>, next: list<map<string, string>>, i: number, acc: list<map<string, string>>) -> list<map<string, string>> {
+    if i >= current.len() && i >= next.len() {
+        acc
+    } else if i >= current.len() {
+        // 新しいノードを INSERT
+        let nxt = next[i]
+        let insert_op = {
+            "op": "INSERT_NODE",
+            "target_id": "",
+            "html": nxt["html"],
+            "value": "",
+            "preserve_focus": "false",
+        }
+        _morph_node_list(current, next, i + 1, acc.push(insert_op))
+    } else if i >= next.len() {
+        // 不要なノードを REMOVE
+        let cur = current[i]
+        let remove_op = {
+            "op": "REMOVE_NODE",
+            "target_id": cur["id"],
+            "html": "",
+            "value": "",
+            "preserve_focus": "false",
+        }
+        _morph_node_list(current, next, i + 1, acc.push(remove_op))
+    } else {
+        let ops = morph_node(current[i], next[i])
+        let new_acc = _concat_ops(acc, ops)
+        _morph_node_list(current, next, i + 1, new_acc)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// テスト
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_morph_text_change() {
+    let ops = morph("<p id=\"t\">old</p>", "<p id=\"t\">new</p>")
+    // SET_TEXT op が1件、他は生成されない
+    assert(ops.len() == 1)
+    assert(ops[0]["op"] == "SET_TEXT")
+    assert(ops[0]["value"] == "new")
+}
+
+#[test]
+fn test_morph_preserve_focus() {
+    let ops = morph("<input id=\"i\" value=\"old\"/>", "<input id=\"i\" value=\"new\"/>")
+    // input は preserve_focus: true
+    let op = ops[0]
+    assert(op["preserve_focus"] == "true")
+}
+
+#[test]
+fn test_morph_key_tracking() {
+    let current = "<ul><li key=\"a\" id=\"la\">A</li><li key=\"b\" id=\"lb\">B</li></ul>"
+    let next    = "<ul><li key=\"b\" id=\"lb\">B</li><li key=\"a\" id=\"la\">A</li></ul>"
+    let ops = morph(current, next)
+    // MOVE_NODE op が含まれる
+    let has_move = ops.any(fn(op) { op["op"] == "MOVE_NODE" })
+    assert(has_move)
+}
+
+#[test]
+fn test_morph_skip_animate_node() {
+    let ops = morph(
+        "<div id=\"x\" data-bloom-animate=\"1\">old</div>",
+        "<div id=\"x\" data-bloom-animate=\"1\">new</div>"
+    )
+    assert(ops.len() == 0)
+}
+
+#[test]
+fn test_diff_attrs_changed() {
+    let cur = { "class": "old", "id": "e1" }
+    let nxt = { "class": "new", "id": "e1" }
+    let ops = diff_attrs(cur, nxt, "e1")
+    assert(ops.len() == 1)
+    assert(ops[0]["op"] == "PATCH_ATTRS")
+    assert(str_contains(ops[0]["attrs"], "class=new"))
+}
+
+#[test]
+fn test_diff_attrs_no_change() {
+    let cur = { "class": "same", "id": "e2" }
+    let nxt = { "class": "same", "id": "e2" }
+    let ops = diff_attrs(cur, nxt, "e2")
+    assert(ops.len() == 0)
+}

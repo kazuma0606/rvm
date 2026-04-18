@@ -9,6 +9,9 @@ const OP_INSERT_NODE: i32 = 6;
 const OP_REMOVE_NODE: i32 = 7;
 const OP_REPLACE_INNER: i32 = 8;
 const OP_ATTACH: i32 = 9;
+const OP_MORPH_NODE: i32 = 10;
+const OP_MOVE_NODE: i32 = 11;
+const OP_PATCH_ATTRS: i32 = 12;
 
 const EVENT_CLICK: i32 = 1;
 const EVENT_INPUT: i32 = 2;
@@ -53,6 +56,19 @@ pub enum DomOp {
         target_id: String,
         event: String,
         handler_id: i32,
+    },
+    MorphNode {
+        target_id: String,
+        html: String,
+        preserve_focus: bool,
+    },
+    MoveNode {
+        target_id: String,
+        before_id: String,
+    },
+    PatchAttrs {
+        target_id: String,
+        attrs: Vec<(String, String)>,
     },
 }
 
@@ -146,6 +162,33 @@ pub fn serialize_dom_ops(items: &[DomOp]) -> EncodedDomOps {
                 push_string_ref(&mut ops, &mut strings, event);
                 ops.push(*handler_id);
             }
+            DomOp::MorphNode {
+                target_id,
+                html,
+                preserve_focus,
+            } => {
+                ops.push(OP_MORPH_NODE);
+                push_string_ref(&mut ops, &mut strings, target_id);
+                push_string_ref(&mut ops, &mut strings, html);
+                ops.push(if *preserve_focus { 1 } else { 0 });
+            }
+            DomOp::MoveNode {
+                target_id,
+                before_id,
+            } => {
+                ops.push(OP_MOVE_NODE);
+                push_string_ref(&mut ops, &mut strings, target_id);
+                push_string_ref(&mut ops, &mut strings, before_id);
+            }
+            DomOp::PatchAttrs { target_id, attrs } => {
+                ops.push(OP_PATCH_ATTRS);
+                push_string_ref(&mut ops, &mut strings, target_id);
+                ops.push(attrs.len() as i32);
+                for (k, v) in attrs {
+                    push_string_ref(&mut ops, &mut strings, k);
+                    push_string_ref(&mut ops, &mut strings, v);
+                }
+            }
         }
     }
 
@@ -216,6 +259,35 @@ pub fn deserialize_dom_ops(ops: &[i32], strings: &[u8]) -> Result<Vec<DomOp>, St
                     event,
                     handler_id,
                 });
+            }
+            OP_MORPH_NODE => {
+                let target_id = read_string_ref(ops, strings, &mut cursor)?;
+                let html = read_string_ref(ops, strings, &mut cursor)?;
+                let preserve_focus = read_i32(ops, &mut cursor)? != 0;
+                out.push(DomOp::MorphNode {
+                    target_id,
+                    html,
+                    preserve_focus,
+                });
+            }
+            OP_MOVE_NODE => {
+                let target_id = read_string_ref(ops, strings, &mut cursor)?;
+                let before_id = read_string_ref(ops, strings, &mut cursor)?;
+                out.push(DomOp::MoveNode {
+                    target_id,
+                    before_id,
+                });
+            }
+            OP_PATCH_ATTRS => {
+                let target_id = read_string_ref(ops, strings, &mut cursor)?;
+                let count = read_i32(ops, &mut cursor)? as usize;
+                let mut attrs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let k = read_string_ref(ops, strings, &mut cursor)?;
+                    let v = read_string_ref(ops, strings, &mut cursor)?;
+                    attrs.push((k, v));
+                }
+                out.push(DomOp::PatchAttrs { target_id, attrs });
             }
             other => {
                 return Err(format!("unknown DomOp opcode: {}", other));
@@ -430,6 +502,83 @@ mod tests {
                 kind: EventKind::Click,
                 target_id: "btn".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn test_morph_node_op_roundtrip() {
+        let ops = vec![DomOp::MorphNode {
+            target_id: "el1".to_string(),
+            html: "<div>x</div>".to_string(),
+            preserve_focus: false,
+        }];
+        let encoded = serialize_dom_ops(&ops);
+        let decoded = deserialize_dom_ops(&encoded.ops, &encoded.strings).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            decoded[0],
+            DomOp::MorphNode {
+                target_id: "el1".to_string(),
+                html: "<div>x</div>".to_string(),
+                preserve_focus: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_morph_node_preserve_focus_roundtrip() {
+        let ops = vec![DomOp::MorphNode {
+            target_id: "inp".to_string(),
+            html: "<input value=\"new\"/>".to_string(),
+            preserve_focus: true,
+        }];
+        let encoded = serialize_dom_ops(&ops);
+        let decoded = deserialize_dom_ops(&encoded.ops, &encoded.strings).unwrap();
+        assert_eq!(decoded.len(), 1);
+        match &decoded[0] {
+            DomOp::MorphNode { preserve_focus, .. } => assert!(*preserve_focus),
+            _ => panic!("expected MorphNode"),
+        }
+    }
+
+    #[test]
+    fn test_patch_attrs_op_roundtrip() {
+        let ops = vec![DomOp::PatchAttrs {
+            target_id: "el-1".to_string(),
+            attrs: vec![
+                ("class".to_string(), "new-class".to_string()),
+                ("aria-label".to_string(), "hello".to_string()),
+            ],
+        }];
+        let encoded = serialize_dom_ops(&ops);
+        let decoded = deserialize_dom_ops(&encoded.ops, &encoded.strings).unwrap();
+        assert_eq!(decoded.len(), 1);
+        match &decoded[0] {
+            DomOp::PatchAttrs { target_id, attrs } => {
+                assert_eq!(target_id, "el-1");
+                assert_eq!(attrs.len(), 2);
+                assert_eq!(attrs[0], ("class".to_string(), "new-class".to_string()));
+                assert_eq!(attrs[1], ("aria-label".to_string(), "hello".to_string()));
+            }
+            _ => panic!("expected PatchAttrs"),
+        }
+    }
+
+    #[test]
+    fn test_move_node_op_roundtrip() {
+        let ops = vec![DomOp::MoveNode {
+            target_id: "el-4".to_string(),
+            before_id: "el-5".to_string(),
+        }];
+        let encoded = serialize_dom_ops(&ops);
+        let decoded = deserialize_dom_ops(&encoded.ops, &encoded.strings).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            decoded[0],
+            DomOp::MoveNode {
+                target_id: "el-4".to_string(),
+                before_id: "el-5".to_string(),
+            }
         );
     }
 }

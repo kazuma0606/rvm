@@ -13,11 +13,11 @@
 - Phase B-1: 26/26 完了（.bloom パーサー + コード生成 MVP）
 - Phase B-2: 12/12 完了（コンパイル時リアクティビティ）
 - Phase B-3: 14/16 完了（SSR + 全置換アタッチ）
-- Phase B-4: 0/12 完了（DOM Morphing）
+- Phase B-4: 11/12 完了（DOM Morphing）
 - Phase B-5: 0/10 完了（typestate ストア + DevTools）
 - Phase B-6: 0/16 完了（CLI スキャフォールド）
 - **Milestone M-0: 0/2 完了（E2E 起動画面確認）** ← 全フェーズ完了後の最終確認
-- **合計: 68/110 完了**
+- **合計: 79/110 完了**
 
 ---
 
@@ -161,21 +161,21 @@
 
 ### B-4-A: Morphing アルゴリズム（`packages/bloom/src/morph.forge`）← ForgeScript
 
-- [ ] 既存 DOM ツリーと新 HTML の差分計算アルゴリズム実装
-- [ ] `key` 属性によるノード同一性追跡
-- [ ] DOM op 追加: `MORPH_NODE` / `MOVE_NODE` / `PATCH_ATTRS`
+- [x] 既存 DOM ツリーと新 HTML の差分計算アルゴリズム実装
+- [x] `key` 属性によるノード同一性追跡
+- [x] DOM op 追加: `MORPH_NODE` / `MOVE_NODE` / `PATCH_ATTRS`
 
 ### B-4-B: エッジケース対応
 
-- [ ] フォーカス中の `<input>` のテキスト保持
-- [ ] スクロール位置の保持
-- [ ] アニメーション中ノードのスキップ
+- [x] フォーカス中の `<input>` のテキスト保持
+- [x] スクロール位置の保持
+- [x] アニメーション中ノードのスキップ
 
 ### B-4-C: テスト
 
-- [ ] `test_morph_text_change` — テキスト変更のみ最小差分更新される
-- [ ] `test_morph_preserve_focus` — フォーカス中入力が保持される
-- [ ] `test_morph_key_tracking` — `key` によるノード移動が正しく追跡される
+- [x] `test_morph_text_change` — テキスト変更のみ最小差分更新される
+- [x] `test_morph_preserve_focus` — フォーカス中入力が保持される
+- [x] `test_morph_key_tracking` — `key` によるノード移動が正しく追跡される
 - [ ] E2E: 入力中にサーバーからの更新が来ても入力が失われない
 
 ---
