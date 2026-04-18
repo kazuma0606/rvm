@@ -1,0 +1,40 @@
+<main class="min-h-screen flex flex-col bg-[oklch(0.145_0_0)] text-white font-sans">
+  <!-- Header -->
+  <header class="flex items-center justify-between px-6 py-4 border-b border-white/10">
+    <div class="flex items-center gap-2 text-sm text-white/50">
+      <span>📄</span>
+      <span>Get started by editing <code class="font-mono text-white bg-white/10 px-1.5 py-0.5 rounded">src/app/page.bloom</code></span>
+    </div>
+    <a href="https://github.com/kazuma0606/rvm" target="_blank" class="flex items-center gap-1.5 text-sm text-white/50 hover:text-white transition-colors">
+      GitHub
+    </a>
+  </header>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex flex-col items-center justify-center gap-8 px-6">
+    <div class="text-center">
+      <h1 class="text-7xl font-bold tracking-tight mb-2 bg-gradient-to-r from-rose-400 via-fuchsia-500 to-indigo-500 bg-clip-text text-transparent">
+        Bloom
+      </h1>
+      <p class="text-xl text-white/50">
+        on <span class="font-bold text-white">ForgeScript</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="grid grid-cols-1 sm:grid-cols-3 gap-4 px-6 py-8 border-t border-white/10 max-w-4xl mx-auto w-full">
+    <a href="#" class="group flex flex-col gap-1 p-4 rounded-lg border border-white/10 hover:border-white/20 hover:bg-white/5 transition-all">
+      <div class="flex items-center gap-1 text-white font-medium">Docs <span class="group-hover:translate-x-0.5 transition-transform">→</span></div>
+      <p class="text-sm text-white/50">Bloomの機能とAPIの詳細</p>
+    </a>
+    <a href="#" class="group flex flex-col gap-1 p-4 rounded-lg border border-white/10 hover:border-white/20 hover:bg-white/5 transition-all">
+      <div class="flex items-center gap-1 text-white font-medium">Learn <span class="group-hover:translate-x-0.5 transition-transform">→</span></div>
+      <p class="text-sm text-white/50">インタラクティブなコースで学ぶ</p>
+    </a>
+    <a href="#" class="group flex flex-col gap-1 p-4 rounded-lg border border-white/10 hover:border-white/20 hover:bg-white/5 transition-all">
+      <div class="flex items-center gap-1 text-white font-medium">Templates <span class="group-hover:translate-x-0.5 transition-transform">→</span></div>
+      <p class="text-sm text-white/50">スターターテンプレート集</p>
+    </a>
+  </footer>
+</main>
