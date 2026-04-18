@@ -190,6 +190,30 @@ pub enum PipelineTraceOutcome {
     ResultErr,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorruptedRecord {
+    pub index: usize,
+    pub fields: Vec<(String, Value)>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineStageTrace {
+    pub stage_name: String,
+    pub in_count: usize,
+    pub out_count: usize,
+    pub corrupted: Vec<CorruptedRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineTrace {
+    pub pipeline_name: String,
+    pub source_snippet: String,
+    pub stages: Vec<PipelineStageTrace>,
+    pub total_records: usize,
+    pub total_corrupted: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineTraceNodeRef {
     pub node_id: usize,
@@ -199,7 +223,7 @@ pub struct PipelineTraceNodeRef {
     pub col: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PipelineTraceEvent {
     pub node_id: Option<usize>,
     pub method: String,
@@ -210,6 +234,20 @@ pub struct PipelineTraceEvent {
     pub item_count: Option<usize>,
     pub outcome: PipelineTraceOutcome,
     pub message: Option<String>,
+    pub corrupted: Vec<CorruptedRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisplayOutput {
+    Text { value: String },
+    Html { value: String },
+    Json { value: serde_json::Value },
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
+    },
+    Image { mime: String, data: String },
+    Markdown { value: String },
 }
 
 // ── インタプリタ ─────────────────────────────────────────────────────────────
@@ -238,6 +276,9 @@ pub struct Interpreter {
     pub loaded_modules: HashMap<String, Vec<String>>,
     /// 出力バッファ: Some の場合 print/println はここに書き込む（MCP 等でのキャプチャ用）
     pub output_buffer: Option<Arc<Mutex<String>>>,
+    output_listener: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    display_listener: Option<Arc<dyn Fn(DisplayOutput) + Send + Sync>>,
+    trace_mode: bool,
     /// Goblet 用のパイプライントレース設定
     pipeline_trace_nodes: Vec<PipelineTraceNodeRef>,
     /// Goblet 用の実行時トレースイベント
@@ -258,6 +299,9 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            output_listener: None,
+            display_listener: None,
+            trace_mode: false,
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
         };
@@ -272,22 +316,54 @@ impl Interpreter {
         interp.output_buffer = Some(Arc::clone(&buf));
         // output_buffer が設定されているので register_builtins を再実行して print を上書き
         interp.register_print_builtins();
+        interp.register_display_builtins();
         (interp, buf)
     }
 
-    pub fn with_file_path_and_output_capture(
-        path: &std::path::Path,
-    ) -> (Self, Arc<Mutex<String>>) {
+    pub fn with_output_capture_and_listener<F>(listener: F) -> (Self, Arc<Mutex<String>>)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        let buf = Arc::new(Mutex::new(String::new()));
+        let mut interp = Self::new();
+        interp.output_buffer = Some(Arc::clone(&buf));
+        interp.output_listener = Some(Arc::new(listener));
+        interp.register_print_builtins();
+        interp.register_display_builtins();
+        (interp, buf)
+    }
+
+    pub fn with_output_capture_and_display_listener<F, G>(
+        output_listener: F,
+        display_listener: G,
+    ) -> (Self, Arc<Mutex<String>>)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+        G: Fn(DisplayOutput) + Send + Sync + 'static,
+    {
+        let buf = Arc::new(Mutex::new(String::new()));
+        let mut interp = Self::new();
+        interp.output_buffer = Some(Arc::clone(&buf));
+        interp.output_listener = Some(Arc::new(output_listener));
+        interp.display_listener = Some(Arc::new(display_listener));
+        interp.register_print_builtins();
+        interp.register_display_builtins();
+        (interp, buf)
+    }
+
+    pub fn with_file_path_and_output_capture(path: &std::path::Path) -> (Self, Arc<Mutex<String>>) {
         let buf = Arc::new(Mutex::new(String::new()));
         let mut interp = Self::with_file_path(path);
         interp.output_buffer = Some(Arc::clone(&buf));
         interp.register_print_builtins();
+        interp.register_display_builtins();
         (interp, buf)
     }
 
     /// print / println を output_buffer に書き込むよう再登録する
     fn register_print_builtins(&mut self) {
         let buf1 = Arc::clone(self.output_buffer.as_ref().unwrap());
+        let listener1 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "print",
             Value::NativeFunction(NativeFn(Rc::new(move |args: Vec<Value>| {
@@ -296,15 +372,19 @@ impl Interpreter {
                     .map(|v| v.to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
+                let line = format!("{}\n", s);
                 if let Ok(mut b) = buf1.lock() {
-                    b.push_str(&s);
-                    b.push('\n');
+                    b.push_str(&line);
+                }
+                if let Some(listener) = &listener1 {
+                    listener(line.clone());
                 }
                 Ok(Value::Unit)
             }))),
             false,
         );
         let buf2 = Arc::clone(self.output_buffer.as_ref().unwrap());
+        let listener2 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "println",
             Value::NativeFunction(NativeFn(Rc::new(move |args: Vec<Value>| {
@@ -313,14 +393,183 @@ impl Interpreter {
                     .map(|v| v.to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
+                let line = format!("{}\n", s);
                 if let Ok(mut b) = buf2.lock() {
-                    b.push_str(&s);
-                    b.push('\n');
+                    b.push_str(&line);
+                }
+                if let Some(listener) = &listener2 {
+                    listener(line.clone());
                 }
                 Ok(Value::Unit)
             }))),
             false,
         );
+    }
+
+    fn register_display_builtins(&mut self) {
+        let listener = self.display_listener.clone();
+        let output_buffer = self.output_buffer.clone();
+
+        let mut methods = HashMap::new();
+        methods.insert(
+            "text".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::text() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let value = args.remove(0).to_string();
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Text { value },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+        methods.insert(
+            "html".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::html() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let value = match args.remove(0) {
+                        Value::String(value) => value,
+                        other => other.to_string(),
+                    };
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Html { value },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+        methods.insert(
+            "json".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::json() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let value = value_to_json(&args.remove(0));
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Json { value },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+        methods.insert(
+            "table".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::table() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let (columns, rows) = value_to_table(&args.remove(0))?;
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Table { columns, rows },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+        methods.insert(
+            "image".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::image() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let path = match args.remove(0) {
+                        Value::String(path) => path,
+                        other => {
+                            return Err(format!(
+                                "display::image() expects string path, got {}",
+                                other.type_name()
+                            ))
+                        }
+                    };
+                    let bytes = std::fs::read(&path)
+                        .map_err(|e| format!("display::image(): {}", e))?;
+                    let mime = image_mime_type(&path);
+                    let data = {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    };
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Image { mime, data },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+        methods.insert(
+            "markdown".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new({
+                let listener = listener.clone();
+                let output_buffer = output_buffer.clone();
+                move |mut args: Vec<Value>| {
+                    if args.len() != 2 {
+                        return Err("display::markdown() takes 1 arg".to_string());
+                    }
+                    let _self = args.remove(0);
+                    let value = match args.remove(0) {
+                        Value::String(value) => value,
+                        other => other.to_string(),
+                    };
+                    emit_display_output(
+                        &listener,
+                        &output_buffer,
+                        DisplayOutput::Markdown { value },
+                    );
+                    Ok(Value::Unit)
+                }
+            }))),
+        );
+
+        self.type_registry.structs.insert(
+            "Display".to_string(),
+            StructInfo {
+                fields: vec![],
+                derives: vec![],
+                methods,
+                operators: HashMap::new(),
+            },
+        );
+        let instance = Value::Struct {
+            type_name: "Display".to_string(),
+            fields: Rc::new(RefCell::new(HashMap::new())),
+        };
+        self.type_registry
+            .singletons
+            .insert("Display".to_string(), instance.clone());
+        self.define("display", instance, false);
     }
 
     /// ファイルパスを指定してモジュールローダーを初期化する
@@ -337,6 +586,9 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            output_listener: None,
+            display_listener: None,
+            trace_mode: false,
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
         };
@@ -358,6 +610,9 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            output_listener: None,
+            display_listener: None,
+            trace_mode: false,
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
         };
@@ -386,6 +641,9 @@ impl Interpreter {
             is_test_mode: false,
             loaded_modules: HashMap::new(),
             output_buffer: None,
+            output_listener: None,
+            display_listener: None,
+            trace_mode: false,
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
         };
@@ -396,6 +654,13 @@ impl Interpreter {
     pub fn set_pipeline_trace_nodes(&mut self, nodes: Vec<PipelineTraceNodeRef>) {
         self.pipeline_trace_nodes = nodes;
         self.pipeline_trace_events.clear();
+    }
+
+    pub fn set_trace_mode(&mut self, enabled: bool) {
+        self.trace_mode = enabled;
+        if !enabled {
+            self.pipeline_trace_events.clear();
+        }
     }
 
     pub fn take_pipeline_trace_events(&mut self) -> Vec<PipelineTraceEvent> {
@@ -415,6 +680,12 @@ impl Interpreter {
     }
 
     fn record_pipeline_trace(&mut self, span: &Span, method: &str, value: &Value) {
+        let corrupted = if self.trace_mode {
+            detect_corrupted_records(value)
+        } else {
+            Vec::new()
+        };
+        let message = pipeline_trace_message(value);
         self.pipeline_trace_events.push(PipelineTraceEvent {
             node_id: self.resolve_pipeline_trace_node_id(span, method),
             method: method.to_string(),
@@ -424,7 +695,60 @@ impl Interpreter {
             col: span.col,
             item_count: pipeline_item_count(value),
             outcome: pipeline_trace_outcome(method, value),
-            message: pipeline_trace_message(value),
+            message: message.or_else(|| {
+                if corrupted.is_empty() {
+                    None
+                } else {
+                    Some(
+                        corrupted
+                            .iter()
+                            .map(|record| format!("#{} {}", record.index, record.reason))
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )
+                }
+            }),
+            corrupted,
+        });
+    }
+
+    fn record_pipeline_trace_error(
+        &mut self,
+        span: &Span,
+        method: &str,
+        item_index: usize,
+        item: &Value,
+        error: &RuntimeError,
+        item_count: Option<usize>,
+    ) {
+        if !self.trace_mode {
+            return;
+        }
+
+        let mut reason = error.to_string();
+        let mut fields = snapshot_fields(item);
+        if fields.is_empty() {
+            fields.push(("value".to_string(), item.clone()));
+        }
+        if let Some(existing) = corruption_reasons_for_value(None, item).first() {
+            reason = format!("{reason}, {existing}");
+        }
+
+        self.pipeline_trace_events.push(PipelineTraceEvent {
+            node_id: self.resolve_pipeline_trace_node_id(span, method),
+            method: method.to_string(),
+            start: span.start,
+            end: span.end,
+            line: span.line,
+            col: span.col,
+            item_count,
+            outcome: PipelineTraceOutcome::ResultErr,
+            message: Some(error.to_string()),
+            corrupted: vec![CorruptedRecord {
+                index: item_index,
+                fields,
+                reason,
+            }],
         });
     }
 
@@ -2228,6 +2552,18 @@ impl Interpreter {
             if name == "none" && args.is_empty() {
                 return Ok(Value::Option(None));
             }
+            if name == "display" {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError::Custom("display() takes 1 arg".to_string()));
+                }
+                let output = auto_display_output(&arg_vals[0]);
+                emit_display_output(&self.display_listener, &self.output_buffer, output);
+                return Ok(Value::Unit);
+            }
             // tcp_listen / tcp_listen_async — forge run モードのシンプルな同期 HTTP サーバ
             if name == "tcp_listen" || name == "tcp_listen_async" {
                 let arg_vals: Vec<Value> = args
@@ -2524,7 +2860,7 @@ impl Interpreter {
                     other
                 ))),
             },
-            Value::List(items) => self.eval_list_method(items, method, arg_vals),
+            Value::List(items) => self.eval_list_method(items, method, arg_vals, span),
             Value::Map(entries) => self.eval_map_method(object, entries, method, arg_vals),
             Value::Set(items) => self.eval_set_method(object, items, method, arg_vals),
             Value::String(text) => self.eval_string_method(text, method, arg_vals),
@@ -2719,6 +3055,7 @@ impl Interpreter {
         items: Rc<RefCell<Vec<Value>>>,
         method: &str,
         args: Vec<Value>,
+        span: Option<&Span>,
     ) -> Result<Value, RuntimeError> {
         match method {
             // ── 変換 ──────────────────────────────────────────────────────
@@ -2726,8 +3063,23 @@ impl Interpreter {
                 let f = one_fn_arg(method, args)?;
                 let list = items.borrow().clone();
                 let mut out = Vec::with_capacity(list.len());
-                for item in list {
-                    out.push(self.call_value(f.clone(), vec![item])?);
+                for (index, item) in list.into_iter().enumerate() {
+                    match self.call_value(f.clone(), vec![item.clone()]) {
+                        Ok(value) => out.push(value),
+                        Err(error) => {
+                            if let Some(span) = span {
+                                self.record_pipeline_trace_error(
+                                    span,
+                                    method,
+                                    index + 1,
+                                    &item,
+                                    &error,
+                                    Some(out.len()),
+                                );
+                            }
+                            return Err(error);
+                        }
+                    }
                 }
                 Ok(mk_list(out))
             }
@@ -2735,8 +3087,24 @@ impl Interpreter {
                 let f = one_fn_arg(method, args)?;
                 let list = items.borrow().clone();
                 let mut out = Vec::new();
-                for item in list {
-                    match self.call_value(f.clone(), vec![item.clone()])? {
+                for (index, item) in list.into_iter().enumerate() {
+                    let matched = match self.call_value(f.clone(), vec![item.clone()]) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if let Some(span) = span {
+                                self.record_pipeline_trace_error(
+                                    span,
+                                    method,
+                                    index + 1,
+                                    &item,
+                                    &error,
+                                    Some(out.len()),
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
+                    match matched {
                         Value::Bool(true) => out.push(item),
                         Value::Bool(false) => {}
                         v => return Err(type_err("bool", v.type_name())),
@@ -3143,8 +3511,23 @@ impl Interpreter {
             "find" => {
                 let f = one_fn_arg(method, args)?;
                 let list = items.borrow().clone();
-                for item in list {
-                    let matched = self.call_value(f.clone(), vec![item.clone()])?;
+                for (index, item) in list.into_iter().enumerate() {
+                    let matched = match self.call_value(f.clone(), vec![item.clone()]) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if let Some(span) = span {
+                                self.record_pipeline_trace_error(
+                                    span,
+                                    method,
+                                    index + 1,
+                                    &item,
+                                    &error,
+                                    Some(index),
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
                     if matches!(matched, Value::Bool(true)) {
                         return Ok(Value::Option(Some(Box::new(item))));
                     }
@@ -3377,6 +3760,7 @@ impl Interpreter {
                         item_count: Some(0),
                         outcome: PipelineTraceOutcome::ResultErr,
                         message: Some(e.clone()),
+                        corrupted: Vec::new(),
                     });
                 }
                 Err(RuntimeError::PropagateErr(e))
@@ -4528,7 +4912,7 @@ impl Interpreter {
                     other
                 ))),
             },
-            Value::List(items) => self.eval_list_method(items, method, arg_vals),
+            Value::List(items) => self.eval_list_method(items, method, arg_vals, None),
             ref obj @ Value::Struct { ref type_name, .. } => {
                 let type_name_cloned = type_name.clone();
                 self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
@@ -5173,6 +5557,114 @@ fn pipeline_trace_message(value: &Value) -> Option<String> {
         Value::Result(Err(message)) => Some(message.clone()),
         _ => None,
     }
+}
+
+fn detect_corrupted_records(value: &Value) -> Vec<CorruptedRecord> {
+    match value {
+        Value::List(items) => items
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| corruption_for_value(index + 1, item))
+            .collect(),
+        other => corruption_for_value(1, other).into_iter().collect(),
+    }
+}
+
+fn corruption_for_value(index: usize, value: &Value) -> Option<CorruptedRecord> {
+    let reasons = corruption_reasons_for_value(None, value);
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(CorruptedRecord {
+        index,
+        fields: snapshot_fields(value),
+        reason: reasons.join(", "),
+    })
+}
+
+fn corruption_reasons_for_value(field_name: Option<&str>, value: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    match value {
+        Value::Option(None) => {
+            reasons.push(match field_name {
+                Some(name) => format!("{name} is none"),
+                None => "value is none".to_string(),
+            });
+        }
+        Value::Float(number) if number.is_nan() => {
+            reasons.push(match field_name {
+                Some(name) => format!("{name} is NaN"),
+                None => "value is NaN".to_string(),
+            });
+        }
+        Value::String(text) if text.trim().is_empty() => {
+            reasons.push(match field_name {
+                Some(name) => format!("{name} is empty"),
+                None => "value is empty".to_string(),
+            });
+        }
+        Value::Int(number) if field_name.is_some_and(is_score_field) && *number < 0 => {
+            reasons.push(format!("{} is negative", field_name.unwrap_or("value")));
+        }
+        Value::Float(number)
+            if field_name.is_some_and(is_score_field) && number.is_finite() && *number < 0.0 =>
+        {
+            reasons.push(format!("{} is negative", field_name.unwrap_or("value")));
+        }
+        Value::Map(entries) => {
+            for (key, nested) in entries {
+                if let Value::String(name) = key {
+                    reasons.extend(corruption_reasons_for_value(Some(name), nested));
+                }
+            }
+        }
+        Value::Struct { fields, .. } => {
+            for (name, nested) in fields.borrow().iter() {
+                reasons.extend(corruption_reasons_for_value(Some(name), nested));
+            }
+        }
+        Value::Typestate { fields, .. } => {
+            for (name, nested) in fields.borrow().iter() {
+                reasons.extend(corruption_reasons_for_value(Some(name), nested));
+            }
+        }
+        Value::Result(Err(message)) => {
+            reasons.push(match field_name {
+                Some(name) => format!("{name} is err({message})"),
+                None => format!("value is err({message})"),
+            });
+        }
+        _ => {}
+    }
+    reasons
+}
+
+fn snapshot_fields(value: &Value) -> Vec<(String, Value)> {
+    match value {
+        Value::Map(entries) => entries
+            .iter()
+            .filter_map(|(key, value)| match key {
+                Value::String(name) => Some((name.clone(), value.clone())),
+                _ => None,
+            })
+            .collect(),
+        Value::Struct { fields, .. } => fields
+            .borrow()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        Value::Typestate { fields, .. } => fields
+            .borrow()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        other => vec![("value".to_string(), other.clone())],
+    }
+}
+
+fn is_score_field(name: &str) -> bool {
+    name.eq_ignore_ascii_case("score") || name.to_ascii_lowercase().ends_with("_score")
 }
 
 /// 2つの Value を大小比較する（Int / Float / String / @derive(Ord) な Struct 対応）
@@ -6820,6 +7312,257 @@ fn json_to_value(jv: serde_json::Value) -> Value {
     }
 }
 
+fn emit_display_output(
+    listener: &Option<Arc<dyn Fn(DisplayOutput) + Send + Sync>>,
+    output_buffer: &Option<Arc<Mutex<String>>>,
+    output: DisplayOutput,
+) {
+    if let Some(listener) = listener {
+        listener(output);
+        return;
+    }
+
+    let text = fallback_render_display_output(&output);
+    if let Some(buffer) = output_buffer {
+        if let Ok(mut buffer) = buffer.lock() {
+            buffer.push_str(&text);
+        }
+        return;
+    }
+    print!("{}", text);
+}
+
+fn fallback_render_display_output(output: &DisplayOutput) -> String {
+    match output {
+        DisplayOutput::Text { value }
+        | DisplayOutput::Html { value }
+        | DisplayOutput::Markdown { value } => ensure_trailing_newline(value.clone()),
+        DisplayOutput::Json { value } => ensure_trailing_newline(
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        ),
+        DisplayOutput::Table { columns: _, rows } => {
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|row| {
+                    let values = row
+                        .iter()
+                        .map(json_cell_to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[{}]", values)
+                })
+                .collect();
+            ensure_trailing_newline(lines.join("\n"))
+        }
+        DisplayOutput::Image { mime, .. } => ensure_trailing_newline(format!("<image:{}>", mime)),
+    }
+}
+
+fn ensure_trailing_newline(mut text: String) -> String {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+fn auto_display_output(value: &Value) -> DisplayOutput {
+    match value {
+        Value::String(value) => DisplayOutput::Text {
+            value: value.clone(),
+        },
+        Value::List(items) => {
+            let list = items.borrow();
+            let candidate = Value::List(Rc::new(RefCell::new(list.clone())));
+            if let Ok((columns, rows)) = value_to_table(&candidate) {
+                DisplayOutput::Table { columns, rows }
+            } else {
+                DisplayOutput::Text {
+                    value: candidate.to_string(),
+                }
+            }
+        }
+        Value::Map(_) | Value::Struct { .. } => DisplayOutput::Json {
+            value: value_to_json(value),
+        },
+        _ => DisplayOutput::Text {
+            value: value.to_string(),
+        },
+    }
+}
+
+fn value_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Int(value) => serde_json::Value::from(*value),
+        Value::Float(value) => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::Bool(value) => serde_json::Value::Bool(*value),
+        Value::Unit => serde_json::Value::Null,
+        Value::Option(Some(value)) => value_to_json(value),
+        Value::Option(None) => serde_json::Value::Null,
+        Value::Result(Ok(value)) => value_to_json(value),
+        Value::Result(Err(error)) => serde_json::Value::String(error.clone()),
+        Value::List(items) => serde_json::Value::Array(
+            items.borrow().iter().map(value_to_json).collect::<Vec<_>>(),
+        ),
+        Value::Map(entries) => serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value_to_json(value)))
+                .collect(),
+        ),
+        Value::Set(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        Value::Struct { type_name, fields } => {
+            let mut object = serde_json::Map::new();
+            if type_name != "<anon>" {
+                object.insert(
+                    "_type".to_string(),
+                    serde_json::Value::String(type_name.clone()),
+                );
+            }
+            for (key, value) in fields.borrow().iter() {
+                object.insert(key.clone(), value_to_json(value));
+            }
+            serde_json::Value::Object(object)
+        }
+        Value::Enum {
+            type_name,
+            variant,
+            data,
+        } => {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "_type".to_string(),
+                serde_json::Value::String(type_name.clone()),
+            );
+            object.insert(
+                "variant".to_string(),
+                serde_json::Value::String(variant.clone()),
+            );
+            object.insert(
+                "data".to_string(),
+                match data {
+                    EnumData::Unit => serde_json::Value::Null,
+                    EnumData::Tuple(items) => {
+                        serde_json::Value::Array(items.iter().map(value_to_json).collect())
+                    }
+                    EnumData::Struct(fields) => serde_json::Value::Object(
+                        fields
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value_to_json(value)))
+                            .collect(),
+                    ),
+                },
+            );
+            serde_json::Value::Object(object)
+        }
+        Value::Typestate {
+            type_name,
+            current_state,
+            fields,
+        } => {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "_type".to_string(),
+                serde_json::Value::String(type_name.clone()),
+            );
+            object.insert(
+                "_state".to_string(),
+                serde_json::Value::String(current_state.clone()),
+            );
+            for (key, value) in fields.borrow().iter() {
+                object.insert(key.clone(), value_to_json(value));
+            }
+            serde_json::Value::Object(object)
+        }
+        Value::Closure { .. } | Value::NativeFunction(_) => {
+            serde_json::Value::String(value.to_string())
+        }
+    }
+}
+
+fn value_to_table(
+    value: &Value,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
+    let rows = match value {
+        Value::List(items) => items.borrow().clone(),
+        other => {
+            return Err(format!(
+                "display::table() expects list<map>, got {}",
+                other.type_name()
+            ))
+        }
+    };
+
+    let mut columns = Vec::<String>::new();
+    let mut normalized_rows = Vec::new();
+    for row in rows {
+        let object = row_to_object(&row)?;
+        for key in object.keys() {
+            if !columns.contains(key) {
+                columns.push(key.clone());
+            }
+        }
+        normalized_rows.push(object);
+    }
+
+    let rows = normalized_rows
+        .into_iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| row.get(column).cloned().unwrap_or(serde_json::Value::Null))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    Ok((columns, rows))
+}
+
+fn row_to_object(value: &Value) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match value {
+        Value::Map(entries) => Ok(entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value_to_json(value)))
+            .collect()),
+        Value::Struct { fields, .. } | Value::Typestate { fields, .. } => Ok(fields
+            .borrow()
+            .iter()
+            .map(|(key, value)| (key.clone(), value_to_json(value)))
+            .collect()),
+        other => Err(format!(
+            "display::table() expects rows of map/struct, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn json_cell_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn image_mime_type(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 // ── dep パッケージ内の相対インポート変換 ──────────────────────────────────
 
 /// dep パッケージから読み込んだファイルの `use ./foo.*` を `use depname/foo.*` に変換する。
@@ -7337,26 +8080,51 @@ mod tests {
         eval_source(src)
     }
 
+    fn run_with_output(src: &str) -> Result<String, RuntimeError> {
+        let module = parse_source(src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let (mut interp, output) = Interpreter::with_output_capture();
+        let _ = interp.eval(&module)?;
+        let text = output.lock().expect("lock").clone();
+        Ok(text)
+    }
+
     fn run_with_trace(
         src: &str,
         nodes: Vec<PipelineTraceNodeRef>,
     ) -> Result<(Value, Vec<PipelineTraceEvent>), RuntimeError> {
         let module = parse_source(src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
         let mut interp = Interpreter::new();
+        interp.set_trace_mode(true);
         interp.set_pipeline_trace_nodes(nodes);
         let value = interp.eval(&module)?;
         Ok((value, interp.take_pipeline_trace_events()))
     }
 
+    fn run_with_trace_capture(
+        src: &str,
+        nodes: Vec<PipelineTraceNodeRef>,
+    ) -> Result<(Result<Value, RuntimeError>, Vec<PipelineTraceEvent>), RuntimeError> {
+        let module = parse_source(src).map_err(|e| RuntimeError::Custom(e.to_string()))?;
+        let mut interp = Interpreter::new();
+        interp.set_trace_mode(true);
+        interp.set_pipeline_trace_nodes(nodes);
+        let value = interp.eval(&module);
+        let events = interp.take_pipeline_trace_events();
+        Ok((value, events))
+    }
+
     fn first_method_span(module: &Module) -> Span {
-        match &module.stmts[0] {
-            Stmt::Expr(Expr::MethodCall { span, .. }) => span.clone(),
-            Stmt::Let {
-                value: Expr::MethodCall { span, .. },
-                ..
-            } => span.clone(),
-            other => panic!("expected method call, got {other:?}"),
+        for stmt in &module.stmts {
+            match stmt {
+                Stmt::Expr(Expr::MethodCall { span, .. }) => return span.clone(),
+                Stmt::Let {
+                    value: Expr::MethodCall { span, .. },
+                    ..
+                } => return span.clone(),
+                _ => {}
+            }
         }
+        panic!("expected method call, got {:?}", module.stmts);
     }
 
     #[test]
@@ -7808,6 +8576,48 @@ impl Foo {
     fn test_native_print() {
         // print は Value::Unit を返し、副作用として stdout に出力する
         assert_eq!(run("print(42)"), Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_display_text_fallback() {
+        let output = run_with_output(r#"display::text("hello")"#).expect("run");
+        assert_eq!(output, "hello\n");
+    }
+
+    #[test]
+    fn test_display_table_fallback() {
+        let output = run_with_output(
+            r#"
+            display::table([
+              { name: "alice", score: 90 },
+              { name: "bob", score: 75 }
+            ])
+            "#,
+        )
+        .expect("run");
+        assert!(!output.contains("[name, score]"), "header row should not appear: {output}");
+        assert!(output.contains("[alice, 90]"), "got: {output}");
+        assert!(output.contains("[bob, 75]"), "got: {output}");
+    }
+
+    #[test]
+    fn test_display_auto_string() {
+        let output = run_with_output(r#"display("hello")"#).expect("run");
+        assert_eq!(output, "hello\n");
+    }
+
+    #[test]
+    fn test_display_auto_list_map() {
+        let output = run_with_output(
+            r#"
+            display([
+              { name: "alice", score: 90 }
+            ])
+            "#,
+        )
+        .expect("run");
+        assert!(!output.contains("[name, score]"), "header row should not appear: {output}");
+        assert!(output.contains("[alice, 90]"), "got: {output}");
     }
 
     #[test]
@@ -10370,6 +11180,100 @@ s == "Hello"
         assert_eq!(trace[0].item_count, Some(0));
         assert_eq!(trace[0].outcome, PipelineTraceOutcome::ResultErr);
         assert_eq!(trace[0].message.as_deref(), Some("oops"));
+    }
+
+    #[test]
+    fn test_trace_null_field() {
+        let src = r#"
+            let rows = [
+                { name: none, score: 95 },
+                { name: "ok", score: 88 }
+            ]
+            rows.map(row => row)
+        "#;
+        let module = parse_source(src).expect("parse");
+        let span = first_method_span(&module);
+        let (_, trace) = run_with_trace(
+            src,
+            vec![PipelineTraceNodeRef {
+                node_id: 11,
+                start: span.start,
+                end: span.end,
+                line: span.line,
+                col: span.col,
+            }],
+        )
+        .expect("run");
+
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].method, "map");
+        assert_eq!(trace[0].corrupted.len(), 1);
+        assert_eq!(trace[0].corrupted[0].index, 1);
+        assert!(trace[0].corrupted[0].reason.contains("name is none"));
+    }
+
+    #[test]
+    fn test_trace_nan_score() {
+        let src = r#"
+            let rows = [
+                { name: "alice", score: 10.0 },
+                { name: "bob", score: 0.0 / 0.0 },
+                { name: "carol", score: -1.0 }
+            ]
+            rows.map(row => row)
+        "#;
+        let module = parse_source(src).expect("parse");
+        let span = first_method_span(&module);
+        let (_, trace) = run_with_trace(
+            src,
+            vec![PipelineTraceNodeRef {
+                node_id: 12,
+                start: span.start,
+                end: span.end,
+                line: span.line,
+                col: span.col,
+            }],
+        )
+        .expect("run");
+
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].corrupted.len(), 2);
+        assert!(trace[0].corrupted.iter().any(|record| record.reason.contains("score is NaN")));
+        assert!(trace[0]
+            .corrupted
+            .iter()
+            .any(|record| record.reason.contains("score is negative")));
+    }
+
+    #[test]
+    fn test_trace_type_mismatch_error() {
+        let src = r#"
+            let rows = [
+                { score: 1 },
+                { score: none }
+            ]
+            rows.map(row => row.score + 1)
+        "#;
+        let module = parse_source(src).expect("parse");
+        let span = first_method_span(&module);
+        let (result, trace) = run_with_trace_capture(
+            src,
+            vec![PipelineTraceNodeRef {
+                node_id: 13,
+                start: span.start,
+                end: span.end,
+                line: span.line,
+                col: span.col,
+            }],
+        )
+        .expect("run");
+
+        assert!(result.is_err());
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].outcome, PipelineTraceOutcome::ResultErr);
+        assert_eq!(trace[0].corrupted.len(), 1);
+        assert_eq!(trace[0].corrupted[0].index, 2);
+        assert!(trace[0].corrupted[0].reason.contains("number"));
     }
 
     #[test]

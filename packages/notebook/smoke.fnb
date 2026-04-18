@@ -1,0 +1,72 @@
+# Forge Notebook Smoke Test
+
+このノートブックは VS Code の手動確認用です。
+
+確認ポイント:
+
+- Notebook ビューで開ける
+- セル単体実行ができる
+- セル間でスコープが共有される
+- `skip=true` が反映される
+- エラー出力が表示される
+- `.fnb.out.json` から出力が復元される
+
+## Setup
+
+
+```forge name="setup"
+let x = 42
+let rows = [
+  { name: "alice", score: 90 },
+  { name: "bob", score: 75 }
+]
+println("setup done")
+```
+
+
+## Shared Scope
+
+
+```forge name="shared_scope"
+println(x)
+```
+
+
+## Hidden Cell
+
+
+```forge name="hidden_cell" hidden=true
+println("hidden cell")
+```
+
+
+## Skipped Cell
+
+
+```forge name="skip_me" skip=true
+println("this should be skipped")
+```
+
+
+## JSON-ish Output Placeholder
+
+
+```forge name="rows_dump"
+println(rows)
+```
+
+
+## Error Cell
+
+
+```forge name="error_case"
+println(y)
+```
+
+
+## After Error
+
+
+```forge name="after_error"
+println("after error")
+```

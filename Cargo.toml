@@ -10,6 +10,7 @@ members = [
     "crates/forge-transpiler",
     "crates/forge-cli",
     "crates/forge-mcp",
+    "crates/forge-notebook",
     # パッケージ Rust 実装（packages/ 配下の ForgeScript パッケージを支えるクレート）
     "crates/crucible-cli",
     # 将来追加:

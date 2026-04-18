@@ -712,12 +712,17 @@ let names = undefined_var |> map(s => s.name)
         )
         .expect("extract");
         let graph = longest_graph(&graphs);
-        assert!(graph
-            .diagnostics
-            .iter()
-            .any(|diag| diag.code == "UnknownSymbol"),
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|diag| diag.code == "UnknownSymbol"),
             "expected UnknownSymbol diagnostic, got: {:?}",
-            graph.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+            graph
+                .diagnostics
+                .iter()
+                .map(|d| &d.code)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -739,7 +744,11 @@ let result = maybe_user |> and_then(u => u.name)
                 .iter()
                 .any(|diag| diag.code == "TypeMismatch"),
             "expected TypeMismatch diagnostic, got: {:?}",
-            graph.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+            graph
+                .diagnostics
+                .iter()
+                .map(|d| &d.code)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -761,7 +770,11 @@ let pairs = students |> partition(s => s.name == "A") |> map(s => s.name)
                 .iter()
                 .any(|diag| diag.code == "UnsupportedPipelineShape"),
             "expected UnsupportedPipelineShape diagnostic, got: {:?}",
-            graph.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+            graph
+                .diagnostics
+                .iter()
+                .map(|d| &d.code)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -783,7 +796,11 @@ let names = students |> filter(s => s.name)
                 .iter()
                 .any(|diag| diag.code == "InvalidClosureReturn"),
             "expected InvalidClosureReturn diagnostic, got: {:?}",
-            graph.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+            graph
+                .diagnostics
+                .iter()
+                .map(|d| &d.code)
+                .collect::<Vec<_>>()
         );
     }
 }

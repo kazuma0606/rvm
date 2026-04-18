@@ -687,9 +687,7 @@ fn propagate_method(
             };
             let node = graph.nodes[idx].clone();
             let closure_ret = infer_closure_return(&node, &item, graph, idx, annotations);
-            if closure_ret.shape != DataShape::Unknown
-                && closure_ret.display != "bool"
-            {
+            if closure_ret.shape != DataShape::Unknown && closure_ret.display != "bool" {
                 add_error(
                     graph,
                     idx,
@@ -992,10 +990,9 @@ fn propagate_method(
             );
             (ResolvedType::unknown(), DataState::Unknown)
         }
-        (
-            DataShape::Tuple(_) | DataShape::AnonStruct(_) | DataShape::Struct { .. },
-            method,
-        ) if !method.is_empty() => {
+        (DataShape::Tuple(_) | DataShape::AnonStruct(_) | DataShape::Struct { .. }, method)
+            if !method.is_empty() =>
+        {
             add_error(
                 graph,
                 idx,

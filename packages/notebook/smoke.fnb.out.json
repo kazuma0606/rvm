@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "file": "smoke.fnb",
+  "executed_at": "2026-04-17T20:00:14.857Z",
+  "cells": [
+    {
+      "index": 11,
+      "name": "after_error",
+      "status": "ok",
+      "outputs": [
+        {
+          "type": "text",
+          "value": "after error\n"
+        },
+        {
+          "type": "text",
+          "value": "after error\n"
+        }
+      ],
+      "duration_ms": 0
+    }
+  ]
+}

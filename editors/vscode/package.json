@@ -14,15 +14,18 @@
   },
   "files": [
     "out/**",
+    "notebook-renderers/**",
     "syntaxes/**",
     "language-configuration.json",
     "package.json"
   ],
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Notebooks"
   ],
   "activationEvents": [
-    "onLanguage:forge"
+    "onLanguage:forge",
+    "onNotebook:fnb"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -46,13 +49,41 @@
         "path": "./syntaxes/forge.tmLanguage.json"
       }
     ],
+    "notebooks": [
+      {
+        "type": "fnb",
+        "displayName": "Forge Notebook",
+        "selector": [
+          {
+            "filenamePattern": "*.fnb"
+          }
+        ]
+      }
+    ],
+    "notebookRenderer": [
+      {
+        "id": "forge-output-renderer",
+        "displayName": "Forge Notebook Output Renderer",
+        "entrypoint": "./out/notebook/pipeline-trace-renderer.js",
+        "mimeTypes": [
+          "application/vnd.forge.table+json",
+          "application/vnd.forge.html+json",
+          "application/vnd.forge.pipeline-trace+json"
+        ]
+      }
+    ],
     "configuration": {
       "title": "ForgeScript",
       "properties": {
         "forge.languageServer.path": {
           "type": "string",
-          "default": "forge",
-          "description": "Command used to launch forge-lsp. The extension runs `<path> lsp`."
+          "default": "",
+          "description": "Command or executable path for the language server. If you point to `forge-lsp`, it is launched directly. Otherwise the extension runs `<path> lsp`."
+        },
+        "forge.notebook.path": {
+          "type": "string",
+          "default": "",
+          "description": "Command or executable path for notebook execution. The extension runs `<path> notebook --kernel`."
         }
       }
     }

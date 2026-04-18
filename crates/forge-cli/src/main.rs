@@ -22,6 +22,10 @@ use forge_goblet::{
     render_mermaid as goblet_render_mermaid, render_text as goblet_render_text, NodeStatus,
     PipelineGraph,
 };
+use forge_notebook::{
+    export_ipynb, load_output, output_path_for, parse_notebook, save_output, Cell, CellOutput,
+    KernelClient, NotebookOutput, OutputItem, PipelineTraceCorruption, PipelineTraceStage,
+};
 use forge_transpiler::transpile;
 use forge_vm::interpreter::{
     Interpreter, PipelineTraceEvent, PipelineTraceNodeRef, PipelineTraceOutcome,
@@ -96,6 +100,32 @@ fn main() {
         }
         Some("goblet") => {
             goblet_entry(&args);
+        }
+        Some("notebook") => {
+            if args.get(2).map(|s| s.as_str()) == Some("export") {
+                let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                    eprintln!("繧ｨ繝ｩ繝ｼ: 繝輔ぃ繧､繝ｫ繝代せ繧呈欠螳壹＠縺ｦ縺上□縺輔＞");
+                    eprintln!("菴ｿ逕ｨ譁ｹ豕・ forge notebook export <file.fnb> --format ipynb");
+                    std::process::exit(1);
+                };
+                let format = args
+                    .iter()
+                    .position(|arg| arg == "--format")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("ipynb");
+                let output = args
+                    .iter()
+                    .position(|arg| arg == "-o" || arg == "--output")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str());
+                let code = export_notebook(path, format, output);
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            } else {
+                notebook_entry(&args);
+            }
         }
         Some("lsp") => {
             forge_lsp::run_stdio_blocking();
@@ -578,6 +608,25 @@ fn goblet_entry(args: &[String]) {
             };
             run_goblet_dump(path)
         }
+        Some("export") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("繧ｨ繝ｩ繝ｼ: 繝輔ぃ繧､繝ｫ繝代せ繧呈欠螳壹＠縺ｦ縺上□縺輔＞");
+                eprintln!("菴ｿ逕ｨ譁ｹ豕・ forge notebook export <file.fnb> --format ipynb");
+                std::process::exit(1);
+            };
+            let format = args
+                .iter()
+                .position(|arg| arg == "--format")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("ipynb");
+            let output = args
+                .iter()
+                .position(|arg| arg == "-o" || arg == "--output")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            export_notebook(path, format, output)
+        }
         _ => {
             eprintln!("エラー: 未知の goblet サブコマンドです");
             eprintln!("使用可能: forge goblet graph / explain / dump");
@@ -590,6 +639,350 @@ fn goblet_entry(args: &[String]) {
 }
 
 /// 終了コード: 0=正常, 1=型エラーあり, 2=解析失敗
+fn notebook_entry(args: &[String]) {
+    match args.get(2).map(|s| s.as_str()) {
+        Some("--kernel") => {
+            forge_notebook::run_kernel_stdio();
+        }
+        Some("run") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!(
+                    "使用方法: forge notebook run <file.fnb> [--cell <name>] [--stop-on-error]"
+                );
+                std::process::exit(1);
+            };
+
+            let cell_filter = args
+                .iter()
+                .position(|arg| arg == "--cell")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.to_string());
+            let stop_on_error = args.iter().any(|arg| arg == "--stop-on-error");
+
+            let code = run_notebook_file(path, cell_filter, stop_on_error);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some("reset") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge notebook reset <file.fnb>");
+                std::process::exit(1);
+            };
+            let code = run_notebook_file(path, None, false);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some("clear") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge notebook clear <file.fnb>");
+                std::process::exit(1);
+            };
+            let code = clear_notebook_output(path);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some("show") => {
+            let Some(path) = args.get(3).map(|s| s.as_str()) else {
+                eprintln!("エラー: ファイルパスを指定してください");
+                eprintln!("使用方法: forge notebook show <file.fnb>");
+                std::process::exit(1);
+            };
+            let code = show_notebook(path);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        _ => {
+            eprintln!("エラー: 未対応の notebook サブコマンドです");
+            eprintln!("使用可能: forge notebook run / reset / clear / show / --kernel");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_notebook_file(path: &str, cell_filter: Option<String>, stop_on_error: bool) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            return 1;
+        }
+    };
+
+    let cells = parse_notebook(&source);
+    let mut client = match KernelClient::spawn() {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("エラー: notebook kernel を起動できませんでした: {}", error);
+            return 1;
+        }
+    };
+
+    let mut cell_outputs = Vec::new();
+    let mut has_error = false;
+    for cell in &cells {
+        let Cell::Code(code) = cell else {
+            continue;
+        };
+        if cell_filter
+            .as_deref()
+            .is_some_and(|filter| filter != code.name.as_str())
+        {
+            continue;
+        }
+        if code.skip {
+            println!("[skipped] {}", code.name);
+            cell_outputs.push(CellOutput {
+                index: code.index,
+                name: code.name.clone(),
+                status: "skipped".to_string(),
+                outputs: Vec::new(),
+                duration_ms: 0,
+            });
+            continue;
+        }
+
+        let response = match client.execute(&code.source) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("エラー: kernel execute に失敗しました: {}", error);
+                let _ = client.shutdown();
+                return 1;
+            }
+        };
+
+        match response.status.as_str() {
+            "ok" => {
+                println!(
+                    "[ok] {} ({} ms)",
+                    code.name,
+                    response.duration_ms.unwrap_or_default()
+                );
+            }
+            "error" => {
+                has_error = true;
+                println!(
+                    "[error] {} ({} ms)",
+                    code.name,
+                    response.duration_ms.unwrap_or_default()
+                );
+            }
+            other => println!("[{}] {}", other, code.name),
+        }
+
+        print_outputs(&response.outputs);
+
+        cell_outputs.push(CellOutput {
+            index: code.index,
+            name: code.name.clone(),
+            status: response.status.clone(),
+            outputs: response.outputs.clone(),
+            duration_ms: response.duration_ms.unwrap_or_default(),
+        });
+
+        if has_error && stop_on_error {
+            break;
+        }
+    }
+    let _ = client.shutdown();
+
+    let notebook_output = NotebookOutput {
+        version: 1,
+        file: Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path)
+            .to_string(),
+        executed_at: chrono::Utc::now(),
+        cells: cell_outputs,
+    };
+    let output_path = output_path_for(Path::new(path));
+    if let Err(error) = save_output(&output_path, &notebook_output) {
+        eprintln!("エラー: 出力ファイルを書き込めませんでした: {}", error);
+        return 1;
+    }
+
+    if has_error {
+        1
+    } else {
+        0
+    }
+}
+
+fn clear_notebook_output(path: &str) -> i32 {
+    let output_path = output_path_for(Path::new(path));
+    match fs::remove_file(&output_path) {
+        Ok(_) => {
+            println!("{}", output_path.display());
+            0
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            eprintln!(
+                "エラー: 出力ファイル '{}' を削除できませんでした: {}",
+                output_path.display(),
+                error
+            );
+            1
+        }
+    }
+}
+
+fn show_notebook(path: &str) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(error) => {
+            eprintln!(
+                "エラー: ファイル '{}' を読み込めませんでした: {}",
+                path, error
+            );
+            return 1;
+        }
+    };
+    let cells = parse_notebook(&source);
+    let output_path = output_path_for(Path::new(path));
+    let output = load_output(&output_path).ok();
+    print!("{}", format_notebook_show(&cells, output.as_ref()));
+    0
+}
+
+fn export_notebook(path: &str, format: &str, output_override: Option<&str>) -> i32 {
+    if format != "ipynb" {
+        eprintln!("繧ｨ繝ｩ繝ｼ: 譛ｪ蟇ｾ蠢懊・ export format '{}'", format);
+        return 1;
+    }
+
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(error) => {
+            eprintln!(
+                "繧ｨ繝ｩ繝ｼ: 繝輔ぃ繧､繝ｫ '{}' 繧定ｪｭ縺ｿ霎ｼ繧√∪縺帙ｓ縺ｧ縺励◆: {}",
+                path, error
+            );
+            return 1;
+        }
+    };
+
+    let cells = parse_notebook(&source);
+    let output_path = output_path_for(Path::new(path));
+    let notebook_output = load_output(&output_path).ok();
+    let exported = export_ipynb(&cells, notebook_output.as_ref());
+    let export_path = output_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(path).with_extension("ipynb"));
+    let content = match serde_json::to_string_pretty(&exported) {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!("繧ｨ繝ｩ繝ｼ: ipynb JSON 縺ｮ逕滓・縺ｫ螟ｱ謨励＠縺ｾ縺励◆: {}", error);
+            return 1;
+        }
+    };
+
+    match fs::write(&export_path, format!("{}\n", content)) {
+        Ok(_) => {
+            println!("{}", export_path.display());
+            0
+        }
+        Err(error) => {
+            eprintln!(
+                "繧ｨ繝ｩ繝ｼ: export 繝輔ぃ繧､繝ｫ '{}' 縺ｮ譖ｸ縺崎ｾｼ縺ｿ縺ｫ螟ｱ謨励＠縺ｾ縺励◆: {}",
+                export_path.display(),
+                error
+            );
+            1
+        }
+    }
+}
+
+fn format_notebook_show(cells: &[Cell], output: Option<&NotebookOutput>) -> String {
+    let mut lines = Vec::new();
+    for cell in cells {
+        let Cell::Code(code) = cell else {
+            continue;
+        };
+        let status = output
+            .and_then(|out| out.cells.iter().find(|cell| cell.index == code.index))
+            .map(|cell| cell.status.as_str())
+            .unwrap_or("pending");
+        lines.push(format!(
+            "{}\tline {}\t{}\t{}",
+            code.name, code.start_line, status, code.index
+        ));
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn print_outputs(outputs: &[OutputItem]) {
+    for output in outputs {
+        match output {
+            OutputItem::Text { value } => {
+                print!("{}", value);
+            }
+            OutputItem::PipelineTrace {
+                pipeline_name,
+                stages,
+                total_corrupted,
+                corruptions,
+                ..
+            } => {
+                print!(
+                    "{}",
+                    format_pipeline_trace(
+                        pipeline_name,
+                        stages,
+                        *total_corrupted,
+                        corruptions
+                    )
+                );
+            }
+            OutputItem::Error { message, .. } => {
+                eprintln!("{}", message);
+            }
+            other => {
+                println!("{}", serde_json::to_string(other).unwrap_or_default());
+            }
+        }
+    }
+}
+
+fn format_pipeline_trace(
+    pipeline_name: &str,
+    stages: &[PipelineTraceStage],
+    total_corrupted: usize,
+    corruptions: &[PipelineTraceCorruption],
+) -> String {
+    let flow = stages
+        .iter()
+        .map(|stage| {
+            if stage.corrupted > 0 {
+                format!("{}({}) !{}", stage.name, stage.out, stage.corrupted)
+            } else {
+                format!("{}({})", stage.name, stage.out)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ");
+
+    let mut lines = vec![format!("[pipeline: {}] {}", pipeline_name, flow)];
+    if total_corrupted > 0 {
+        lines.push(format!("! {} corrupted records detected", total_corrupted));
+        for corruption in corruptions {
+            lines.push(format!("  #{} [{}] {}", corruption.index, corruption.stage, corruption.reason));
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
 fn run_goblet_graph(
     path: &str,
     format: &str,
@@ -1741,6 +2134,10 @@ fn print_help() {
     println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
     println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");
     println!("  forge goblet graph <file.forge>     パイプライン可視化を出力");
+    println!("  forge notebook run <file.fnb>       Notebook を実行");
+    println!("  forge notebook reset <file.fnb>     Notebook を再実行");
+    println!("  forge notebook clear <file.fnb>     Notebook 出力を削除");
+    println!("  forge notebook show <file.fnb>      Notebook セル一覧を表示");
     println!("  forge lsp                           LSP サーバをstdioモードで起動");
     println!("  forge build                         forge.toml からバイナリを生成");
     println!("  forge build <dir/>                  指定ディレクトリの forge.toml を使用");
@@ -1834,6 +2231,63 @@ mod tests {
         let output = PathBuf::from("target/demo");
         let src = PathBuf::from("tmp/target/release/demo");
         assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
+    }
+
+    #[test]
+    fn test_notebook_show() {
+        let cells =
+            parse_notebook("```forge name=\"setup\"\nlet x = 42\n```\n```forge\nprintln(x)\n```");
+        let output = NotebookOutput {
+            version: 1,
+            file: "demo.fnb".to_string(),
+            executed_at: chrono::Utc::now(),
+            cells: vec![CellOutput {
+                index: 0,
+                name: "setup".to_string(),
+                status: "ok".to_string(),
+                outputs: vec![],
+                duration_ms: 1,
+            }],
+        };
+
+        let rendered = format_notebook_show(&cells, Some(&output));
+        assert!(rendered.contains("setup"));
+        assert!(rendered.contains("line 1"));
+        assert!(rendered.contains("ok"));
+        assert!(rendered.contains("cell_1"));
+    }
+
+    #[test]
+    fn test_fallback_text() {
+        let rendered = format_pipeline_trace(
+            "names",
+            &[
+                PipelineTraceStage {
+                    name: "source".to_string(),
+                    r#in: 3,
+                    out: 3,
+                    corrupted: 0,
+                    line: Some(1),
+                },
+                PipelineTraceStage {
+                    name: "map".to_string(),
+                    r#in: 3,
+                    out: 2,
+                    corrupted: 1,
+                    line: Some(2),
+                },
+            ],
+            1,
+            &[PipelineTraceCorruption {
+                stage: "map".to_string(),
+                index: 4,
+                reason: "name was none".to_string(),
+            }],
+        );
+
+        assert!(rendered.contains("[pipeline: names] source(3) -> map(2) !1"));
+        assert!(rendered.contains("! 1 corrupted records detected"));
+        assert!(rendered.contains("#4 [map] name was none"));
     }
 
     #[test]

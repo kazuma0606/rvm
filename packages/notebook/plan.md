@@ -280,6 +280,104 @@ Notebook API サポートを追加し、`.fnb` をノートブックとして開
 
 ---
 
+## Phase N-G: Goblet パイプライントレース出力
+
+> 前提: N-1（カーネル）完了後に着手。N-3 と並行可。
+> 設計参照: `lang/packages/goblet/v2/` スクリーンショット群（Goblet v2 UI モックアップ）
+
+### 目標
+
+パイプラインを含むセルを実行したとき、ノートブック出力としてパイプラインの健全性ビューを表示する。
+エラーや null / NaN などのデータ汚染が検出された場合、どのステージで何件が汚染されたかを
+視覚的に示し、具体的なレコードと汚染理由を提示する。
+
+```
+正常時（出力はコンパクト）:
+  [source: 10] → [filter: 7] → [map: 7] → [take: 7]
+
+異常時（詳細ビュー）:
+  [source: 10 ⚠3] → [filter: 8 ⚠3] → [map: 8 ⚠3] → [take: 7 ⚠3]
+  + SOURCE CODE ハイライト（汚染ステージの行が赤）
+  + STAGE DETAIL（クリックで汚染レコード一覧）
+```
+
+### 設計方針
+
+**汚染（Corruption）の定義:**
+パイプラインをデータが流れるとき、以下の条件を満たすレコードを「汚染レコード」として追跡する。
+- `null` / `none` なフィールドへのアクセスが発生したレコード
+- 数値フィールドが `NaN` または異常値（文脈依存）のレコード
+- クロージャ実行時に型エラー / panic が発生したレコード
+
+汚染レコードはパイプラインを通り抜けることがあるため、
+「最初に汚染が検出されたステージ」を記録しつつ以降のステージにも伝播する。
+
+### 実装ステップ
+
+1. **`forge-vm` ランタイムトレース**
+
+   `Interpreter` にトレースモードフラグを追加し、有効時のみ以下を記録する（通常実行のオーバーヘッドなし）:
+
+   - 各パイプラインステージの `in_count` / `out_count`
+   - 汚染レコードの index / フィールド値 / 汚染理由
+
+   トレース結果を `PipelineTrace` 構造体として返す。
+
+2. **`OutputItem::PipelineTrace`（`forge-notebook`）**
+
+   `.fnb.out.json` に格納するフォーマット:
+   ```json
+   {
+     "type": "pipeline_trace",
+     "pipeline_name": "names",
+     "source_snippet": "let names =\n    students\n    |> filter(s => s.score >= 80)\n    |> map(s => s.name)\n    |> take(7)",
+     "stages": [
+       { "name": "source", "in": 10, "out": 10, "corrupted": 3 },
+       { "name": "filter", "in": 10, "out":  8, "corrupted": 3 },
+       { "name": "map",    "in":  8, "out":  8, "corrupted": 3 },
+       { "name": "take",   "in":  8, "out":  7, "corrupted": 3 }
+     ],
+     "corruptions": [
+       { "stage": "source", "index": 4, "reason": "フィールド名が空、スコアが負の値" },
+       { "stage": "source", "index": 5, "reason": "nameがnull" },
+       { "stage": "source", "index": 9, "reason": "スコアがNaN" }
+     ],
+     "records_by_stage": {
+       "source": [ { "id": 1, "name": "田中太郎", "score": 95 }, ... ]
+     }
+   }
+   ```
+
+3. **VS Code WebView レンダリング（`pipeline-trace-renderer.ts`）**
+
+   スクリーンショットのレイアウトを参考に 3 ペイン構成で実装:
+
+   | ペイン | 内容 |
+   |---|---|
+   | DATA FLOW | ステージボックスを横並び。正常=白枠、汚染あり=赤枠＋`(N corrupted)` |
+   | SOURCE CODE | パイプラインコードを表示。汚染ステージの行を暗赤でハイライト＋行末ラベル |
+   | STAGE DETAIL | ステージクリックで展開。レコードテーブル＋汚染行ハイライト＋Corruption Details |
+
+   汚染 0 件の場合は DATA FLOW のみコンパクト表示。
+
+4. **`forge run` テキストフォールバック**
+   ```
+   [pipeline: names]  source(10) → filter(8) → map(8) → take(7)
+   ⚠ 3 corrupted records detected
+     #4: フィールド名が空、スコアが負の値
+     #5: nameがnull
+     #9: スコアがNaN
+   ```
+
+### テスト方針
+
+- 汚染なしパイプラインで `total_corrupted == 0`、DATA FLOW のみ出力
+- null フィールド含むレコードが汚染として検出される
+- 汚染レコードが複数ステージに「伝播」してカウントされる
+- `OutputItem::PipelineTrace` が仕様 JSON に変換される
+
+---
+
 ## Phase N-5〜N-7: 将来フェーズ
 
 ### N-5: 可視化

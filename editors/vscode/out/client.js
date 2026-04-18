@@ -33,29 +33,88 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveLanguageServerCommand = resolveLanguageServerCommand;
+exports.resolveNotebookCommand = resolveNotebookCommand;
 exports.startClient = startClient;
 exports.stopClient = stopClient;
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
-function resolveForgeCommand() {
-    const configured = vscode.workspace
+function configuredValue(key) {
+    const inspected = vscode.workspace
         .getConfiguration("forge")
-        .get("languageServer.path")
-        ?.trim();
-    if (configured) {
-        return configured;
+        .inspect(key);
+    const explicit = inspected?.workspaceFolderValue ??
+        inspected?.workspaceValue ??
+        inspected?.globalValue;
+    if (typeof explicit !== "string") {
+        return undefined;
     }
-    return "forge";
+    const trimmed = explicit.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+function workspaceRoot(context) {
+    return (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+        path.resolve(context.extensionPath, "..", ".."));
+}
+function isDirectServerBinary(command) {
+    const normalized = path.basename(command).toLowerCase();
+    return normalized === "forge-lsp" || normalized === "forge-lsp.exe";
+}
+function repoBinaryCandidates(context, binaryName) {
+    const roots = new Set([
+        workspaceRoot(context),
+        path.resolve(context.extensionPath, "..", "..")
+    ]);
+    return [...roots].map(root => path.join(root, "target", "debug", binaryName));
+}
+function firstExisting(paths) {
+    return paths.find(candidate => fs.existsSync(candidate));
+}
+function resolveLanguageServerCommand(context) {
+    const configured = configuredValue("languageServer.path");
+    if (configured) {
+        return {
+            command: configured,
+            args: isDirectServerBinary(configured) ? [] : ["lsp"]
+        };
+    }
+    const localServer = firstExisting(repoBinaryCandidates(context, "forge-lsp.exe"));
+    if (localServer) {
+        return { command: localServer, args: [] };
+    }
+    const localCli = firstExisting(repoBinaryCandidates(context, "forge-new.exe"));
+    if (localCli) {
+        return { command: localCli, args: ["lsp"] };
+    }
+    return { command: "forge", args: ["lsp"] };
+}
+function resolveNotebookCommand(context) {
+    const configured = configuredValue("notebook.path");
+    if (configured) {
+        return {
+            command: configured,
+            args: ["notebook", "--kernel"]
+        };
+    }
+    const localCli = firstExisting(repoBinaryCandidates(context, "forge-new.exe"));
+    if (localCli) {
+        return { command: localCli, args: ["notebook", "--kernel"] };
+    }
+    const configuredLsp = configuredValue("languageServer.path");
+    if (configuredLsp && !isDirectServerBinary(configuredLsp)) {
+        return { command: configuredLsp, args: ["notebook", "--kernel"] };
+    }
+    return { command: "forge", args: ["notebook", "--kernel"] };
 }
 function resolveServerOptions(context) {
-    const command = resolveForgeCommand();
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-        path.resolve(context.extensionPath, "..", "..");
+    const launch = resolveLanguageServerCommand(context);
+    const cwd = workspaceRoot(context);
     return {
-        command,
-        args: ["lsp"],
+        command: launch.command,
+        args: launch.args,
         transport: node_1.TransportKind.stdio,
         options: { cwd }
     };

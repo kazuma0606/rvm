@@ -15,7 +15,10 @@ forge-vm = { path = "../forge-vm" }
 forge-stdlib = { path = "../forge-stdlib" }
 forge-transpiler = { path = "../forge-transpiler" }
 forge-mcp = { path = "../forge-mcp" }
+forge-notebook = { path = "../forge-notebook" }
 toml = "0.8"
+chrono = "0.4"
+serde_json = "1"
 
 tempfile = "3"
 
