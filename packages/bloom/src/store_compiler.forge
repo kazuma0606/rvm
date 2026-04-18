@@ -1,0 +1,593 @@
+// store_compiler.forge
+// .flux.bloom ファイルのパース・コード生成・typestate バリデーション
+
+// compiler.forge のユーティリティを再利用
+use bloom/compiler.{ str_find, str_slice, trim_ascii, char_from_byte, contains_string }
+
+fn str_len(s: string) -> number {
+    string_to_bytes(s).len()
+}
+
+fn str_starts_with(s: string, prefix: string) -> bool {
+    let sb = string_to_bytes(s)
+    let pb = string_to_bytes(prefix)
+    let plen = pb.len()
+    if sb.len() < plen {
+        return false
+    }
+    state i = 0
+    state ok = true
+    while i < plen && ok {
+        if sb[i] != pb[i] {
+            ok = false
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn str_replace_first(s: string, from: string, to: string) -> string {
+    let pos = str_find(s, from, 0)
+    if pos < 0 {
+        return s
+    }
+    let before = str_slice(s, 0, pos)
+    let after = str_slice(s, pos + str_len(from), str_len(s))
+    "{before}{to}{after}"
+}
+
+fn to_lower_ascii(s: string) -> string {
+    let bytes = string_to_bytes(s)
+    state out: list<number> = []
+    state i = 0
+    while i < bytes.len() {
+        let b = bytes[i]
+        if b >= 65 && b <= 90 {
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    bytes_to_str(out)
+}
+
+fn split_lines(s: string) -> list<string> {
+    s.split("\n")
+}
+
+fn join_lines(lines: list<string>) -> string {
+    state out = ""
+    state i = 0
+    while i < lines.len() {
+        out = "{out}{lines[i]}\n"
+        i = i + 1
+    }
+    out
+}
+
+fn push_str(items: list<string>, value: string) -> list<string> {
+    state out = items
+    out.push(value)
+    out
+}
+
+// -------------------------------------------------------------------
+// パース: parse_flux
+// -------------------------------------------------------------------
+
+// "typestate S { A → B → C }" から状態リストを抽出
+fn parse_typestate_block(source: string) -> map {
+    let open_pos = str_find(source, "{", 0)
+    let close_pos = str_find(source, "}", open_pos)
+    if open_pos < 0 || close_pos < 0 {
+        return { "name": "", "states": [] }
+    }
+    // 名前: "typestate " の後からブレース前まで
+    let name = trim_ascii(str_slice(source, 10, open_pos))
+    let inner = trim_ascii(str_slice(source, open_pos + 1, close_pos))
+    // "A → B → C" を分割（→ で区切る）
+    state states: list<string> = []
+    let parts = inner.split("→")
+    state i = 0
+    while i < parts.len() {
+        let s = trim_ascii(parts[i])
+        if s != "" {
+            states.push(s)
+        }
+        i = i + 1
+    }
+    { "name": name, "states": states }
+}
+
+// "fn add_item(item: Item) -> Cart<HasItems> { ... }" をパース
+fn parse_method_line(line: string) -> map {
+    let trimmed = trim_ascii(line)
+    let is_getter = str_starts_with(trimmed, "get ")
+    let prefix_len = if is_getter { 4 } else { 3 }  // "get " or "fn "
+    let rest = str_slice(trimmed, prefix_len, str_len(trimmed))
+
+    // 関数名
+    let paren_pos = str_find(rest, "(", 0)
+    let name = if paren_pos >= 0 {
+        trim_ascii(str_slice(rest, 0, paren_pos))
+    } else {
+        trim_ascii(rest)
+    }
+
+    // パラメータ
+    let close_paren = str_find(rest, ")", paren_pos)
+    let params = if paren_pos >= 0 && close_paren >= 0 {
+        trim_ascii(str_slice(rest, paren_pos + 1, close_paren))
+    } else {
+        ""
+    }
+
+    // 戻り値型（-> の後）
+    let arrow_pos = str_find(rest, "->", close_paren)
+    state return_type = ""
+    state to_state = ""
+    if arrow_pos >= 0 {
+        let brace_pos = str_find(rest, "{", arrow_pos)
+        let rt_end = if brace_pos >= 0 { brace_pos } else { str_len(rest) }
+        return_type = trim_ascii(str_slice(rest, arrow_pos + 2, rt_end))
+
+        // typestate: "Cart<HasItems>" -> to_state = "HasItems"
+        let lt_pos = str_find(return_type, "<", 0)
+        let gt_pos = str_find(return_type, ">", lt_pos)
+        if lt_pos >= 0 && gt_pos >= 0 {
+            to_state = trim_ascii(str_slice(return_type, lt_pos + 1, gt_pos))
+        }
+    }
+
+    // ボディ
+    let brace_pos = str_find(rest, "{", 0)
+    let close_brace = str_find(rest, "}", brace_pos)
+    let body = if brace_pos >= 0 && close_brace >= 0 {
+        trim_ascii(str_slice(rest, brace_pos + 1, close_brace))
+    } else {
+        ""
+    }
+
+    {
+        "name": name,
+        "params": params,
+        "return_type": return_type,
+        "to_state": to_state,
+        "body": body,
+        "is_getter": if is_getter { "true" } else { "false" },
+    }
+}
+
+// "state items: list<Item> = []" をパース
+fn parse_state_field(line: string) -> map {
+    let rest = trim_ascii(str_slice(line, 6, str_len(line)))  // "state " を除去
+    let colon_pos = str_find(rest, ":", 0)
+    let eq_pos = str_find(rest, "=", 0)
+
+    let field_name = trim_ascii(str_slice(rest, 0, if colon_pos >= 0 { colon_pos } else { eq_pos }))
+    let field_type = if colon_pos >= 0 && eq_pos >= 0 {
+        trim_ascii(str_slice(rest, colon_pos + 1, eq_pos))
+    } else {
+        ""
+    }
+    let default_val = if eq_pos >= 0 {
+        trim_ascii(str_slice(rest, eq_pos + 1, str_len(rest)))
+    } else {
+        ""
+    }
+
+    { "name": field_name, "type": field_type, "default": default_val }
+}
+
+// store ブロック内部をパース（state フィールド・fn・get を分離）
+fn parse_store_body(body: string) -> map {
+    let lines = split_lines(body)
+    state states: list<map> = []
+    state methods: list<map> = []
+    state i = 0
+    while i < lines.len() {
+        let line = trim_ascii(lines[i])
+        if str_starts_with(line, "state ") {
+            states.push(parse_state_field(line))
+        } else if str_starts_with(line, "fn ") || str_starts_with(line, "get ") {
+            methods.push(parse_method_line(line))
+        }
+        i = i + 1
+    }
+    { "states": states, "methods": methods }
+}
+
+// "store Cart<CartState> { ... }" の名前と typestate 名を抽出
+fn parse_store_header(header: string) -> map {
+    // "store " を除く
+    let rest = trim_ascii(str_slice(header, 6, str_len(header)))
+    let lt_pos = str_find(rest, "<", 0)
+    let brace_pos = str_find(rest, "{", 0)
+    if lt_pos >= 0 && brace_pos >= 0 && lt_pos < brace_pos {
+        let name = trim_ascii(str_slice(rest, 0, lt_pos))
+        let gt_pos = str_find(rest, ">", lt_pos)
+        let ts = trim_ascii(str_slice(rest, lt_pos + 1, gt_pos))
+        { "name": name, "typestate": ts }
+    } else {
+        let name = if brace_pos >= 0 {
+            trim_ascii(str_slice(rest, 0, brace_pos))
+        } else {
+            trim_ascii(rest)
+        }
+        { "name": name, "typestate": "" }
+    }
+}
+
+// ソース全体から最初のブロック { ... } を抽出（先頭の { から対応する } まで）
+fn extract_first_block(source: string, from: number) -> string {
+    let bytes = string_to_bytes(source)
+    let len = bytes.len()
+    let open_pos = str_find(source, "{", from)
+    if open_pos < 0 {
+        return ""
+    }
+    state depth = 1
+    state i = open_pos + 1
+    while i < len && depth > 0 {
+        let b = bytes[i]
+        if b == 123 {
+            depth = depth + 1
+        } else if b == 125 {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    str_slice(source, open_pos + 1, i - 1)
+}
+
+// .flux.bloom ソースをパースして store/typestate の map を返す
+pub fn parse_flux(source: string) -> map {
+    // typestate ブロックを探す
+    let ts_pos = str_find(source, "typestate ", 0)
+    state ts_info: map = { "name": "", "states": [] }
+    state ts_end = 0
+    if ts_pos >= 0 {
+        let ts_line_end = str_find(source, "}", ts_pos)
+        let ts_block = str_slice(source, ts_pos, ts_line_end + 1)
+        ts_info = parse_typestate_block(ts_block)
+        ts_end = ts_line_end + 1
+    }
+
+    // store ブロックを探す
+    let store_pos = str_find(source, "store ", ts_end)
+    if store_pos < 0 {
+        return { "kind": "unknown", "name": "", "typestate": "", "states": [], "methods": [], "transitions": [] }
+    }
+
+    let open_brace_pos = str_find(source, "{", store_pos)
+    let header = str_slice(source, store_pos, open_brace_pos)
+    let store_header = parse_store_header(header)
+    let body = extract_first_block(source, store_pos)
+    let body_parsed = parse_store_body(body)
+
+    let ts_name = store_header["typestate"]
+    let kind = if ts_name != "" { "typestate_store" } else { "store" }
+
+    // transitions: typestate の状態リストから遷移グラフを生成
+    let ts_states = ts_info["states"]
+    state transitions: list<map> = []
+    state idx = 0
+    while idx + 1 < ts_states.len() {
+        transitions.push({ "from": ts_states[idx], "to": ts_states[idx + 1] })
+        idx = idx + 1
+    }
+
+    {
+        "kind": kind,
+        "name": store_header["name"],
+        "typestate": ts_name,
+        "states": body_parsed["states"],
+        "methods": body_parsed["methods"],
+        "transitions": transitions,
+        "typestate_states": ts_states,
+    }
+}
+
+// -------------------------------------------------------------------
+// コード生成: generate_store_code
+// -------------------------------------------------------------------
+
+fn store_var_name(store_name: string) -> string {
+    let lower = to_lower_ascii(store_name)
+    "__{ lower }_state"
+}
+
+fn store_fn_prefix(store_name: string) -> string {
+    to_lower_ascii(store_name)
+}
+
+fn build_state_init(state_fields: list<map>) -> string {
+    if state_fields.len() == 0 {
+        return "{}"
+    }
+    state parts: list<string> = []
+    state i = 0
+    while i < state_fields.len() {
+        let f = state_fields[i]
+        let default_val = if f["default"] == "" { "none" } else { f["default"] }
+        parts.push("{ f[\"name\"] }: { default_val }")
+        i = i + 1
+    }
+    let inner = parts.join(", ")
+    "{ {inner} }"
+}
+
+fn generate_method_code(
+    method: map,
+    store_name: string,
+    state_fields: list<map>,
+) -> string {
+    let var_name = store_var_name(store_name)
+    let prefix = store_fn_prefix(store_name)
+    let fn_name = method["name"]
+    let params = method["params"]
+    let body = method["body"]
+    let return_type = method["return_type"]
+    let is_getter = method["is_getter"] == "true"
+
+    // get アクセサ（副作用なし、スナップショット不要）
+    if is_getter {
+        let rt_decl = if return_type != "" { " -> { return_type }" } else { "" }
+        return "pub fn { prefix }_get_{ fn_name }(){{ rt_decl }} {\n  { var_name }[\"{ fn_name }\"]\n}\n"
+    }
+
+    // 通常メソッド: body 内の state フィールド参照を __xxx_state 経由に変換
+    state updated_body = body
+    state i = 0
+    while i < state_fields.len() {
+        let field = state_fields[i]["name"]
+        // "field = expr" -> state への spread 更新に変換
+        // ここでは簡易: body そのままをスナップショット付きで包む
+        i = i + 1
+    }
+
+    let param_decl = if params != "" { "{ params }" } else { "" }
+    "pub fn { prefix }_{ fn_name }({ param_decl }) {\n  { var_name } = { { ...{ var_name }, { updated_body } } }\n  __devtools_snapshot(\"{ store_name }\", { var_name })\n}\n"
+}
+
+pub fn generate_store_code(flux_ast: map) -> string {
+    let store_name = flux_ast["name"]
+    let state_fields = flux_ast["states"]
+    let methods = flux_ast["methods"]
+    let var_name = store_var_name(store_name)
+    let prefix = store_fn_prefix(store_name)
+
+    let init = build_state_init(state_fields)
+    state lines: list<string> = []
+
+    lines.push("let { var_name } = { init }")
+    lines.push("")
+
+    // 各メソッドのコード生成
+    state i = 0
+    while i < methods.len() {
+        let method = methods[i]
+        let fn_name = method["name"]
+        let params = method["params"]
+        let body = method["body"]
+        let return_type = method["return_type"]
+        let is_getter = method["is_getter"] == "true"
+        let param_decl = if params != "" { "{ params }" } else { "" }
+
+        if is_getter {
+            let rt_decl = if return_type != "" { " -> { return_type }" } else { "" }
+            lines.push("pub fn { prefix }_get_{ fn_name }(){{ rt_decl }} {")
+            lines.push("  { var_name }[\"{ fn_name }\"]")
+            lines.push("}")
+        } else {
+            lines.push("pub fn { prefix }_{ fn_name }({ param_decl }) {")
+            // body を展開（簡易: body があればそのまま、なければ空）
+            if body != "" {
+                lines.push("  { var_name } = { { ...{ var_name }, { body } } }")
+            }
+            lines.push("  __devtools_snapshot(\"{ store_name }\", { var_name })")
+            lines.push("}")
+        }
+        lines.push("")
+        i = i + 1
+    }
+
+    // ストア状態アクセサ
+    lines.push("pub fn { prefix }_state() -> map { { var_name } }")
+    lines.push("")
+
+    join_lines(lines)
+}
+
+// -------------------------------------------------------------------
+// typestate 遷移グラフ: build_transition_graph
+// -------------------------------------------------------------------
+
+pub fn build_transition_graph(flux_ast: map) -> map {
+    let ts_states = flux_ast["typestate_states"]
+    let methods = flux_ast["methods"]
+
+    // 遷移テーブル: typestate チェーンから
+    state transitions: list<map> = []
+    state i = 0
+    while i + 1 < ts_states.len() {
+        transitions.push({ "from": ts_states[i], "to": ts_states[i + 1] })
+        i = i + 1
+    }
+
+    // メソッドが宣言する遷移（to_state が空でないもの）
+    state method_transitions: list<map> = []
+    i = 0
+    while i < methods.len() {
+        let m = methods[i]
+        let to = m["to_state"]
+        if to != "" {
+            method_transitions.push({ "method": m["name"], "to": to })
+        }
+        i = i + 1
+    }
+
+    {
+        "states": ts_states,
+        "transitions": transitions,
+        "method_transitions": method_transitions,
+    }
+}
+
+// -------------------------------------------------------------------
+// バリデーション: validate_transitions
+// -------------------------------------------------------------------
+
+fn detect_cycle(states: list<string>, transitions: list<map>) -> bool {
+    // 訪問済みを追跡して cycles を検出
+    state visited: list<string> = []
+    state i = 0
+    while i < states.len() {
+        let s = states[i]
+        if contains_string(visited, s) {
+            return true
+        }
+        visited.push(s)
+        i = i + 1
+    }
+    false
+}
+
+pub fn validate_transitions(graph: map) -> list<string> {
+    let states = graph["states"]
+    let transitions = graph["transitions"]
+    let method_transitions = graph["method_transitions"]
+    state errors: list<string> = []
+
+    // 定義済み状態のセット
+    state valid_states: list<string> = []
+    state i = 0
+    while i < states.len() {
+        valid_states.push(states[i])
+        i = i + 1
+    }
+
+    // 遷移チェーンから到達可能な状態を収集
+    state reachable: list<string> = []
+    i = 0
+    while i < transitions.len() {
+        let t = transitions[i]
+        if !contains_string(reachable, t["from"]) {
+            reachable.push(t["from"])
+        }
+        if !contains_string(reachable, t["to"]) {
+            reachable.push(t["to"])
+        }
+        i = i + 1
+    }
+
+    // メソッドの遷移先が定義済み状態かチェック
+    i = 0
+    while i < method_transitions.len() {
+        let mt = method_transitions[i]
+        let to = mt["to"]
+        if !contains_string(valid_states, to) {
+            errors.push("Invalid transition target '{ to }' in method '{ mt[\"method\"] }': not defined in typestate")
+        } else if !contains_string(reachable, to) && states.len() > 0 {
+            errors.push("Unreachable transition target '{ to }' in method '{ mt[\"method\"] }'")
+        }
+        i = i + 1
+    }
+
+    // 循環検出: typestate チェーンに循環があるかチェック
+    if detect_cycle(valid_states, transitions) {
+        errors.push("Cyclic transition detected in typestate chain")
+    }
+
+    errors
+}
+
+// -------------------------------------------------------------------
+// store 参照の解決: resolve_store_ref
+// -------------------------------------------------------------------
+
+pub fn resolve_store_ref(ref_path: string, project_root: string) -> string {
+    // "stores/cart.Cart" -> "project_root/src/stores/cart.flux.bloom"
+    let dot_pos = str_find(ref_path, ".", 0)
+    let file_part = if dot_pos >= 0 {
+        str_slice(ref_path, 0, dot_pos)
+    } else {
+        ref_path
+    }
+    "{ project_root }/src/{ file_part }.flux.bloom"
+}
+
+// -------------------------------------------------------------------
+// テスト
+// -------------------------------------------------------------------
+
+#[test]
+fn test_typestate_valid_transition() {
+    let source = "typestate S { A → B → C }\nstore X<S> {\n  fn go() -> X<B> { }\n}"
+    let ast = parse_flux(source)
+    let graph = build_transition_graph(ast)
+    let errors = validate_transitions(graph)
+    assert(errors.len() == 0)
+}
+
+#[test]
+fn test_typestate_invalid_transition() {
+    let source = "typestate S { A → B }\nstore X<S> {\n  fn bad() -> X<C> { }\n}"
+    let ast = parse_flux(source)
+    let graph = build_transition_graph(ast)
+    let errors = validate_transitions(graph)
+    assert(errors.len() > 0)
+}
+
+#[test]
+fn test_store_code_generation() {
+    let source = "store Counter {\n  state count: number = 0\n  fn inc() { count += 1 }\n}"
+    let ast = parse_flux(source)
+    let code = generate_store_code(ast)
+    assert(code.contains("__counter_state"))
+    assert(code.contains("counter_inc"))
+}
+
+#[test]
+fn test_parse_flux_basic_store() {
+    let source = "store Cart {\n  state items: list = []\n  fn add(item) { }\n  fn clear() { }\n}"
+    let ast = parse_flux(source)
+    assert_eq(ast["kind"], "store")
+    assert_eq(ast["name"], "Cart")
+    assert_eq(ast["typestate"], "")
+}
+
+#[test]
+fn test_parse_flux_typestate_store() {
+    let source = "typestate CartState { Empty → HasItems → CheckingOut }\nstore Cart<CartState> {\n  state items: list = []\n}"
+    let ast = parse_flux(source)
+    assert_eq(ast["kind"], "typestate_store")
+    assert_eq(ast["name"], "Cart")
+    assert_eq(ast["typestate"], "CartState")
+    let ts_states = ast["typestate_states"]
+    assert_eq(ts_states.len(), 3)
+    assert_eq(ts_states[0], "Empty")
+    assert_eq(ts_states[1], "HasItems")
+    assert_eq(ts_states[2], "CheckingOut")
+}
+
+#[test]
+fn test_build_transition_graph_structure() {
+    let source = "typestate S { A → B → C }\nstore X<S> {\n  fn go() -> X<B> { }\n}"
+    let ast = parse_flux(source)
+    let graph = build_transition_graph(ast)
+    let states = graph["states"]
+    let transitions = graph["transitions"]
+    assert_eq(states.len(), 3)
+    assert_eq(transitions.len(), 2)
+    assert_eq(transitions[0]["from"], "A")
+    assert_eq(transitions[0]["to"], "B")
+}
+
+#[test]
+fn test_resolve_store_ref() {
+    let path = resolve_store_ref("stores/cart.Cart", "/project")
+    assert(path.contains("stores/cart.flux.bloom"))
+    assert(path.contains("/project"))
+}

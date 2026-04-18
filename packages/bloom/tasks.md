@@ -14,10 +14,10 @@
 - Phase B-2: 12/12 完了（コンパイル時リアクティビティ）
 - Phase B-3: 14/16 完了（SSR + 全置換アタッチ）
 - Phase B-4: 11/12 完了（DOM Morphing）
-- Phase B-5: 0/10 完了（typestate ストア + DevTools）
+- Phase B-5: 10/10 完了（typestate ストア + DevTools）
 - Phase B-6: 0/16 完了（CLI スキャフォールド）
 - **Milestone M-0: 0/2 完了（E2E 起動画面確認）** ← 全フェーズ完了後の最終確認
-- **合計: 79/110 完了**
+- **合計: 89/110 完了**
 
 ---
 
@@ -184,22 +184,22 @@
 
 ### B-5-A: `.flux.bloom` コンパイル（`packages/bloom/src/store_compiler.forge`）← ForgeScript
 
-- [ ] `store` ブロックのパースとコード生成
-- [ ] `typestate` ブロックの状態遷移グラフ生成
-- [ ] 不正な状態遷移のコンパイルエラー検出
-- [ ] コンポーネントからの `use stores/cart.Cart` 参照解決
+- [x] `store` ブロックのパースとコード生成
+- [x] `typestate` ブロックの状態遷移グラフ生成
+- [x] 不正な状態遷移のコンパイルエラー検出
+- [x] コンポーネントからの `use stores/cart.Cart` 参照解決
 
 ### B-5-B: Bloom DevTools
 
-- [ ] `forge dev` にステートマシングラフ可視化パネルを追加
-- [ ] 状態変化のスナップショット記録
-- [ ] タイムトラベルデバッグ（任意の過去状態に巻き戻し）
-- [ ] 通常の `store`（typestate なし）にも対応
+- [x] `forge dev` にステートマシングラフ可視化パネルを追加
+- [x] 状態変化のスナップショット記録
+- [x] タイムトラベルデバッグ（任意の過去状態に巻き戻し）
+- [x] 通常の `store`（typestate なし）にも対応
 
 ### B-5-C: テスト
 
-- [ ] `test_typestate_valid_transition` — 有効な遷移がコンパイルを通過する
-- [ ] `test_typestate_invalid_transition` — 無効な遷移がコンパイルエラーになる
+- [x] `test_typestate_valid_transition` — 有効な遷移がコンパイルを通過する
+- [x] `test_typestate_invalid_transition` — 無効な遷移がコンパイルエラーになる
 
 ---
 

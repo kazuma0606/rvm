@@ -1,0 +1,116 @@
+// devtools.forge
+// Bloom DevTools: スナップショット記録・タイムトラベルデバッグ
+
+// スナップショットストレージ
+state __snapshots: list<map> = []
+state __snapshot_index: number = 0
+
+// スナップショット記録（store の変更ごとに呼ばれる）
+// 戻り値: 記録後のスナップショット数（インデックス）
+pub fn snapshot(store_name: string, state_val: map) -> number {
+    let entry = {
+        "store_name": store_name,
+        "state": state_val,
+        "timestamp_index": __snapshot_index,
+    }
+    __snapshots = __snapshots.push(entry)
+    __snapshot_index = __snapshot_index + 1
+    __snapshot_index
+}
+
+// DevTools フック（store のコード生成から呼ばれるエイリアス）
+pub fn __devtools_snapshot(store_name: string, state_val: map) -> number {
+    snapshot(store_name, state_val)
+}
+
+// 記録済みスナップショット一覧を返す
+// 戻り値: [{ store_name, state, timestamp_index }]
+pub fn get_snapshots() -> list<map> {
+    __snapshots
+}
+
+// タイムトラベル: 指定インデックスのスナップショットを返す
+// 対象 store の状態を更新するための情報を map で返す
+// 戻り値: { store_name, state }
+pub fn time_travel(index: number) -> map {
+    let snaps = __snapshots
+    let len = snaps.len()
+    if len == 0 {
+        return { "store_name": "", "state": {} }
+    }
+    // 範囲クリッピング
+    let idx = if index < 0 {
+        0
+    } else if index >= len {
+        len - 1
+    } else {
+        index
+    }
+    let snap = snaps[idx]
+    { "store_name": snap["store_name"], "state": snap["state"] }
+}
+
+// スナップショットをクリア
+// 戻り値: クリア前のスナップショット数
+pub fn clear_snapshots() -> number {
+    let prev_count = __snapshots.len()
+    __snapshots = []
+    __snapshot_index = 0
+    prev_count
+}
+
+// -------------------------------------------------------------------
+// テスト
+// -------------------------------------------------------------------
+
+#[test]
+fn test_devtools_snapshot_records_entry() {
+    clear_snapshots()
+    let idx = snapshot("Cart", { "items": [] })
+    assert_eq(idx, 1)
+    let snaps = get_snapshots()
+    assert_eq(snaps.len(), 1)
+    assert_eq(snaps[0]["store_name"], "Cart")
+    assert_eq(snaps[0]["timestamp_index"], 0)
+}
+
+#[test]
+fn test_devtools_time_travel_returns_correct_state() {
+    clear_snapshots()
+    snapshot("Counter", { "count": 0 })
+    snapshot("Counter", { "count": 1 })
+    snapshot("Counter", { "count": 2 })
+
+    let result = time_travel(1)
+    assert_eq(result["store_name"], "Counter")
+    let state_val = result["state"]
+    assert_eq(state_val["count"], 1)
+}
+
+#[test]
+fn test_devtools_clear_snapshots() {
+    clear_snapshots()
+    snapshot("Store", { "x": 1 })
+    snapshot("Store", { "x": 2 })
+    let prev = clear_snapshots()
+    assert_eq(prev, 2)
+    assert_eq(get_snapshots().len(), 0)
+}
+
+#[test]
+fn test_devtools_time_travel_clamps_out_of_range() {
+    clear_snapshots()
+    snapshot("S", { "v": 42 })
+    let r1 = time_travel(0 - 1)
+    let r2 = time_travel(999)
+    // どちらも唯一のスナップショットに対応
+    assert_eq(r1["state"]["v"], 42)
+    assert_eq(r2["state"]["v"], 42)
+}
+
+#[test]
+fn test_devtools_empty_time_travel() {
+    clear_snapshots()
+    let r = time_travel(0)
+    assert_eq(r["store_name"], "")
+}

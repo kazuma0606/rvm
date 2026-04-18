@@ -200,6 +200,9 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some("dev") => {
+            dev_entry(&args);
+        }
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
         }
@@ -2329,6 +2332,99 @@ fn format_generated_project(proj_dir: &Path) {
 fn unique_suffix() -> String {
     let seq = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}_{}", std::process::id(), seq)
+}
+
+fn dev_entry(args: &[String]) {
+    let port = args
+        .iter()
+        .position(|s| s == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(5173);
+
+    let addr = format!("127.0.0.1:{}", port);
+    println!("forge dev: listening on http://{}", addr);
+    println!("DevTools endpoints:");
+    println!("  GET  http://{}/devtools/snapshots", addr);
+    println!("  POST http://{}/devtools/time-travel  {{\"index\": N}}", addr);
+
+    use std::net::{TcpListener, TcpStream};
+    use std::io::{Read as _, Write as _};
+
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("エラー: {} に bind できませんでした: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    // スナップショットの簡易インメモリストレージ（開発サーバー用）
+    let snapshots: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    fn send_response(mut stream: TcpStream, status: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+            status,
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+
+    for stream in listener.incoming() {
+        let snapshots = snapshots.clone();
+        match stream {
+            Ok(mut stream) => {
+                let mut buf = [0u8; 4096];
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+
+                if first_line.contains("GET /devtools/snapshots") {
+                    let snaps = snapshots.lock().unwrap();
+                    let body = format!("[{}]", snaps.join(","));
+                    send_response(stream, "200 OK", &body);
+                } else if first_line.contains("POST /devtools/time-travel") {
+                    // ボディから index を抽出
+                    let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(req.len());
+                    let body = &req[body_start..];
+                    let index: i64 = body
+                        .find("\"index\"")
+                        .and_then(|i| body[i + 7..].trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-').parse().ok())
+                        .unwrap_or(0);
+                    let snaps = snapshots.lock().unwrap();
+                    let len = snaps.len() as i64;
+                    let clamped = if len == 0 {
+                        None
+                    } else {
+                        let idx = index.max(0).min(len - 1) as usize;
+                        snaps.get(idx).cloned()
+                    };
+                    let resp = match clamped {
+                        Some(s) => s,
+                        None => "{}".to_string(),
+                    };
+                    send_response(stream, "200 OK", &resp);
+                } else if first_line.contains("POST /devtools/snapshot") {
+                    // 内部: スナップショットを記録
+                    let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(req.len());
+                    let body = req[body_start..].to_string();
+                    let mut snaps = snapshots.lock().unwrap();
+                    snaps.push(body);
+                    let count = snaps.len();
+                    send_response(stream, "200 OK", &format!("{{\"count\":{}}}", count));
+                } else {
+                    send_response(stream, "404 Not Found", "{\"error\":\"not found\"}");
+                }
+            }
+            Err(_) => continue,
+        }
+    }
 }
 
 fn print_help() {

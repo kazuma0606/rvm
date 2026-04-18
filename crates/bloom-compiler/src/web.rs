@@ -650,4 +650,29 @@ let html = render(<Counter />)
         assert_eq!(pascal_to_snake("MyComponent"), "my_component");
         assert_eq!(pascal_to_snake("A"), "a");
     }
+
+    #[test]
+    fn test_flux_file_detected() {
+        // .flux.bloom ファイルが collect_bloom_files で検出される
+        let dir = temp_dir("flux");
+        fs::create_dir_all(dir.join("src/stores")).expect("mkdir");
+        fs::write(dir.join("src/stores/cart.flux.bloom"), "store Cart {}").expect("write");
+        fs::write(dir.join("src/stores/cart.forge"), "fn noop() {}").expect("write");
+
+        let files = collect_bloom_files(&dir.join("src")).expect("collect");
+        // .flux.bloom は "bloom" 拡張子を持たないため collect_bloom_files では検出されない。
+        // collect_bloom_files は .bloom 拡張子のみを対象とする。
+        // .flux.bloom は "flux.bloom" という複合拡張子を持つが、
+        // Path::extension() は最後のピリオド以降のみを返すため "bloom" と判断される。
+        let flux_found = files.iter().any(|f| {
+            f.rel_path
+                .to_str()
+                .map(|s| s.contains("cart.flux"))
+                .unwrap_or(false)
+        });
+        // flux.bloom ファイルが検出されることを確認
+        assert!(flux_found, ".flux.bloom ファイルが検出されなかった: {:?}", files);
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
