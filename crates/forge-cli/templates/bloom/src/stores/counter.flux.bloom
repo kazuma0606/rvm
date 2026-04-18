@@ -1,0 +1,7 @@
+store Counter {
+  state value: i32 = 0
+  fn increment() { value += 1 }
+  fn decrement() { value -= 1 }
+  fn reset()     { value = 0  }
+  get current() -> i32 { value }
+}

@@ -36,8 +36,15 @@ pub fn run_with_options(name: Option<&str>, template: &str, git: bool) -> Result
         init_git(&dest)?;
     }
 
-    println!("Created {}/", project_name);
-    println!("cd {} && forge run {}", project_name, template.entry);
+    if template.name == "bloom" {
+        println!("✓ Created Bloom project: {}", project_name);
+        println!();
+        println!("  cd {}", project_name);
+        println!("  forge dev");
+    } else {
+        println!("Created {}/", project_name);
+        println!("cd {} && forge run {}", project_name, template.entry);
+    }
     Ok(())
 }
 

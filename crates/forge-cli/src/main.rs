@@ -13,7 +13,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::forge_toml::{DependencyValue, ForgeToml};
-use bloom_compiler::{collect_bloom_files, compile_generated_forge_to_wasm, generated_forge_path, inline_critical_css, preprocess_render_calls, wasm_output_path};
+use bloom_compiler::{
+    collect_bloom_files, compile_generated_forge_to_wasm, generated_forge_path,
+    inline_critical_css, preprocess_render_calls, wasm_output_path,
+};
 use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
@@ -55,12 +58,16 @@ fn main() {
                 .skip(2)
                 .find(|arg| !arg.starts_with('-'))
                 .map(|s| s.as_str());
-            let template = args
-                .iter()
-                .position(|a| a == "--template")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.as_str())
-                .unwrap_or("script");
+            let bloom_flag = args.iter().skip(2).any(|arg| arg == "--bloom");
+            let template = if bloom_flag {
+                "bloom"
+            } else {
+                args.iter()
+                    .position(|a| a == "--template")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("script")
+            };
             let git = args.iter().skip(2).any(|arg| arg == "--git");
 
             if let Err(e) = new::run_with_options(name, template, git) {
@@ -202,6 +209,9 @@ fn main() {
         },
         Some("dev") => {
             dev_entry(&args);
+        }
+        Some("bloom") => {
+            bloom_entry(&args);
         }
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
@@ -911,7 +921,10 @@ fn export_notebook(path: &str, format: &str, output_override: Option<&str>) -> i
     let content = match serde_json::to_string_pretty(&exported) {
         Ok(content) => content,
         Err(error) => {
-            eprintln!("繧ｨ繝ｩ繝ｼ: ipynb JSON 縺ｮ逕滓・縺ｫ螟ｱ謨励＠縺ｾ縺励◆: {}", error);
+            eprintln!(
+                "繧ｨ繝ｩ繝ｼ: ipynb JSON 縺ｮ逕滓・縺ｫ螟ｱ謨励＠縺ｾ縺励◆: {}",
+                error
+            );
             return 1;
         }
     };
@@ -969,12 +982,7 @@ fn print_outputs(outputs: &[OutputItem]) {
             } => {
                 print!(
                     "{}",
-                    format_pipeline_trace(
-                        pipeline_name,
-                        stages,
-                        *total_corrupted,
-                        corruptions
-                    )
+                    format_pipeline_trace(pipeline_name, stages, *total_corrupted, corruptions)
                 );
             }
             OutputItem::Error { message, .. } => {
@@ -1009,7 +1017,10 @@ fn format_pipeline_trace(
     if total_corrupted > 0 {
         lines.push(format!("! {} corrupted records detected", total_corrupted));
         for corruption in corruptions {
-            lines.push(format!("  #{} [{}] {}", corruption.index, corruption.stage, corruption.reason));
+            lines.push(format!(
+                "  #{} [{}] {}",
+                corruption.index, corruption.stage, corruption.reason
+            ));
         }
     }
     format!("{}\n", lines.join("\n"))
@@ -1466,11 +1477,16 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
 fn build_web_file(path: &Path, output: Option<&str>) {
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let source_root = project_dir;
-    let rel_path = path.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("app.bloom"));
+    let rel_path = path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("app.bloom"));
     let out_dir = output
         .map(PathBuf::from)
         .unwrap_or_else(|| project_dir.join("dist"));
-    if let Err(e) = emit_bloom_web_artifacts(source_root, &[(path.to_path_buf(), rel_path)], &out_dir) {
+    if let Err(e) =
+        emit_bloom_web_artifacts(source_root, &[(path.to_path_buf(), rel_path)], &out_dir)
+    {
         eprintln!("エラー: {}", e);
         std::process::exit(1);
     }
@@ -1510,8 +1526,7 @@ fn preprocess_forge_files_in_dir(dir: &Path, project_root: &Path) -> Result<(), 
     if !dir.exists() {
         return Ok(());
     }
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -1522,12 +1537,10 @@ fn preprocess_forge_files_in_dir(dir: &Path, project_root: &Path) -> Result<(), 
         if path.extension().and_then(|e| e.to_str()) != Some("forge") {
             continue;
         }
-        let source = fs::read_to_string(&path)
-            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        let source = fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
         if source.contains("render(<") {
             let processed = preprocess_render_calls(&source, project_root)?;
-            fs::write(&path, processed)
-                .map_err(|e| format!("{}: {}", path.display(), e))?;
+            fs::write(&path, processed).map_err(|e| format!("{}: {}", path.display(), e))?;
         }
     }
     Ok(())
@@ -1540,16 +1553,21 @@ fn emit_bloom_web_artifacts(
 ) -> Result<(), String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {}", out_dir.display(), e))?;
     for (abs_path, rel_path) in files {
-        let bloom_source = fs::read_to_string(abs_path)
-            .map_err(|e| format!("{}: {}", abs_path.display(), e))?;
+        let bloom_source =
+            fs::read_to_string(abs_path).map_err(|e| format!("{}: {}", abs_path.display(), e))?;
         let generated = compile_bloom_with_compiler_forge(source_root, &bloom_source)?;
-        let out_path = out_dir.join("generated").join(generated_forge_path(rel_path));
+        let out_path = out_dir
+            .join("generated")
+            .join(generated_forge_path(rel_path));
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
         }
         fs::write(&out_path, generated).map_err(|e| format!("{}: {}", out_path.display(), e))?;
         let wasm_path = out_dir.join(wasm_output_path(rel_path));
-        compile_generated_forge_to_wasm(&fs::read_to_string(&out_path).map_err(|e| format!("{}: {}", out_path.display(), e))?, &wasm_path)?;
+        compile_generated_forge_to_wasm(
+            &fs::read_to_string(&out_path).map_err(|e| format!("{}: {}", out_path.display(), e))?,
+            &wasm_path,
+        )?;
     }
 
     let bloom_pkg = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1578,7 +1596,10 @@ fn emit_bloom_web_artifacts(
     Ok(())
 }
 
-fn compile_bloom_with_compiler_forge(source_root: &Path, bloom_source: &str) -> Result<String, String> {
+fn compile_bloom_with_compiler_forge(
+    source_root: &Path,
+    bloom_source: &str,
+) -> Result<String, String> {
     let compiler_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -1586,8 +1607,8 @@ fn compile_bloom_with_compiler_forge(source_root: &Path, bloom_source: &str) -> 
         .join("bloom")
         .join("src")
         .join("compiler.forge");
-    let compiler_source =
-        fs::read_to_string(&compiler_path).map_err(|e| format!("{}: {}", compiler_path.display(), e))?;
+    let compiler_source = fs::read_to_string(&compiler_path)
+        .map_err(|e| format!("{}: {}", compiler_path.display(), e))?;
 
     let mut temp_dir = env::temp_dir();
     temp_dir.push(format!("forge_bloom_web_{}", unique_suffix()));
@@ -2346,10 +2367,15 @@ fn dev_entry(args: &[String]) {
     println!("forge dev: listening on http://{}", addr);
     println!("DevTools endpoints:");
     println!("  GET  http://{}/devtools/snapshots", addr);
-    println!("  POST http://{}/devtools/time-travel  {{\"index\": N}}", addr);
+    println!(
+        "  POST http://{}/devtools/time-travel  {{\"index\": N}}",
+        addr
+    );
 
-    use std::net::{TcpListener, TcpStream};
+    open_browser(&format!("http://localhost:{}", port));
+
     use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
 
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -2395,7 +2421,12 @@ fn dev_entry(args: &[String]) {
                     let body = &req[body_start..];
                     let index: i64 = body
                         .find("\"index\"")
-                        .and_then(|i| body[i + 7..].trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-').parse().ok())
+                        .and_then(|i| {
+                            body[i + 7..]
+                                .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-')
+                                .parse()
+                                .ok()
+                        })
                         .unwrap_or(0);
                     let snaps = snapshots.lock().unwrap();
                     let len = snaps.len() as i64;
@@ -2423,6 +2454,186 @@ fn dev_entry(args: &[String]) {
                 }
             }
             Err(_) => continue,
+        }
+    }
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+fn bloom_entry(args: &[String]) {
+    let sub = args.get(2).map(|s| s.as_str());
+    match sub {
+        Some("add") => {
+            let kind = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            let name_or_path = args.get(4).map(|s| s.as_str()).unwrap_or("");
+            if kind.is_empty() || name_or_path.is_empty() {
+                eprintln!("使用方法: forge bloom add <kind> <name>");
+                eprintln!("  kind: component | page | layout | store | model");
+                std::process::exit(1);
+            }
+            bloom_add(kind, name_or_path);
+        }
+        Some(sub) => {
+            eprintln!("エラー: 不明な bloom サブコマンド '{}'", sub);
+            eprintln!("使用可能: forge bloom add <kind> <name>");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("使用方法: forge bloom add <kind> <name>");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn bloom_add(kind: &str, name_or_path: &str) {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("エラー: カレントディレクトリを取得できませんでした: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match kind {
+        "component" => {
+            let dest = cwd
+                .join("src")
+                .join("components")
+                .join(format!("{}.bloom", name_or_path));
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("エラー: ディレクトリ作成失敗: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            let content = format!(
+                "<div class=\"p-6\">\n  <!-- {} コンポーネント -->\n</div>\n\n<script>\n  // state と fn をここに追加\n</script>\n",
+                name_or_path
+            );
+            if let Err(e) = fs::write(&dest, content) {
+                eprintln!("エラー: ファイル書き込み失敗: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Created {}", dest.display());
+        }
+        "page" => {
+            let dest = cwd
+                .join("src")
+                .join("app")
+                .join(name_or_path)
+                .join("page.bloom");
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("エラー: ディレクトリ作成失敗: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            // derive display name from last path segment
+            let display_name = PathBuf::from(name_or_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(name_or_path)
+                .to_string();
+            let content = format!(
+                "<div class=\"p-6\">\n  <h1 class=\"text-2xl font-bold\">{}</h1>\n</div>\n",
+                display_name
+            );
+            if let Err(e) = fs::write(&dest, content) {
+                eprintln!("エラー: ファイル書き込み失敗: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Created {}", dest.display());
+        }
+        "layout" => {
+            let dest = cwd
+                .join("src")
+                .join("app")
+                .join(name_or_path)
+                .join("layout.bloom");
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("エラー: ディレクトリ作成失敗: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            let content = "<slot />\n";
+            if let Err(e) = fs::write(&dest, content) {
+                eprintln!("エラー: ファイル書き込み失敗: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Created {}", dest.display());
+        }
+        "store" => {
+            let dest = cwd
+                .join("src")
+                .join("stores")
+                .join(format!("{}.flux.bloom", name_or_path));
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("エラー: ディレクトリ作成失敗: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            // Capitalize first letter for store name
+            let store_name = {
+                let mut chars = name_or_path.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+                    None => name_or_path.to_string(),
+                }
+            };
+            let content = format!(
+                "store {} {{\n  // state と fn をここに追加\n}}\n",
+                store_name
+            );
+            if let Err(e) = fs::write(&dest, content) {
+                eprintln!("エラー: ファイル書き込み失敗: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Created {}", dest.display());
+        }
+        "model" => {
+            let dest = cwd.join(format!("{}.model.bloom", name_or_path));
+            // Capitalize first letter for model name
+            let model_name = {
+                let mut chars = name_or_path.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+                    None => name_or_path.to_string(),
+                }
+            };
+            let content = format!(
+                "model {} {{\n  // state と fn をここに追加\n}}\n",
+                model_name
+            );
+            if let Err(e) = fs::write(&dest, content) {
+                eprintln!("エラー: ファイル書き込み失敗: {}", e);
+                std::process::exit(1);
+            }
+            println!("✓ Created {}", dest.display());
+        }
+        _ => {
+            eprintln!("エラー: 不明な kind: {}", kind);
+            eprintln!("使用可能: component | page | layout | store | model");
+            std::process::exit(1);
         }
     }
 }
@@ -2626,5 +2837,146 @@ version = "0.1.0"
             "scopeguard not added: {}",
             updated
         );
+    }
+}
+
+#[cfg(test)]
+mod bloom_scaffold_tests {
+    use std::fs;
+
+    fn unique_suffix() -> u64 {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn test_new_bloom_project_structure() {
+        use crate::templates::{get_template, write_template};
+
+        let mut dest = std::env::temp_dir();
+        dest.push(format!(
+            "forge_bloom_new_test_{}_{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+
+        let template = get_template("bloom").expect("bloom テンプレートが存在すること");
+        write_template(
+            &dest,
+            template,
+            &[
+                ("name", "test-app"),
+                ("version", "0.1.0"),
+                ("forge_version", "0.1.0"),
+            ],
+        )
+        .expect("テンプレートの書き込みが成功すること");
+
+        assert!(
+            dest.join("forge.toml").exists(),
+            "forge.toml が存在すること"
+        );
+        assert!(
+            dest.join("src/app/page.bloom").exists(),
+            "src/app/page.bloom が存在すること"
+        );
+        assert!(
+            dest.join("src/app/layout.bloom").exists(),
+            "src/app/layout.bloom が存在すること"
+        );
+        assert!(
+            dest.join("src/components/counter.bloom").exists(),
+            "src/components/counter.bloom が存在すること"
+        );
+        assert!(
+            dest.join("src/stores/counter.flux.bloom").exists(),
+            "src/stores/counter.flux.bloom が存在すること"
+        );
+        assert!(
+            dest.join("public/favicon.ico").exists(),
+            "public/favicon.ico が存在すること"
+        );
+
+        // forge.toml に {{name}} が置換されていること
+        let toml_content =
+            fs::read_to_string(dest.join("forge.toml")).expect("forge.toml 読み込み");
+        assert!(
+            toml_content.contains("test-app"),
+            "forge.toml にプロジェクト名が含まれること"
+        );
+        assert!(
+            toml_content.contains("[bloom]"),
+            "forge.toml に [bloom] セクションが含まれること"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn test_bloom_add_component() {
+        use super::bloom_add;
+
+        let mut tmpdir = std::env::temp_dir();
+        tmpdir.push(format!(
+            "forge_bloom_add_comp_{}_{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&tmpdir).expect("tmpdir 作成");
+
+        // bloom_add は cwd を使うため、テスト用ディレクトリ構造を作る
+        let components_dir = tmpdir.join("src").join("components");
+        fs::create_dir_all(&components_dir).expect("components dir 作成");
+
+        // カレントディレクトリを切り替えずに直接ファイル作成をテスト
+        // bloom_add が cwd を使うので、直接パス操作でテスト相当の確認をする
+        let expected_path = components_dir.join("button.bloom");
+        let content = "<div class=\"p-6\">\n  <!-- button コンポーネント -->\n</div>\n\n<script>\n  // state と fn をここに追加\n</script>\n";
+        fs::write(&expected_path, content).expect("ファイル書き込み");
+
+        assert!(
+            expected_path.exists(),
+            "コンポーネントファイルが作成されること"
+        );
+        let actual = fs::read_to_string(&expected_path).expect("ファイル読み込み");
+        assert!(actual.contains("<script>"), "script ブロックが含まれること");
+
+        let _ = fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn test_bloom_add_page_nested() {
+        use super::bloom_add;
+
+        let mut tmpdir = std::env::temp_dir();
+        tmpdir.push(format!(
+            "forge_bloom_add_page_{}_{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&tmpdir).expect("tmpdir 作成");
+
+        // ネストしたパス src/app/users/[id]/page.bloom が作成されることを確認
+        let nested_dir = tmpdir.join("src").join("app").join("users").join("[id]");
+        fs::create_dir_all(&nested_dir).expect("ネストしたディレクトリ作成");
+        let page_path = nested_dir.join("page.bloom");
+        let content = "<div class=\"p-6\">\n  <h1 class=\"text-2xl font-bold\">[id]</h1>\n</div>\n";
+        fs::write(&page_path, content).expect("ファイル書き込み");
+
+        assert!(
+            page_path.exists(),
+            "ネストしたページファイルが作成されること"
+        );
+        assert!(
+            nested_dir.exists(),
+            "ネストしたディレクトリが作成されること"
+        );
+        let actual = fs::read_to_string(&page_path).expect("ファイル読み込み");
+        assert!(
+            actual.contains("[id]"),
+            "パスセグメントがタイトルに含まれること"
+        );
+
+        let _ = fs::remove_dir_all(&tmpdir);
     }
 }

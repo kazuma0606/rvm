@@ -310,7 +310,10 @@ pub fn serialize_event_buffer(items: &[EventRecord]) -> EncodedEventBuffer {
     EncodedEventBuffer { events, strings }
 }
 
-pub fn deserialize_event_buffer(events: &[i32], strings: &[u8]) -> Result<Vec<EventRecord>, String> {
+pub fn deserialize_event_buffer(
+    events: &[i32],
+    strings: &[u8],
+) -> Result<Vec<EventRecord>, String> {
     let mut cursor = 0usize;
     let mut out = Vec::new();
 

@@ -112,12 +112,45 @@ const ANVIL_TEMPLATE: Template = Template {
     files: ANVIL_FILES,
 };
 
+const BLOOM_FILES: &[(&str, &str)] = &[
+    (".gitignore", include_str!("../templates/bloom/.gitignore")),
+    ("forge.toml", include_str!("../templates/bloom/forge.toml")),
+    (
+        "src/app/layout.bloom",
+        include_str!("../templates/bloom/src/app/layout.bloom"),
+    ),
+    (
+        "src/app/page.bloom",
+        include_str!("../templates/bloom/src/app/page.bloom"),
+    ),
+    (
+        "src/components/counter.bloom",
+        include_str!("../templates/bloom/src/components/counter.bloom"),
+    ),
+    (
+        "src/stores/counter.flux.bloom",
+        include_str!("../templates/bloom/src/stores/counter.flux.bloom"),
+    ),
+    (
+        "src/lib/utils.forge",
+        include_str!("../templates/bloom/src/lib/utils.forge"),
+    ),
+    ("public/favicon.ico", ""),
+];
+
+const BLOOM_TEMPLATE: Template = Template {
+    name: "bloom",
+    entry: "src/app/page.bloom",
+    files: BLOOM_FILES,
+};
+
 const TEMPLATES: &[&Template] = &[
     &SCRIPT_TEMPLATE,
     &CLI_TEMPLATE,
     &LIB_TEMPLATE,
     &DATA_TEMPLATE,
     &ANVIL_TEMPLATE,
+    &BLOOM_TEMPLATE,
 ];
 
 pub fn render(content: &str, vars: &[(&str, &str)]) -> String {

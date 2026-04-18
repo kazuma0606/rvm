@@ -1,7 +1,7 @@
+use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use regex::Regex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BloomSourceFile {
@@ -10,7 +10,11 @@ pub struct BloomSourceFile {
 }
 
 pub fn collect_bloom_files(source_root: &Path) -> Result<Vec<BloomSourceFile>, String> {
-    fn walk(dir: &Path, source_root: &Path, files: &mut Vec<BloomSourceFile>) -> Result<(), String> {
+    fn walk(
+        dir: &Path,
+        source_root: &Path,
+        files: &mut Vec<BloomSourceFile>,
+    ) -> Result<(), String> {
         let mut entries = fs::read_dir(dir)
             .map_err(|e| format!("{}: {}", dir.display(), e))?
             .collect::<Result<Vec<_>, _>>()
@@ -105,10 +109,9 @@ pub fn parse_generated_forge_to_plan(source: &str) -> Result<WasmRenderPlan, Str
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| format!("invalid state line: {}", line))?;
                 state_name = Some(name.to_string());
-                initial_value = parts[1]
-                    .trim()
-                    .parse::<i32>()
-                    .map_err(|e| format!("invalid state initializer '{}': {}", parts[1].trim(), e))?;
+                initial_value = parts[1].trim().parse::<i32>().map_err(|e| {
+                    format!("invalid state initializer '{}': {}", parts[1].trim(), e)
+                })?;
             }
             continue;
         }
@@ -145,7 +148,8 @@ pub fn parse_generated_forge_to_plan(source: &str) -> Result<WasmRenderPlan, Str
         }
     }
 
-    let state_name = state_name.ok_or_else(|| "no state declaration found in generated forge".to_string())?;
+    let state_name =
+        state_name.ok_or_else(|| "no state declaration found in generated forge".to_string())?;
     Ok(WasmRenderPlan {
         state_name,
         initial_value,
@@ -168,8 +172,12 @@ pub fn generate_counter_wasm_rust(plan: &WasmRenderPlan) -> Result<String, Strin
     let click_listener = plan
         .listeners
         .iter()
-        .find(|(_, event, handler)| event == "click" && plan.increment_handlers.iter().any(|name| name == handler))
-        .ok_or_else(|| "click listener with increment handler is required for wasm output".to_string())?;
+        .find(|(_, event, handler)| {
+            event == "click" && plan.increment_handlers.iter().any(|name| name == handler)
+        })
+        .ok_or_else(|| {
+            "click listener with increment handler is required for wasm output".to_string()
+        })?;
 
     let mut consts = vec![
         rust_bytes("DYNAMIC_TARGET", dynamic_target),
@@ -363,8 +371,15 @@ pub fn compile_generated_forge_to_wasm(source: &str, out_path: &Path) -> Result<
 
     let mut temp_dir = std::env::temp_dir();
     temp_dir.push(format!("bloom_wasm_{}", std::process::id()));
-    temp_dir.push(format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos()));
-    fs::create_dir_all(temp_dir.join("src")).map_err(|e| format!("{}: {}", temp_dir.display(), e))?;
+    temp_dir.push(format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    ));
+    fs::create_dir_all(temp_dir.join("src"))
+        .map_err(|e| format!("{}: {}", temp_dir.display(), e))?;
 
     let result = (|| {
         fs::write(
@@ -381,12 +396,18 @@ pub fn compile_generated_forge_to_wasm(source: &str, out_path: &Path) -> Result<
                 "--target",
                 "wasm32-unknown-unknown",
                 "--manifest-path",
-                temp_dir.join("Cargo.toml").to_str().ok_or_else(|| "invalid temp manifest path".to_string())?,
+                temp_dir
+                    .join("Cargo.toml")
+                    .to_str()
+                    .ok_or_else(|| "invalid temp manifest path".to_string())?,
             ])
             .status()
             .map_err(|e| format!("cargo wasm build failed: {}", e))?;
         if !status.success() {
-            return Err(format!("cargo wasm build failed with exit code {:?}", status.code()));
+            return Err(format!(
+                "cargo wasm build failed with exit code {:?}",
+                status.code()
+            ));
         }
 
         let built = temp_dir
@@ -397,7 +418,8 @@ pub fn compile_generated_forge_to_wasm(source: &str, out_path: &Path) -> Result<
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
         }
-        fs::copy(&built, out_path).map_err(|e| format!("{} -> {}: {}", built.display(), out_path.display(), e))?;
+        fs::copy(&built, out_path)
+            .map_err(|e| format!("{} -> {}: {}", built.display(), out_path.display(), e))?;
         Ok(())
     })();
 
@@ -438,7 +460,12 @@ pub fn preprocess_render_calls(source: &str, project_root: &Path) -> Result<Stri
             let full = cap.get(0).unwrap();
             let component_name = cap.get(1).unwrap().as_str();
             let props_raw = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-            (full.start(), full.end(), component_name.to_string(), props_raw.to_string())
+            (
+                full.start(),
+                full.end(),
+                component_name.to_string(),
+                props_raw.to_string(),
+            )
         })
         .collect();
 
@@ -459,8 +486,8 @@ pub fn preprocess_render_calls(source: &str, project_root: &Path) -> Result<Stri
         let props_map = if props_raw.is_empty() {
             "{}".to_string()
         } else {
-            let kv_re = Regex::new(r#"(\w+)=\{([^}]+)\}"#)
-                .map_err(|e| format!("regex error: {}", e))?;
+            let kv_re =
+                Regex::new(r#"(\w+)=\{([^}]+)\}"#).map_err(|e| format!("regex error: {}", e))?;
             let mut pairs = Vec::new();
             for kv in kv_re.captures_iter(&props_raw) {
                 let key = kv.get(1).unwrap().as_str();
@@ -500,7 +527,7 @@ pub fn inline_critical_css(js_source: &str, css: &str) -> String {
         .replace('`', "\\`")
         .replace('$', "\\$");
     let injector = format!(
-        "(function(){{const s=document.createElement('style');s.textContent=`{}`;document.head.appendChild(s);}})();\n",
+        "(function(){{if(typeof document==='undefined'||typeof document.createElement!=='function')return;const s=document.createElement('style');s.textContent=`{}`;document.head.appendChild(s);}})();\n",
         escaped
     );
     format!("{}{}", injector, js_source)
@@ -564,10 +591,17 @@ mod tests {
         assert_eq!(plan.state_name, "count");
         assert_eq!(plan.initial_value, 0);
         assert_eq!(plan.dynamic_text_target.as_deref(), Some("text_root_0_0"));
-        assert_eq!(plan.static_texts, vec![("text_root_1_0".to_string(), "+".to_string())]);
+        assert_eq!(
+            plan.static_texts,
+            vec![("text_root_1_0".to_string(), "+".to_string())]
+        );
         assert_eq!(
             plan.listeners,
-            vec![("node_root_1".to_string(), "click".to_string(), "increment".to_string())]
+            vec![(
+                "node_root_1".to_string(),
+                "click".to_string(),
+                "increment".to_string()
+            )]
         );
     }
 
@@ -578,7 +612,11 @@ mod tests {
             initial_value: 0,
             dynamic_text_target: Some("text_root_0_0".to_string()),
             static_texts: vec![("text_root_1_0".to_string(), "+".to_string())],
-            listeners: vec![("node_root_1".to_string(), "click".to_string(), "increment".to_string())],
+            listeners: vec![(
+                "node_root_1".to_string(),
+                "click".to_string(),
+                "increment".to_string(),
+            )],
             increment_handlers: vec!["increment".to_string()],
         })
         .expect("rust");
@@ -617,7 +655,11 @@ let html = render(<Counter />)
         let source = "render(<Counter count={5} />)";
         let root = Path::new("/project");
         let result = preprocess_render_calls(source, root).expect("preprocess");
-        assert!(result.contains("\"count\": 5"), "props が変換されていない: {}", result);
+        assert!(
+            result.contains("\"count\": 5"),
+            "props が変換されていない: {}",
+            result
+        );
     }
 
     #[test]
@@ -633,8 +675,16 @@ let html = render(<Counter />)
             "style 注入コードが含まれていない: {}",
             result
         );
-        assert!(result.contains("body{background:oklch"), "CSS が含まれていない: {}", result);
-        assert!(result.contains("forge.min.js"), "js 本体が含まれていない: {}", result);
+        assert!(
+            result.contains("body{background:oklch"),
+            "CSS が含まれていない: {}",
+            result
+        );
+        assert!(
+            result.contains("forge.min.js"),
+            "js 本体が含まれていない: {}",
+            result
+        );
     }
 
     #[test]
@@ -671,7 +721,11 @@ let html = render(<Counter />)
                 .unwrap_or(false)
         });
         // flux.bloom ファイルが検出されることを確認
-        assert!(flux_found, ".flux.bloom ファイルが検出されなかった: {:?}", files);
+        assert!(
+            flux_found,
+            ".flux.bloom ファイルが検出されなかった: {:?}",
+            files
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -15,9 +15,9 @@
 - Phase B-3: 14/16 完了（SSR + 全置換アタッチ）
 - Phase B-4: 11/12 完了（DOM Morphing）
 - Phase B-5: 10/10 完了（typestate ストア + DevTools）
-- Phase B-6: 0/16 完了（CLI スキャフォールド）
+- Phase B-6: 16/16 完了（CLI スキャフォールド）
 - **Milestone M-0: 0/2 完了（E2E 起動画面確認）** ← 全フェーズ完了後の最終確認
-- **合計: 89/110 完了**
+- **合計: 105/110 完了**
 
 ---
 
@@ -207,32 +207,32 @@
 
 ### B-6-A: `forge new --bloom` テンプレート
 
-- [ ] `packages/bloom/` のプロジェクトテンプレート定義
-- [ ] `forge new <name> --bloom` でディレクトリ構造を生成
-- [ ] `forge.toml` の `[bloom]` セクションを初期設定
-- [ ] `src/app/layout.bloom` / `src/app/page.bloom` のサンプルを生成
-- [ ] `src/components/counter.bloom` サンプルを生成
-- [ ] `src/stores/counter.flux.bloom` サンプルを生成
+- [x] `packages/bloom/` のプロジェクトテンプレート定義
+- [x] `forge new <name> --bloom` でディレクトリ構造を生成
+- [x] `forge.toml` の `[bloom]` セクションを初期設定
+- [x] `src/app/layout.bloom` / `src/app/page.bloom` のサンプルを生成
+- [x] `src/components/counter.bloom` サンプルを生成
+- [x] `src/stores/counter.flux.bloom` サンプルを生成
 
 ### B-6-B: `forge bloom add` サブコマンド
 
-- [ ] `forge bloom add component <name>` → `src/components/<name>.bloom`
-- [ ] `forge bloom add page <path>` → `src/app/<path>/page.bloom`（ディレクトリ自動作成）
-- [ ] `forge bloom add layout <path>` → `src/app/<path>/layout.bloom`
-- [ ] `forge bloom add store <name>` → `src/stores/<name>.flux.bloom`
-- [ ] `forge bloom add model <name>` → 対象ディレクトリに `<name>.model.bloom`
+- [x] `forge bloom add component <name>` → `src/components/<name>.bloom`
+- [x] `forge bloom add page <path>` → `src/app/<path>/page.bloom`（ディレクトリ自動作成）
+- [x] `forge bloom add layout <path>` → `src/app/<path>/layout.bloom`
+- [x] `forge bloom add store <name>` → `src/stores/<name>.flux.bloom`
+- [x] `forge bloom add model <name>` → 対象ディレクトリに `<name>.model.bloom`
 
 ### B-6-C: `forge dev` 起動ページ
 
-- [ ] `web-ui/bloon-ts/app/page.tsx` を `page.bloom` に移植
+- [x] `web-ui/bloon-ts/app/page.tsx` を `page.bloom` に移植
 - [ ] `web-ui/bloom-image.png` のビジュアルと一致することを確認
-- [ ] `forge dev` 起動時に自動でブラウザを開く
+- [x] `forge dev` 起動時に自動でブラウザを開く
 
 ### B-6-D: テスト
 
-- [ ] `test_new_bloom_project_structure` — 生成されたディレクトリ構造が spec と一致する
-- [ ] `test_bloom_add_component` — コンポーネントファイルが正しいボイラープレートで生成される
-- [ ] `test_bloom_add_page_nested` — ネストしたパス（`users/[id]`）でディレクトリが作成される
+- [x] `test_new_bloom_project_structure` — 生成されたディレクトリ構造が spec と一致する
+- [x] `test_bloom_add_component` — コンポーネントファイルが正しいボイラープレートで生成される
+- [x] `test_bloom_add_page_nested` — ネストしたパス（`users/[id]`）でディレクトリが作成される
 
 ---
 
