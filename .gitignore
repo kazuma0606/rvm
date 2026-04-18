@@ -47,3 +47,7 @@ packages/*/settings.json
 
 
 web-ui/bloon-ts/
+
+# Bloom browser test artifacts
+packages/bloom/tests/.edge-profile/
+packages/bloom/tests/browser-e2e-temp/

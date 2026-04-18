@@ -9,9 +9,11 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::forge_toml::{DependencyValue, ForgeToml};
+use bloom_compiler::{collect_bloom_files, compile_generated_forge_to_wasm, generated_forge_path, inline_critical_css, preprocess_render_calls, wasm_output_path};
 use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
 use forge_compiler::parser::parse_source;
@@ -96,7 +98,13 @@ fn main() {
                 .iter()
                 .position(|s| s == "-o")
                 .and_then(|i| args.get(i + 1));
-            build_entry(args.get(2).map(|s| s.as_str()), output.map(|s| s.as_str()));
+            let web = args.iter().any(|arg| arg == "--web");
+            let path = build_path_arg(&args);
+            if web {
+                build_web_entry(path, output.map(|s| s.as_str()));
+            } else {
+                build_entry(path, output.map(|s| s.as_str()));
+            }
         }
         Some("goblet") => {
             goblet_entry(&args);
@@ -204,6 +212,27 @@ fn main() {
             print_help();
         }
     }
+}
+
+fn build_path_arg(args: &[String]) -> Option<&str> {
+    let mut skip_next = false;
+    for arg in args.iter().skip(2) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-o" || arg == "--output" {
+            skip_next = true;
+            continue;
+        }
+        if arg == "--web" {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Some(arg.as_str());
+        }
+    }
+    None
 }
 
 fn run_file(path: &str) {
@@ -1392,6 +1421,17 @@ fn build_entry(path: Option<&str>, output: Option<&str>) {
     }
 }
 
+fn build_web_entry(path: Option<&str>, output: Option<&str>) {
+    match resolve_build_request(path) {
+        Ok(BuildRequest::File(file_path)) => build_web_file(&file_path, output),
+        Ok(BuildRequest::Project { project_dir, .. }) => build_web_project(&project_dir, output),
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn test_entry(path: Option<&str>, filter: Option<&str>) {
     match resolve_project_request(path) {
         Ok(ProjectRequest::File(file_path)) => {
@@ -1418,6 +1458,175 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
             std::process::exit(1);
         }
     }
+}
+
+fn build_web_file(path: &Path, output: Option<&str>) {
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let source_root = project_dir;
+    let rel_path = path.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("app.bloom"));
+    let out_dir = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join("dist"));
+    if let Err(e) = emit_bloom_web_artifacts(source_root, &[(path.to_path_buf(), rel_path)], &out_dir) {
+        eprintln!("エラー: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn build_web_project(project_dir: &Path, output: Option<&str>) {
+    let source_root = project_dir.join("src");
+    let out_dir = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join("dist"));
+
+    // Anvil の .forge ルートファイルがあれば render(<Component />) 構文を前処理する
+    if let Err(e) = preprocess_forge_files_in_dir(&source_root, project_dir) {
+        eprintln!("警告: render(<...>) 前処理に失敗: {}", e);
+    }
+
+    let files = match collect_bloom_files(&source_root) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let file_pairs = files
+        .into_iter()
+        .map(|file| (file.abs_path, file.rel_path))
+        .collect::<Vec<_>>();
+    if let Err(e) = emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir) {
+        eprintln!("エラー: {}", e);
+        std::process::exit(1);
+    }
+}
+
+/// src/ 内の .forge ファイルをスキャンし render(<Component />) 構文を前処理する。
+/// 変換後の内容でファイルを上書きする（プロジェクトコピー先の dist/generated/ に書く）。
+fn preprocess_forge_files_in_dir(dir: &Path, project_root: &Path) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            preprocess_forge_files_in_dir(&path, project_root)?;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("forge") {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        if source.contains("render(<") {
+            let processed = preprocess_render_calls(&source, project_root)?;
+            fs::write(&path, processed)
+                .map_err(|e| format!("{}: {}", path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+fn emit_bloom_web_artifacts(
+    source_root: &Path,
+    files: &[(PathBuf, PathBuf)],
+    out_dir: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {}", out_dir.display(), e))?;
+    for (abs_path, rel_path) in files {
+        let bloom_source = fs::read_to_string(abs_path)
+            .map_err(|e| format!("{}: {}", abs_path.display(), e))?;
+        let generated = compile_bloom_with_compiler_forge(source_root, &bloom_source)?;
+        let out_path = out_dir.join("generated").join(generated_forge_path(rel_path));
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
+        }
+        fs::write(&out_path, generated).map_err(|e| format!("{}: {}", out_path.display(), e))?;
+        let wasm_path = out_dir.join(wasm_output_path(rel_path));
+        compile_generated_forge_to_wasm(&fs::read_to_string(&out_path).map_err(|e| format!("{}: {}", out_path.display(), e))?, &wasm_path)?;
+    }
+
+    let bloom_pkg = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("packages")
+        .join("bloom");
+    let runtime_src = bloom_pkg.join("forge.min.js");
+    let runtime_dst = out_dir.join("forge.min.js");
+
+    let js_source = fs::read_to_string(&runtime_src)
+        .map_err(|e| format!("{}: {}", runtime_src.display(), e))?;
+
+    let critical_css_path = bloom_pkg.join("src").join("critical.css");
+    let css = if critical_css_path.exists() {
+        fs::read_to_string(&critical_css_path)
+            .map_err(|e| format!("{}: {}", critical_css_path.display(), e))?
+    } else {
+        String::new()
+    };
+
+    let js_with_css = inline_critical_css(&js_source, css.trim());
+    fs::write(&runtime_dst, js_with_css)
+        .map_err(|e| format!("{}: {}", runtime_dst.display(), e))?;
+
+    Ok(())
+}
+
+fn compile_bloom_with_compiler_forge(source_root: &Path, bloom_source: &str) -> Result<String, String> {
+    let compiler_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("packages")
+        .join("bloom")
+        .join("src")
+        .join("compiler.forge");
+    let compiler_source =
+        fs::read_to_string(&compiler_path).map_err(|e| format!("{}: {}", compiler_path.display(), e))?;
+
+    let mut temp_dir = env::temp_dir();
+    temp_dir.push(format!("forge_bloom_web_{}", unique_suffix()));
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("{}: {}", temp_dir.display(), e))?;
+
+    let local_source_root = source_root.to_path_buf();
+    let result = (|| {
+        let compiler_copy = temp_dir.join("compiler.forge");
+        fs::write(&compiler_copy, compiler_source)
+            .map_err(|e| format!("{}: {}", compiler_copy.display(), e))?;
+
+        let runner_path = temp_dir.join("main.forge");
+        let bytes = bloom_source
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let runner = format!(
+            "use ./compiler.{{ parse_bloom, bloom_generated }}\nlet source = bytes_to_str([{}])\nprintln(bloom_generated(parse_bloom(source)))\n",
+            bytes
+        );
+        fs::write(&runner_path, runner).map_err(|e| format!("{}: {}", runner_path.display(), e))?;
+
+        let cli = env::current_exe().map_err(|e| e.to_string())?;
+        let output = Command::new(cli)
+            .arg("run")
+            .arg(&runner_path)
+            .current_dir(&local_source_root)
+            .output()
+            .map_err(|e| format!("compiler.forge invocation failed: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "compiler.forge invocation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    })();
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
 }
 
 fn build_file(path: &Path, output: Option<&str>) {
@@ -2140,6 +2349,7 @@ fn print_help() {
     println!("  forge notebook show <file.fnb>      Notebook セル一覧を表示");
     println!("  forge lsp                           LSP サーバをstdioモードで起動");
     println!("  forge build                         forge.toml からバイナリを生成");
+    println!("  forge build --web                   .bloom を dist/ に Web 出力");
     println!("  forge build <dir/>                  指定ディレクトリの forge.toml を使用");
     println!("  forge build <file.forge>            単一ファイルからバイナリを生成");
     println!("  forge build <file.forge> -o myapp   出力バイナリ名を指定");

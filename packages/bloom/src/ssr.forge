@@ -1,0 +1,660 @@
+pub fn make_component(source: string, props: map) -> map {
+    {
+        "source": source,
+        "props": props,
+    }
+}
+
+pub fn str_find(s: string, target: string, start: number) -> number {
+    let s_bytes = string_to_bytes(s)
+    let t_bytes = string_to_bytes(target)
+    let s_len = s_bytes.len()
+    let t_len = t_bytes.len()
+    state i = start
+    while i + t_len <= s_len {
+        state matched = true
+        state j = 0
+        while j < t_len && matched {
+            if s_bytes[i + j] != t_bytes[j] {
+                matched = false
+            } else {
+                j = j + 1
+            }
+        }
+        if matched { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn str_slice(s: string, start: number, end_pos: number) -> string {
+    let raw = string_to_bytes(s)
+    let result = []
+    state i = start
+    loop {
+        if i >= end_pos { break }
+        result.push(raw[i])
+        i = i + 1
+    }
+    bytes_to_str(result)
+}
+
+pub fn trim_ascii(s: string) -> string {
+    let bytes = string_to_bytes(s)
+    let len = bytes.len()
+    state start = 0
+    state end_pos = len
+
+    state scanning_start = true
+    while start < len && scanning_start {
+        let b = bytes[start]
+        if b == 32 || b == 10 || b == 13 || b == 9 {
+            start = start + 1
+        } else {
+            scanning_start = false
+        }
+    }
+
+    state scanning_end = true
+    while end_pos > start && scanning_end {
+        let b = bytes[end_pos - 1]
+        if b == 32 || b == 10 || b == 13 || b == 9 {
+            end_pos = end_pos - 1
+        } else {
+            scanning_end = false
+        }
+    }
+
+    str_slice(s, start, end_pos)
+}
+
+pub fn starts_with_uppercase(s: string) -> bool {
+    let bytes = string_to_bytes(s)
+    if bytes.len() == 0 {
+        return false
+    }
+    let b = bytes[0]
+    b >= 65 && b <= 90
+}
+
+pub fn char_from_byte(value: number) -> string {
+    bytes_to_str([value])
+}
+
+pub fn extract_script_block(source: string) -> string {
+    let start = str_find(source, "<script>", 0)
+    if start < 0 {
+        return ""
+    }
+    let body_start = start + 8
+    let end_pos = str_find(source, "</script>", body_start)
+    if end_pos < 0 {
+        return ""
+    }
+    trim_ascii(str_slice(source, body_start, end_pos))
+}
+
+pub fn strip_script_block(source: string) -> string {
+    let start = str_find(source, "<script>", 0)
+    if start < 0 {
+        return source
+    }
+    let end_pos = str_find(source, "</script>", start + 8)
+    if end_pos < 0 {
+        return source
+    }
+    let before = str_slice(source, 0, start)
+    let source_bytes = string_to_bytes(source)
+    let after = str_slice(source, end_pos + 9, source_bytes.len())
+    "{before}{after}"
+}
+
+fn trim_quotes(source: string) -> string {
+    let bytes = string_to_bytes(source)
+    if bytes.len() >= 2 && bytes[0] == 34 && bytes[bytes.len() - 1] == 34 {
+        return str_slice(source, 1, bytes.len() - 1)
+    }
+    source
+}
+
+pub fn parse_attributes(source: string) -> list<map> {
+    state out: list<map> = []
+    let bytes = string_to_bytes(source)
+    let len = bytes.len()
+    let open_brace = char_from_byte(123)
+    state token_start = 0
+    state quote = 0
+    state brace_depth = 0
+    state i = 0
+
+    while i <= len {
+        let at_end = i == len
+        let b = if at_end { 32 } else { bytes[i] }
+
+        if !at_end && b == 34 {
+            if quote == 0 {
+                quote = 34
+            } else {
+                quote = 0
+            }
+            i = i + 1
+        } else if !at_end && quote == 0 && b == 123 {
+            brace_depth = brace_depth + 1
+            i = i + 1
+        } else if !at_end && quote == 0 && b == 125 {
+            brace_depth = brace_depth - 1
+            i = i + 1
+        } else if at_end || (quote == 0 && brace_depth == 0 && b == 32) {
+            if i > token_start {
+                let token = str_slice(source, token_start, i)
+                let token = trim_ascii(token)
+                if token == "" {
+                } else if token.starts_with("@") {
+                    let eq_pos = str_find(token, "={open_brace}", 0)
+                    let event = str_slice(token, 1, eq_pos)
+                    let token_bytes = string_to_bytes(token)
+                    let handler = trim_ascii(str_slice(token, eq_pos + 2, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "EventHandler",
+                        "event": event,
+                        "handler": handler,
+                    })
+                } else if token.starts_with(":bind={open_brace}") {
+                    let token_bytes = string_to_bytes(token)
+                    let expr = trim_ascii(str_slice(token, 7, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "Bind",
+                        "expr": expr,
+                    })
+                } else if token.starts_with(":") {
+                    let eq_pos = str_find(token, "={open_brace}", 0)
+                    let name = str_slice(token, 1, eq_pos)
+                    let token_bytes = string_to_bytes(token)
+                    let expr = trim_ascii(str_slice(token, eq_pos + 2, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "Dynamic",
+                        "name": name,
+                        "expr": expr,
+                    })
+                } else {
+                    let eq_pos = str_find(token, "=", 0)
+                    if eq_pos > 0 {
+                        let name = str_slice(token, 0, eq_pos)
+                        let token_bytes = string_to_bytes(token)
+                        let raw_value = str_slice(token, eq_pos + 1, token_bytes.len())
+                        let value = trim_quotes(raw_value)
+                        out.push({
+                            "kind": "Static",
+                            "name": name,
+                            "value": value,
+                        })
+                    }
+                }
+            }
+            token_start = i + 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+
+    out
+}
+
+fn find_tag_close(source: string, start: number) -> number {
+    let bytes = string_to_bytes(source)
+    let len = bytes.len()
+    state quote = 0
+    state brace_depth = 0
+    state i = start + 1
+
+    while i < len {
+        let b = bytes[i]
+        if b == 34 {
+            if quote == 0 {
+                quote = 34
+            } else {
+                quote = 0
+            }
+        } else if quote == 0 && b == 123 {
+            brace_depth = brace_depth + 1
+        } else if quote == 0 && b == 125 {
+            brace_depth = brace_depth - 1
+        } else if quote == 0 && brace_depth == 0 && b == 62 {
+            return i
+        }
+        i = i + 1
+    }
+
+    len
+}
+
+pub fn parse_template_nodes(source: string) -> list<map> {
+    state out: list<map> = []
+    let source_bytes = string_to_bytes(source)
+    let len = source_bytes.len()
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state cursor = 0
+
+    while cursor < len {
+        let if_start = str_find(source, "{open_brace}#if ", cursor)
+        let for_start = str_find(source, "{open_brace}#for ", cursor)
+        let tag_start = str_find(source, "<", cursor)
+        let interp_start = str_find(source, open_brace, cursor)
+
+        state next = 0 - 1
+        if if_start >= 0 {
+            next = if_start
+        }
+        if for_start >= 0 && (next < 0 || for_start < next) {
+            next = for_start
+        }
+        if tag_start >= 0 && (next < 0 || tag_start < next) {
+            next = tag_start
+        }
+        if interp_start >= 0 && (next < 0 || interp_start < next) {
+            next = interp_start
+        }
+        if next < 0 {
+            let text = trim_ascii(str_slice(source, cursor, len))
+            if text != "" {
+                out.push({
+                    "kind": "Text",
+                    "text": text,
+                })
+            }
+            cursor = len
+        } else {
+            if next > cursor {
+                let text = trim_ascii(str_slice(source, cursor, next))
+                if text != "" {
+                    out.push({
+                        "kind": "Text",
+                        "text": text,
+                    })
+                }
+            }
+
+            if if_start == next {
+                let open_end = str_find(source, close_brace, next)
+                let condition = trim_ascii(str_slice(source, next + 5, open_end))
+                let if_close = "{open_brace}/if{close_brace}"
+                let close_start = str_find(source, if_close, open_end + 1)
+                let inner = str_slice(source, open_end + 1, close_start)
+                out.push({
+                    "kind": "If",
+                    "condition": condition,
+                    "children": parse_template_nodes(inner),
+                })
+                cursor = close_start + string_to_bytes(if_close).len()
+            } else if for_start == next {
+                let open_end = str_find(source, close_brace, next)
+                let expr = trim_ascii(str_slice(source, next + 6, open_end))
+                let expr_bytes = string_to_bytes(expr)
+                let in_pos = str_find(expr, " in ", 0)
+                let item = trim_ascii(str_slice(expr, 0, in_pos))
+                let iterable = trim_ascii(str_slice(expr, in_pos + 4, expr_bytes.len()))
+                let for_close = "{open_brace}/for{close_brace}"
+                let close_start = str_find(source, for_close, open_end + 1)
+                let inner = str_slice(source, open_end + 1, close_start)
+                out.push({
+                    "kind": "For",
+                    "item": item,
+                    "iterable": iterable,
+                    "children": parse_template_nodes(inner),
+                })
+                cursor = close_start + string_to_bytes(for_close).len()
+            } else if tag_start == next {
+                let tag_end = find_tag_close(source, next)
+                let raw_tag = trim_ascii(str_slice(source, next + 1, tag_end))
+
+                if raw_tag == "slot /" || raw_tag == "slot/" || raw_tag == "slot" {
+                    out.push({
+                        "kind": "Slot",
+                    })
+                    cursor = tag_end + 1
+                } else {
+                    let raw_tag_bytes = string_to_bytes(raw_tag)
+                    let self_closing = raw_tag.ends_with("/")
+                    let tag_body = if self_closing {
+                        trim_ascii(str_slice(raw_tag, 0, raw_tag_bytes.len() - 1))
+                    } else {
+                        raw_tag
+                    }
+                    let tag_body_bytes = string_to_bytes(tag_body)
+                    let space_pos = str_find(tag_body, " ", 0)
+                    let tag = if space_pos < 0 {
+                        tag_body
+                    } else {
+                        str_slice(tag_body, 0, space_pos)
+                    }
+                    let attrs_src = if space_pos < 0 {
+                        ""
+                    } else {
+                        trim_ascii(str_slice(tag_body, space_pos + 1, tag_body_bytes.len()))
+                    }
+                    let attrs = parse_attributes(attrs_src)
+
+                    if self_closing {
+                        out.push({
+                            "kind": if starts_with_uppercase(tag) { "Component" } else { "Element" },
+                            "tag": tag,
+                            "attrs": attrs,
+                            "children": [],
+                        })
+                        cursor = tag_end + 1
+                    } else {
+                        let close_tag = "</{tag}>"
+                        let close_start = str_find(source, close_tag, tag_end + 1)
+                        let inner = str_slice(source, tag_end + 1, close_start)
+                        let close_tag_bytes = string_to_bytes(close_tag)
+                        out.push({
+                            "kind": if starts_with_uppercase(tag) { "Component" } else { "Element" },
+                            "tag": tag,
+                            "attrs": attrs,
+                            "children": parse_template_nodes(inner),
+                        })
+                        cursor = close_start + close_tag_bytes.len()
+                    }
+                }
+            } else {
+                let end_pos = str_find(source, close_brace, next)
+                let expr_value = trim_ascii(str_slice(source, next + 1, end_pos))
+                out.push({
+                    "kind": "Interpolation",
+                    "expr": expr_value,
+                })
+                cursor = end_pos + 1
+            }
+        }
+    }
+
+    out
+}
+
+pub fn parse_bloom(source: string) -> map {
+    {
+        "template": parse_template_nodes(strip_script_block(source)),
+        "script": extract_script_block(source),
+    }
+}
+
+fn path_id(path: string) -> string {
+    "node_{path}"
+}
+
+fn text_target_id(path: string, index: number) -> string {
+    "text_{path}_{index}"
+}
+
+fn fragment_target_id(path: string) -> string {
+    "fragment_{path}"
+}
+
+fn escape_html(value: string) -> string {
+    let bytes = string_to_bytes(value)
+    state out = ""
+    state i = 0
+    while i < len(bytes) {
+        let b = bytes[i]
+        if b == 38 {
+            out = "{out}&amp;"
+        } else if b == 60 {
+            out = "{out}&lt;"
+        } else if b == 62 {
+            out = "{out}&gt;"
+        } else if b == 34 {
+            out = "{out}&quot;"
+        } else if b == 39 {
+            out = "{out}&#39;"
+        } else {
+            out = "{out}{bytes_to_str([b])}"
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn parse_list_items(raw: string) -> list {
+    let body_bytes = string_to_bytes(raw)
+    if len(body_bytes) < 2 {
+        return []
+    }
+    let inner = trim_ascii(str_slice(raw, 1, len(body_bytes) - 1))
+    if inner == "" {
+        return []
+    }
+    state out = []
+    let parts = inner.split(",")
+    for part in parts {
+        let item = trim_ascii(part)
+        let item_bytes = string_to_bytes(item)
+        if len(item_bytes) >= 2 && item_bytes[0] == 34 && item_bytes[len(item_bytes) - 1] == 34 {
+            out.push(str_slice(item, 1, len(item_bytes) - 1))
+        } else if item == "true" {
+            out.push(true)
+        } else if item == "false" {
+            out.push(false)
+        } else {
+            out.push(item)
+        }
+    }
+    out
+}
+
+fn parse_state_bindings(script: string) -> map {
+    let lines = script.split("\n")
+    state context = {}
+    state i = 0
+    while i < len(lines) {
+        let line = trim_ascii(lines[i])
+        if line.starts_with("state ") {
+            let rest = str_slice(line, 6, len(string_to_bytes(line)))
+            let colon_pos = str_find(rest, ":", 0)
+            let eq_pos = str_find(rest, "=", 0)
+            state end_pos = 0 - 1
+            if colon_pos >= 0 {
+                end_pos = colon_pos
+            }
+            if eq_pos >= 0 && (end_pos < 0 || eq_pos < end_pos) {
+                end_pos = eq_pos
+            }
+            if eq_pos > 0 && end_pos > 0 {
+                let name = trim_ascii(str_slice(rest, 0, end_pos))
+                let value = trim_ascii(str_slice(rest, eq_pos + 1, len(string_to_bytes(rest))))
+                let value_bytes = string_to_bytes(value)
+                if len(value_bytes) >= 2 && value_bytes[0] == 34 && value_bytes[len(value_bytes) - 1] == 34 {
+                    context[name] = str_slice(value, 1, len(value_bytes) - 1)
+                } else if value == "true" {
+                    context[name] = true
+                } else if value == "false" {
+                    context[name] = false
+                } else if value.starts_with("[") && value.ends_with("]") {
+                    context[name] = parse_list_items(value)
+                } else {
+                    context[name] = value
+                }
+            }
+        }
+        i = i + 1
+    }
+    context
+}
+
+fn merged_context(script: string, props: map) -> map {
+    state context = parse_state_bindings(script)
+    for key in props.keys() {
+        context[key] = props[key]
+    }
+    context
+}
+
+fn lookup_value(context: map, expr: string) -> string {
+    let trimmed = trim_ascii(expr)
+    let bytes = string_to_bytes(trimmed)
+    if len(bytes) >= 2 && bytes[0] == 34 && bytes[len(bytes) - 1] == 34 {
+        return str_slice(trimmed, 1, len(bytes) - 1)
+    }
+    state current = context
+    let parts = trimmed.split(".")
+    state i = 0
+    while i < len(parts) {
+        let part = trim_ascii(parts[i])
+        current = current[part]
+        i = i + 1
+    }
+    string(current)
+}
+
+fn lookup_truthy(context: map, expr: string) -> bool {
+    let value = lookup_value(context, expr)
+    value == "true" || (value != "" && value != "false" && value != "0" && value != "none")
+}
+
+fn lookup_items(context: map, expr: string) -> list {
+    let trimmed = trim_ascii(expr)
+    if trimmed.starts_with("[") && trimmed.ends_with("]") {
+        return parse_list_items(trimmed)
+    }
+    state current = context
+    let parts = trimmed.split(".")
+    state i = 0
+    while i < len(parts) {
+        let part = trim_ascii(parts[i])
+        current = current[part]
+        i = i + 1
+    }
+    current
+}
+
+fn render_attrs(attrs: list<map>, context: map, target_id: string) -> string {
+    let quote = char_from_byte(34)
+    state out = " id={quote}{target_id}{quote}"
+    state i = 0
+    while i < len(attrs) {
+        let attr = attrs[i]
+        let kind = attr["kind"]
+        if kind == "Static" {
+            let name = attr["name"]
+            let value = escape_html(attr["value"])
+            out = "{out} {name}={quote}{value}{quote}"
+        } else if kind == "Dynamic" {
+            let name = attr["name"]
+            let value = escape_html(lookup_value(context, attr["expr"]))
+            out = "{out} {name}={quote}{value}{quote}"
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn render_nodes(nodes: list<map>, path: string, context: map) -> string {
+    let quote = char_from_byte(34)
+    state out = ""
+    state i = 0
+    while i < len(nodes) {
+        let node = nodes[i]
+        let kind = node["kind"]
+        let child_path = "{path}_{i}"
+        if kind == "Text" {
+            let target_id = text_target_id(path, i)
+            let text = escape_html(node["text"])
+            out = "{out}<span id={quote}{target_id}{quote}>{text}</span>"
+        } else if kind == "Interpolation" {
+            let target_id = text_target_id(path, i)
+            let value = escape_html(lookup_value(context, node["expr"]))
+            out = "{out}<span id={quote}{target_id}{quote}>{value}</span>"
+        } else if kind == "Element" || kind == "Component" {
+            let tag = node["tag"]
+            let attrs = render_attrs(node["attrs"], context, path_id(child_path))
+            let inner = render_nodes(node["children"], child_path, context)
+            out = "{out}<{tag}{attrs}>{inner}</{tag}>"
+        } else if kind == "If" {
+            let wrapper = fragment_target_id(child_path)
+            let inner = if lookup_truthy(context, node["condition"]) {
+                render_nodes(node["children"], child_path, context)
+            } else {
+                ""
+            }
+            out = "{out}<span id={quote}{wrapper}{quote}>{inner}</span>"
+        } else if kind == "For" {
+            let wrapper = fragment_target_id(child_path)
+            let item_name = node["item"]
+            let items = lookup_items(context, node["iterable"])
+            state inner = ""
+            for item in items {
+                state child_context = context
+                child_context[item_name] = item
+                let rendered = render_nodes(node["children"], child_path, child_context)
+                inner = "{inner}{rendered}"
+            }
+            out = "{out}<span id={quote}{wrapper}{quote}>{inner}</span>"
+        } else if kind == "Slot" {
+            let wrapper = fragment_target_id(child_path)
+            out = "{out}<span id={quote}{wrapper}{quote}></span>"
+        }
+        i = i + 1
+    }
+    out
+}
+
+pub fn render_source(source: string, props: map) -> string {
+    let file = parse_bloom(source)
+    let context = merged_context(file["script"], props)
+    render_nodes(file["template"], "root", context)
+}
+
+pub fn render(component: map) -> string {
+    render_source(component["source"], component["props"])
+}
+
+pub fn hydrate_script_with(wasm_path: string) -> string {
+    let quote = char_from_byte(34)
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    "<script src={quote}/forge.min.js{quote} defer></script><script>window.addEventListener({quote}DOMContentLoaded{quote}, fn() {open_brace} ForgeBloom.load({quote}{wasm_path}{quote}) {close_brace})</script>"
+}
+
+pub fn hydrate_script() -> string {
+    hydrate_script_with("/app.wasm")
+}
+
+test "ssr render basic element" {
+    let quote = char_from_byte(34)
+    let source = "<div class={quote}card{quote}>Hello</div>"
+    let html = render_source(source, {})
+    let expected = "<div id={quote}node_root_0{quote} class={quote}card{quote}><span id={quote}text_root_0_0{quote}>Hello</span></div>"
+    assert_eq(html, expected)
+}
+
+test "ssr render embeds props and dynamic attrs" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let html = render(make_component(
+        "<h1 :class={open_brace}title_class{close_brace}>{open_brace}title{close_brace}</h1>",
+        {
+            "title": "Bloom",
+            "title_class": "hero",
+        },
+    ))
+    let quote = char_from_byte(34)
+    let expected = "<h1 id={quote}node_root_0{quote} class={quote}hero{quote}><span id={quote}text_root_0_0{quote}>Bloom</span></h1>"
+    assert_eq(html, expected)
+}
+
+test "ssr render uses state initializers and conditionals" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let quote = char_from_byte(34)
+    let source = "{open_brace}#if ready{close_brace}<p>{open_brace}message{close_brace}</p>{open_brace}/if{close_brace}<script>\nstate ready = true\nstate message = {quote}ok{quote}\n</script>"
+    let html = render_source(source, {})
+    let expected = "<span id={quote}fragment_root_0{quote}><p id={quote}node_root_0_0{quote}><span id={quote}text_root_0_0_0{quote}>ok</span></p></span>"
+    assert(html.contains(expected))
+}
+
+test "hydrate script contains runtime loader" {
+    let html = hydrate_script_with("/dist/app/page.wasm")
+    assert(html.contains("/forge.min.js"))
+    assert(html.contains("/dist/app/page.wasm"))
+}

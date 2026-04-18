@@ -1,0 +1,56 @@
+state _ops: list<map<string, string>> = []
+
+fn push_op(kind: string, target_id: string, key: string, value: string) -> number {
+    _ops = _ops.push({
+        "kind": kind,
+        "target_id": target_id,
+        "key": key,
+        "value": value,
+    })
+    0
+}
+
+pub fn set_text(target_id: string, value: string) -> number {
+    push_op("set_text", target_id, "", value)
+}
+
+pub fn set_attr(target_id: string, name: string, value: string) -> number {
+    push_op("set_attr", target_id, name, value)
+}
+
+pub fn set_class(target_id: string, value: string) -> number {
+    push_op("set_class", target_id, "class", value)
+}
+
+pub fn insert_node(target_id: string, html: string) -> number {
+    push_op("insert_node", target_id, "html", html)
+}
+
+pub fn remove_node(target_id: string) -> number {
+    push_op("remove_node", target_id, "", "")
+}
+
+pub fn replace_inner(target_id: string, html: string) -> number {
+    push_op("replace_inner", target_id, "html", html)
+}
+
+pub fn attach(target_id: string) -> number {
+    push_op("attach", target_id, "", "")
+}
+
+pub fn add_listener(target_id: string, event: string, handler_id: string) -> number {
+    push_op("add_listener", target_id, event, handler_id)
+}
+
+pub fn remove_listener(target_id: string, event: string, handler_id: string) -> number {
+    push_op("remove_listener", target_id, event, handler_id)
+}
+
+pub fn pending_ops() -> list<map<string, string>> {
+    _ops
+}
+
+pub fn clear_pending_ops() -> number {
+    _ops = []
+    0
+}

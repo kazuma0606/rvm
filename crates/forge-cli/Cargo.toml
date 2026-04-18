@@ -8,6 +8,7 @@ name = "forge-new"
 path = "src/main.rs"
 
 [dependencies]
+bloom-compiler = { path = "../bloom-compiler" }
 forge-compiler = { path = "../forge-compiler" }
 forge-goblet = { path = "../forge-goblet" }
 forge-lsp = { path = "../forge-lsp" }

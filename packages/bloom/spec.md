@@ -2,34 +2,37 @@
 
 > バージョン: 0.1.0
 > 設計ドキュメント: `web-ui/idea.md`
-> リポジトリ配置: `packages/bloom/`（ForgeScript 実装）/ `crates/bloom-compiler/`（Rust補助）
+> リポジトリ配置: `packages/bloom/`（ForgeScript 実装）/ `crates/bloom-compiler/`（Rust 最小グルー）
 
 ### 実装言語方針
 
-**Bloom は ForgeScript で書かれたフレームワークである。**
+**Bloom は ForgeScript で書かれたフレームワークであり、コンパイラ自身も ForgeScript で実装する。**
 
 ```
-packages/bloom/src/          ← ForgeScript（フレームワーク本体）
-  dom.forge                  ← DOM ラッパー
+packages/bloom/src/          ← ForgeScript（フレームワーク本体 + コンパイラ）
+  compiler.forge             ← .bloom パーサー + コード生成（自己実装）
+  reactivity.forge           ← リアクティビティ依存解析
+  store_compiler.forge       ← .flux.bloom パーサー + 状態遷移チェック
+  dom.forge                  ← DOM API ラッパー
   ssr.forge                  ← SSR レンダリング
   router.forge               ← ルーター
-  store.forge                ← ストアプリミティブ
+  store.forge                ← ストアプリミティブ（ランタイム）
   link.bloom                 ← <Link> コンポーネント
   ...
 
-crates/bloom-compiler/       ← Rust（補助：どうしても必要な部分のみ）
-  .bloom パーサー・コード生成  ← forge-compiler パイプラインの拡張
-  WASM↔JS ブリッジ最下層      ← wasm_bridge プリミティブ
+crates/bloom-compiler/       ← Rust（最小グルーのみ）
+  forge build --web の orchestration  ← .bloom ファイル検出 → ForgeScript コンパイラ呼び出し
+  WASM↔JS ブリッジ最下層              ← wasm_bridge プリミティブ（メモリレイアウト）
 forge.min.js                 ← JavaScript（ブラウザ側ローダー、< 5KB gzip）
 ```
 
-Rust が必要な理由：
-- `.bloom` パーサーは `forge-compiler`（Rust）のパイプラインに組み込む必要がある
-- WASM ↔ JS のバイナリプロトコル最下層は Rust で実装し `forge/std/wasm_bridge` として公開
-- `forge.min.js` はブラウザで動くため JavaScript
+Rust が本当に必要な理由（この 2 点のみ）：
+- `forge build --web` のビルドオーケストレーション — `.bloom` ファイルを検出し ForgeScript コンパイラを呼び出して WASM にまとめる（`forge-cli` の拡張）
+- WASM ↔ JS のバイナリプロトコル最下層 — メモリレイアウト・i32 配列シリアライズを Rust で実装し `forge/std/wasm_bridge` として公開
 
 **それ以外はすべて ForgeScript で実装する。**
-Bloom 自身が ForgeScript で書かれていることが、エコシステム全体の説得力になる。
+`.bloom` パーサー・コード生成・リアクティビティ解析・`.flux.bloom` 型チェックを ForgeScript で書くことは、
+Rust コンパイラが Rust で書かれているのと同じ説得力をエコシステムに与える。
 
 ---
 

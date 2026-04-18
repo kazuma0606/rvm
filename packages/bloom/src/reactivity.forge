@@ -1,0 +1,215 @@
+use ./compiler.{ parse_bloom, detect_state_names }
+
+fn is_ident_start(b: number) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95
+}
+
+fn is_ident_part(b: number) -> bool {
+    is_ident_start(b) || (b >= 48 && b <= 57)
+}
+
+fn contains_string(items: list<string>, target: string) -> bool {
+    state i = 0
+    while i < len(items) {
+        if items[i] == target {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn push_unique(items: list<string>, value: string) -> list<string> {
+    if contains_string(items, value) {
+        return items
+    }
+    state out = items
+    out.push(value)
+    out
+}
+
+fn expr_heads(expr: string) -> list<string> {
+    let bytes = string_to_bytes(expr)
+    state out: list<string> = []
+    state i = 0
+    while i < len(bytes) {
+        if !is_ident_start(bytes[i]) {
+            i = i + 1
+        } else {
+            let start = i
+            i = i + 1
+            while i < len(bytes) && (is_ident_part(bytes[i]) || bytes[i] == 46) {
+                i = i + 1
+            }
+            state token_bytes: list<number> = []
+            state j = start
+            while j < i {
+                token_bytes.push(bytes[j])
+                j = j + 1
+            }
+            let raw = bytes_to_str(token_bytes)
+            let parts = raw.split(".")
+            let head = parts[0]
+            out = push_unique(out, head)
+        }
+    }
+    out
+}
+
+pub fn collect_expr_state_refs(expr: string, state_names: list<string>, locals: list<string>) -> list<string> {
+    let heads = expr_heads(expr)
+    state refs: list<string> = []
+    state i = 0
+    while i < len(heads) {
+        let head = heads[i]
+        if contains_string(state_names, head) && !contains_string(locals, head) {
+            refs = push_unique(refs, head)
+        }
+        i = i + 1
+    }
+    refs
+}
+
+fn attr_dependency_records(attrs: list<map>, node_id: string, state_names: list<string>, locals: list<string>) -> list<map> {
+    state out: list<map> = []
+    state i = 0
+    while i < len(attrs) {
+        let attr = attrs[i]
+        let kind = attr["kind"]
+        if kind == "Dynamic" || kind == "Bind" {
+            let expr = attr["expr"]
+            let deps = collect_expr_state_refs(expr, state_names, locals)
+            if len(deps) > 0 {
+                out.push({
+                    "node_id": node_id,
+                    "kind": "attr",
+                    "name": if kind == "Dynamic" { attr["name"] } else { "value" },
+                    "deps": deps,
+                })
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn append_records(left: list<map>, right: list<map>) -> list<map> {
+    state out = left
+    state i = 0
+    while i < len(right) {
+        out.push(right[i])
+        i = i + 1
+    }
+    out
+}
+
+pub fn analyze_node_dependencies(nodes: list<map>, path: string, state_names: list<string>, locals: list<string>) -> list<map> {
+    state out: list<map> = []
+    state i = 0
+    while i < len(nodes) {
+        let node = nodes[i]
+        let node_path = "{path}_{i}"
+        let kind = node["kind"]
+
+        if kind == "Interpolation" {
+            let deps = collect_expr_state_refs(node["expr"], state_names, locals)
+            if len(deps) > 0 {
+                out.push({
+                    "node_id": "text_{node_path}",
+                    "kind": "text",
+                    "deps": deps,
+                })
+            }
+        } else if kind == "Element" || kind == "Component" {
+            out = append_records(out, attr_dependency_records(node["attrs"], "node_{node_path}", state_names, locals))
+            out = append_records(out, analyze_node_dependencies(node["children"], node_path, state_names, locals))
+        } else if kind == "If" {
+            let deps = collect_expr_state_refs(node["condition"], state_names, locals)
+            if len(deps) > 0 {
+                out.push({
+                    "node_id": "if_{node_path}",
+                    "kind": "if",
+                    "deps": deps,
+                })
+            }
+            out = append_records(out, analyze_node_dependencies(node["children"], node_path, state_names, locals))
+        } else if kind == "For" {
+            let deps = collect_expr_state_refs(node["iterable"], state_names, locals)
+            if len(deps) > 0 {
+                out.push({
+                    "node_id": "for_{node_path}",
+                    "kind": "for",
+                    "deps": deps,
+                })
+            }
+            let child_locals = push_unique(locals, node["item"])
+            out = append_records(out, analyze_node_dependencies(node["children"], node_path, state_names, child_locals))
+        }
+
+        i = i + 1
+    }
+    out
+}
+
+pub fn analyze_state_dependencies(source: string) -> list<map> {
+    let file = parse_bloom(source)
+    let state_names = detect_state_names(file["script"])
+    analyze_node_dependencies(file["template"], "root", state_names, [])
+}
+
+pub fn deps_for_node(records: list<map>, node_id: string) -> list<string> {
+    state i = 0
+    while i < len(records) {
+        if records[i]["node_id"] == node_id {
+            return records[i]["deps"]
+        }
+        i = i + 1
+    }
+    let empty: list<string> = []
+    empty
+}
+
+test "test_state_dependency_analysis" {
+    let open_brace = bytes_to_str([123])
+    let close_brace = bytes_to_str([125])
+    let records = analyze_state_dependencies("<p>{open_brace}count{close_brace}</p><script>state count: i32 = 0</script>")
+
+    assert_eq(len(records), 1)
+    assert_eq(records[0]["node_id"], "text_root_0_0")
+    assert_eq(deps_for_node(records, "text_root_0_0")[0], "count")
+}
+
+test "test_minimal_update" {
+    let open_brace = bytes_to_str([123])
+    let close_brace = bytes_to_str([125])
+    let records = analyze_state_dependencies("<p>{open_brace}count{close_brace}</p><p>{open_brace}name{close_brace}</p><script>state count: i32 = 0\nstate name = \"a\"</script>")
+
+    assert_eq(deps_for_node(records, "text_root_0_0")[0], "count")
+    assert_eq(deps_for_node(records, "text_root_1_0")[0], "name")
+}
+
+test "test_independent_node_not_updated" {
+    let open_brace = bytes_to_str([123])
+    let close_brace = bytes_to_str([125])
+    let records = analyze_state_dependencies("<p>static</p><p>{open_brace}count{close_brace}</p><script>state count: i32 = 0</script>")
+
+    assert_eq(len(deps_for_node(records, "text_root_0_0")), 0)
+    assert_eq(deps_for_node(records, "text_root_1_0")[0], "count")
+}
+
+test "test_nested_field_dependency" {
+    let open_brace = bytes_to_str([123])
+    let close_brace = bytes_to_str([125])
+    let records = analyze_state_dependencies("<p>{open_brace}user.name{close_brace}</p><script>state user = none</script>")
+
+    assert_eq(deps_for_node(records, "text_root_0_0")[0], "user")
+}
+
+test "test_for_item_local_is_not_state_dependency" {
+    let open_brace = bytes_to_str([123])
+    let close_brace = bytes_to_str([125])
+    let records = analyze_state_dependencies("{open_brace}#for item in items{close_brace}<p>{open_brace}item{close_brace}</p>{open_brace}/for{close_brace}<script>state items = []</script>")
+
+    assert_eq(deps_for_node(records, "for_root_0")[0], "items")
+    assert_eq(len(deps_for_node(records, "text_root_0_0_0")), 0)
+}

@@ -1,0 +1,1326 @@
+// Bloom compiler MVP parser
+
+pub enum Attribute {
+    Static { name: string, value: string }
+    Dynamic { name: string, expr: string }
+    EventHandler { event: string, handler: string }
+    Bind { expr: string }
+}
+
+pub enum TemplateNode {
+    Element { tag: string, attrs: list<Attribute>, children: list<TemplateNode> }
+    Text(string)
+    Interpolation(string)
+    If { condition: string, children: list<TemplateNode> }
+    For { item: string, iterable: string, children: list<TemplateNode> }
+    Component { tag: string, attrs: list<Attribute>, children: list<TemplateNode> }
+    Slot
+}
+
+pub struct BloomFile {
+    template: list<TemplateNode>
+    script: string
+}
+
+// str_find(s, target, start) -> number (0 - 1 if not found)
+pub fn str_find(s: string, target: string, start: number) -> number {
+    let s_bytes = string_to_bytes(s)
+    let t_bytes = string_to_bytes(target)
+    let s_len = s_bytes.len()
+    let t_len = t_bytes.len()
+    state i = start
+    while i + t_len <= s_len {
+        state matched = true
+        state j = 0
+        while j < t_len && matched {
+            if s_bytes[i + j] != t_bytes[j] {
+                matched = false
+            } else {
+                j = j + 1
+            }
+        }
+        if matched { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn str_slice(s: string, start: number, end_pos: number) -> string {
+    let raw = string_to_bytes(s)
+    let result = []
+    state i = start
+    loop {
+        if i >= end_pos { break }
+        result.push(raw[i])
+        i = i + 1
+    }
+    bytes_to_str(result)
+}
+
+pub fn trim_ascii(s: string) -> string {
+    let bytes = string_to_bytes(s)
+    let len = bytes.len()
+    state start = 0
+    state end_pos = len
+
+    state scanning_start = true
+    while start < len && scanning_start {
+        let b = bytes[start]
+        if b == 32 || b == 10 || b == 13 || b == 9 {
+            start = start + 1
+        } else {
+            scanning_start = false
+        }
+    }
+
+    state scanning_end = true
+    while end_pos > start && scanning_end {
+        let b = bytes[end_pos - 1]
+        if b == 32 || b == 10 || b == 13 || b == 9 {
+            end_pos = end_pos - 1
+        } else {
+            scanning_end = false
+        }
+    }
+
+    str_slice(s, start, end_pos)
+}
+
+pub fn starts_with_uppercase(s: string) -> bool {
+    let bytes = string_to_bytes(s)
+    if bytes.len() == 0 {
+        return false
+    }
+    let b = bytes[0]
+    b >= 65 && b <= 90
+}
+
+pub fn char_from_byte(value: number) -> string {
+    bytes_to_str([value])
+}
+
+pub fn extract_script_block(source: string) -> string {
+    let start = str_find(source, "<script>", 0)
+    if start < 0 {
+        return ""
+    }
+    let body_start = start + 8
+    let end_pos = str_find(source, "</script>", body_start)
+    if end_pos < 0 {
+        return ""
+    }
+    trim_ascii(str_slice(source, body_start, end_pos))
+}
+
+pub fn strip_script_block(source: string) -> string {
+    let start = str_find(source, "<script>", 0)
+    if start < 0 {
+        return source
+    }
+    let end_pos = str_find(source, "</script>", start + 8)
+    if end_pos < 0 {
+        return source
+    }
+    let before = str_slice(source, 0, start)
+    let source_bytes = string_to_bytes(source)
+    let after = str_slice(source, end_pos + 9, source_bytes.len())
+    "{before}{after}"
+}
+
+fn trim_quotes(source: string) -> string {
+    let bytes = string_to_bytes(source)
+    if bytes.len() >= 2 && bytes[0] == 34 && bytes[bytes.len() - 1] == 34 {
+        return str_slice(source, 1, bytes.len() - 1)
+    }
+    source
+}
+
+pub fn parse_attributes(source: string) -> list<map> {
+    state out: list<map> = []
+    let bytes = string_to_bytes(source)
+    let len = bytes.len()
+    let open_brace = char_from_byte(123)
+    state token_start = 0
+    state quote = 0
+    state brace_depth = 0
+    state i = 0
+
+    while i <= len {
+        let at_end = i == len
+        let b = if at_end { 32 } else { bytes[i] }
+
+        if !at_end && b == 34 {
+            if quote == 0 {
+                quote = 34
+            } else {
+                quote = 0
+            }
+            i = i + 1
+        } else if !at_end && quote == 0 && b == 123 {
+            brace_depth = brace_depth + 1
+            i = i + 1
+        } else if !at_end && quote == 0 && b == 125 {
+            brace_depth = brace_depth - 1
+            i = i + 1
+        } else if at_end || (quote == 0 && brace_depth == 0 && b == 32) {
+            if i > token_start {
+                let token = str_slice(source, token_start, i)
+                let token = trim_ascii(token)
+                if token == "" {
+                } else if token.starts_with("@") {
+                    let eq_pos = str_find(token, "={open_brace}", 0)
+                    let event = str_slice(token, 1, eq_pos)
+                    let token_bytes = string_to_bytes(token)
+                    let handler = trim_ascii(str_slice(token, eq_pos + 2, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "EventHandler",
+                        "event": event,
+                        "handler": handler,
+                    })
+                } else if token.starts_with(":bind={open_brace}") {
+                    let token_bytes = string_to_bytes(token)
+                    let expr = trim_ascii(str_slice(token, 7, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "Bind",
+                        "expr": expr,
+                    })
+                } else if token.starts_with(":") {
+                    let eq_pos = str_find(token, "={open_brace}", 0)
+                    let name = str_slice(token, 1, eq_pos)
+                    let token_bytes = string_to_bytes(token)
+                    let expr = trim_ascii(str_slice(token, eq_pos + 2, token_bytes.len() - 1))
+                    out.push({
+                        "kind": "Dynamic",
+                        "name": name,
+                        "expr": expr,
+                    })
+                } else {
+                    let eq_pos = str_find(token, "=", 0)
+                    if eq_pos > 0 {
+                        let name = str_slice(token, 0, eq_pos)
+                        let token_bytes = string_to_bytes(token)
+                        let raw_value = str_slice(token, eq_pos + 1, token_bytes.len())
+                        let value = trim_quotes(raw_value)
+                        out.push({
+                            "kind": "Static",
+                            "name": name,
+                            "value": value,
+                        })
+                    }
+                }
+            }
+            token_start = i + 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+
+    out
+}
+
+fn find_tag_close(source: string, start: number) -> number {
+    let bytes = string_to_bytes(source)
+    let len = bytes.len()
+    state quote = 0
+    state brace_depth = 0
+    state i = start + 1
+
+    while i < len {
+        let b = bytes[i]
+        if b == 34 {
+            if quote == 0 {
+                quote = 34
+            } else {
+                quote = 0
+            }
+        } else if quote == 0 && b == 123 {
+            brace_depth = brace_depth + 1
+        } else if quote == 0 && b == 125 {
+            brace_depth = brace_depth - 1
+        } else if quote == 0 && brace_depth == 0 && b == 62 {
+            return i
+        }
+        i = i + 1
+    }
+
+    len
+}
+
+pub fn parse_template_nodes(source: string) -> list<map> {
+    state out: list<map> = []
+    let source_bytes = string_to_bytes(source)
+    let len = source_bytes.len()
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state cursor = 0
+
+    while cursor < len {
+        let if_start = str_find(source, "{open_brace}#if ", cursor)
+        let for_start = str_find(source, "{open_brace}#for ", cursor)
+        let tag_start = str_find(source, "<", cursor)
+        let interp_start = str_find(source, open_brace, cursor)
+
+        state next = 0 - 1
+        if if_start >= 0 {
+            next = if_start
+        }
+        if for_start >= 0 && (next < 0 || for_start < next) {
+            next = for_start
+        }
+        if tag_start >= 0 && (next < 0 || tag_start < next) {
+            next = tag_start
+        }
+        if interp_start >= 0 && (next < 0 || interp_start < next) {
+            next = interp_start
+        }
+        if next < 0 {
+            let text = trim_ascii(str_slice(source, cursor, len))
+            if text != "" {
+                out.push({
+                    "kind": "Text",
+                    "text": text,
+                })
+            }
+            cursor = len
+        } else {
+            if next > cursor {
+                let text = trim_ascii(str_slice(source, cursor, next))
+                if text != "" {
+                    out.push({
+                        "kind": "Text",
+                        "text": text,
+                    })
+                }
+            }
+
+            if if_start == next {
+                let open_end = str_find(source, close_brace, next)
+                let condition = trim_ascii(str_slice(source, next + 5, open_end))
+                let if_close = "{open_brace}/if{close_brace}"
+                let close_start = str_find(source, if_close, open_end + 1)
+                let inner = str_slice(source, open_end + 1, close_start)
+                out.push({
+                    "kind": "If",
+                    "condition": condition,
+                    "children": parse_template_nodes(inner),
+                })
+                cursor = close_start + string_to_bytes(if_close).len()
+            } else if for_start == next {
+                let open_end = str_find(source, close_brace, next)
+                let expr = trim_ascii(str_slice(source, next + 6, open_end))
+                let expr_bytes = string_to_bytes(expr)
+                let in_pos = str_find(expr, " in ", 0)
+                let item = trim_ascii(str_slice(expr, 0, in_pos))
+                let iterable = trim_ascii(str_slice(expr, in_pos + 4, expr_bytes.len()))
+                let for_close = "{open_brace}/for{close_brace}"
+                let close_start = str_find(source, for_close, open_end + 1)
+                let inner = str_slice(source, open_end + 1, close_start)
+                out.push({
+                    "kind": "For",
+                    "item": item,
+                    "iterable": iterable,
+                    "children": parse_template_nodes(inner),
+                })
+                cursor = close_start + string_to_bytes(for_close).len()
+            } else if tag_start == next {
+                let tag_end = find_tag_close(source, next)
+                let raw_tag = trim_ascii(str_slice(source, next + 1, tag_end))
+
+                if raw_tag == "slot /" || raw_tag == "slot/" || raw_tag == "slot" {
+                    out.push({
+                        "kind": "Slot",
+                    })
+                    cursor = tag_end + 1
+                } else {
+                    let raw_tag_bytes = string_to_bytes(raw_tag)
+                    let self_closing = raw_tag.ends_with("/")
+                    let tag_body = if self_closing {
+                        trim_ascii(str_slice(raw_tag, 0, raw_tag_bytes.len() - 1))
+                    } else {
+                        raw_tag
+                    }
+                    let tag_body_bytes = string_to_bytes(tag_body)
+                    let space_pos = str_find(tag_body, " ", 0)
+                    let tag = if space_pos < 0 {
+                        tag_body
+                    } else {
+                        str_slice(tag_body, 0, space_pos)
+                    }
+                    let attrs_src = if space_pos < 0 {
+                        ""
+                    } else {
+                        trim_ascii(str_slice(tag_body, space_pos + 1, tag_body_bytes.len()))
+                    }
+                    let attrs = parse_attributes(attrs_src)
+
+                    if self_closing {
+                        out.push({
+                            "kind": if starts_with_uppercase(tag) { "Component" } else { "Element" },
+                            "tag": tag,
+                            "attrs": attrs,
+                            "children": [],
+                        })
+                        cursor = tag_end + 1
+                    } else {
+                        let close_tag = "</{tag}>"
+                        let close_start = str_find(source, close_tag, tag_end + 1)
+                        let inner = str_slice(source, tag_end + 1, close_start)
+                        let close_tag_bytes = string_to_bytes(close_tag)
+                        out.push({
+                            "kind": if starts_with_uppercase(tag) { "Component" } else { "Element" },
+                            "tag": tag,
+                            "attrs": attrs,
+                            "children": parse_template_nodes(inner),
+                        })
+                        cursor = close_start + close_tag_bytes.len()
+                    }
+                }
+            } else {
+                let end_pos = str_find(source, close_brace, next)
+                let expr_value = trim_ascii(str_slice(source, next + 1, end_pos))
+                out.push({
+                    "kind": "Interpolation",
+                    "expr": expr_value,
+                })
+                cursor = end_pos + 1
+            }
+        }
+    }
+
+    out
+}
+
+pub fn parse_bloom(source: string) -> map {
+    {
+        "template": parse_template_nodes(strip_script_block(source)),
+        "script": extract_script_block(source),
+    }
+}
+
+pub fn attribute_from_map(attr: map) -> Attribute {
+    let kind = attr["kind"]
+    if kind == "Static" {
+        return Attribute::Static {
+            name: attr["name"],
+            value: attr["value"],
+        }
+    }
+    if kind == "Dynamic" {
+        return Attribute::Dynamic {
+            name: attr["name"],
+            expr: attr["expr"],
+        }
+    }
+    if kind == "EventHandler" {
+        return Attribute::EventHandler {
+            event: attr["event"],
+            handler: attr["handler"],
+        }
+    }
+    Attribute::Bind { expr: attr["expr"] }
+}
+
+pub fn node_from_map(node: map) -> TemplateNode {
+    let kind = node["kind"]
+    if kind == "Text" {
+        return TemplateNode::Text(node["text"])
+    }
+    if kind == "Interpolation" {
+        return TemplateNode::Interpolation(node["expr"])
+    }
+    if kind == "If" {
+        let raw_children = node["children"]
+        state children: list<TemplateNode> = []
+        state child_index = 0
+        while child_index < len(raw_children) {
+            children.push(node_from_map(raw_children[child_index]))
+            child_index = child_index + 1
+        }
+        return TemplateNode::If {
+            condition: node["condition"],
+            children: children,
+        }
+    }
+    if kind == "For" {
+        let raw_children = node["children"]
+        state children: list<TemplateNode> = []
+        state child_index = 0
+        while child_index < len(raw_children) {
+            children.push(node_from_map(raw_children[child_index]))
+            child_index = child_index + 1
+        }
+        return TemplateNode::For {
+            item: node["item"],
+            iterable: node["iterable"],
+            children: children,
+        }
+    }
+    if kind == "Component" {
+        let raw_attrs = node["attrs"]
+        state attrs: list<Attribute> = []
+        state attr_index = 0
+        while attr_index < len(raw_attrs) {
+            attrs.push(attribute_from_map(raw_attrs[attr_index]))
+            attr_index = attr_index + 1
+        }
+        let raw_children = node["children"]
+        state children: list<TemplateNode> = []
+        state child_index = 0
+        while child_index < len(raw_children) {
+            children.push(node_from_map(raw_children[child_index]))
+            child_index = child_index + 1
+        }
+        return TemplateNode::Component {
+            tag: node["tag"],
+            attrs: attrs,
+            children: children,
+        }
+    }
+    if kind == "Slot" {
+        return TemplateNode::Slot
+    }
+    let raw_attrs = node["attrs"]
+    state attrs: list<Attribute> = []
+    state attr_index = 0
+    while attr_index < len(raw_attrs) {
+        attrs.push(attribute_from_map(raw_attrs[attr_index]))
+        attr_index = attr_index + 1
+    }
+    let raw_children = node["children"]
+    state children: list<TemplateNode> = []
+    state child_index = 0
+    while child_index < len(raw_children) {
+        children.push(node_from_map(raw_children[child_index]))
+        child_index = child_index + 1
+    }
+    TemplateNode::Element {
+        tag: node["tag"],
+        attrs: attrs,
+        children: children,
+    }
+}
+
+pub fn attrs_from_maps(attrs: list<map>) -> list<Attribute> {
+    state out: list<Attribute> = []
+    state i = 0
+    while i < len(attrs) {
+        out.push(attribute_from_map(attrs[i]))
+        i = i + 1
+    }
+    out
+}
+
+pub fn nodes_from_maps(nodes: list<map>) -> list<TemplateNode> {
+    state out: list<TemplateNode> = []
+    state i = 0
+    while i < len(nodes) {
+        out.push(node_from_map(nodes[i]))
+        i = i + 1
+    }
+    out
+}
+
+pub fn bloom_file_from_map(file: map) -> BloomFile {
+    let raw_template = file["template"]
+    state template: list<TemplateNode> = []
+    state i = 0
+    while i < len(raw_template) {
+        template.push(node_from_map(raw_template[i]))
+        i = i + 1
+    }
+    BloomFile {
+        template: template,
+        script: file["script"],
+    }
+}
+
+pub fn parse_bloom_typed(source: string) -> BloomFile {
+    bloom_file_from_map(parse_bloom(source))
+}
+
+fn join_lines(lines: list<string>) -> string {
+    state out = ""
+    state i = 0
+    while i < len(lines) {
+        let line = lines[i]
+        out = "{out}{line}\n"
+        i = i + 1
+    }
+    out
+}
+
+fn path_id(path: string) -> string {
+    "node_{path}"
+}
+
+fn text_target_id(path: string, index: number) -> string {
+    "text_{path}_{index}"
+}
+
+fn attr_target_id(path: string, index: number) -> string {
+    "attr_{path}_{index}"
+}
+
+fn fragment_target_id(path: string) -> string {
+    "fragment_{path}"
+}
+
+fn closure_handler_id(path: string, index: number) -> string {
+    "__bloom_handler_{path}_{index}"
+}
+
+fn escape_html_fragment(value: string) -> string {
+    let bytes = string_to_bytes(value)
+    state out = ""
+    state i = 0
+    while i < len(bytes) {
+        let b = bytes[i]
+        if b == 34 {
+            out = "{out}\\\""
+        } else if b == 92 {
+            out = "{out}\\\\"
+        } else {
+            out = "{out}{bytes_to_str([b])}"
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn html_static_attr_expr(attrs: list<map>, target_id: string) -> string {
+    state out = ""
+    out = " id=\\\"{target_id}\\\""
+    state i = 0
+    while i < len(attrs) {
+        let attr = attrs[i]
+        let kind = attr["kind"]
+        if kind == "Static" {
+            let name = attr["name"]
+            let value = escape_html_fragment(attr["value"])
+            out = "{out} {name}=\\\"{value}\\\""
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn html_skeleton_for_nodes(nodes: list<map>, path: string) -> string {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state out = ""
+    state i = 0
+    while i < len(nodes) {
+        let node = nodes[i]
+        let child_path = "{path}_{i}"
+        let kind = node["kind"]
+        if kind == "Text" {
+            let text = escape_html_fragment(node["text"])
+            let target_id = text_target_id(path, i)
+            out = "{out}<span id=\\\"{target_id}\\\">{text}</span>"
+        } else if kind == "Interpolation" {
+            let target_id = text_target_id(path, i)
+            out = "{out}<span id=\\\"{target_id}\\\"></span>"
+        } else if kind == "Element" || kind == "Component" {
+            let tag = node["tag"]
+            let attrs = html_static_attr_expr(node["attrs"], path_id(child_path))
+            let inner = html_skeleton_for_nodes(node["children"], child_path)
+            out = "{out}<{tag}{attrs}>{inner}</{tag}>"
+        } else if kind == "If" || kind == "For" {
+            let target_id = fragment_target_id(child_path)
+            out = "{out}<span id=\\\"{target_id}\\\"></span>"
+        }
+        i = i + 1
+    }
+    out
+}
+
+pub fn detect_state_names(script: string) -> list<string> {
+    let lines = script.split("\n")
+    state states: list<string> = []
+    state i = 0
+    while i < len(lines) {
+        let line = trim_ascii(lines[i])
+        if line.starts_with("state ") {
+            let rest = str_slice(line, 6, string_to_bytes(line).len())
+            let colon_pos = str_find(rest, ":", 0)
+            let eq_pos = str_find(rest, "=", 0)
+            state end_pos = 0 - 1
+            if colon_pos >= 0 {
+                end_pos = colon_pos
+            }
+            if eq_pos >= 0 && (end_pos < 0 || eq_pos < end_pos) {
+                end_pos = eq_pos
+            }
+            if end_pos > 0 {
+                let name = trim_ascii(str_slice(rest, 0, end_pos))
+                if name != "" {
+                    states.push(name)
+                }
+            }
+        }
+        i = i + 1
+    }
+    states
+}
+
+fn is_ident_start(value: number) -> bool {
+    (value >= 65 && value <= 90) || (value >= 97 && value <= 122) || value == 95
+}
+
+fn is_ident_part(value: number) -> bool {
+    is_ident_start(value) || (value >= 48 && value <= 57)
+}
+
+fn contains_string(items: list<string>, target: string) -> bool {
+    state i = 0
+    while i < len(items) {
+        if items[i] == target {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn push_unique_string(items: list<string>, value: string) -> list<string> {
+    if contains_string(items, value) {
+        return items
+    }
+    state out = items
+    out.push(value)
+    out
+}
+
+fn expr_heads(expr: string) -> list<string> {
+    let bytes = string_to_bytes(expr)
+    state out: list<string> = []
+    state i = 0
+    while i < len(bytes) {
+        if !is_ident_start(bytes[i]) {
+            i = i + 1
+        } else {
+            let start = i
+            i = i + 1
+            while i < len(bytes) && (is_ident_part(bytes[i]) || bytes[i] == 46) {
+                i = i + 1
+            }
+            state token_bytes: list<number> = []
+            state j = start
+            while j < i {
+                token_bytes.push(bytes[j])
+                j = j + 1
+            }
+            let raw = bytes_to_str(token_bytes)
+            let parts = raw.split(".")
+            out = push_unique_string(out, parts[0])
+        }
+    }
+    out
+}
+
+fn expr_depends_on_state(expr: string, target_state: string, state_names: list<string>, locals: list<string>) -> bool {
+    let heads = expr_heads(expr)
+    state i = 0
+    while i < len(heads) {
+        let head = heads[i]
+        if head == target_state && contains_string(state_names, head) && !contains_string(locals, head) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn compile_state_attr_lines(
+    attrs: list<map>,
+    path: string,
+    target_state: string,
+    state_names: list<string>,
+    locals: list<string>,
+) -> list<string> {
+    state lines: list<string> = []
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state i = 0
+    while i < len(attrs) {
+        let attr = attrs[i]
+        let kind = attr["kind"]
+        let target_id = path_id(path)
+        if kind == "Dynamic" {
+            let name = attr["name"]
+            let expr = attr["expr"]
+            if expr_depends_on_state(expr, target_state, state_names, locals) {
+                if name == "class" {
+                    lines.push("dom::set_class(\"{target_id}\", string({expr}))")
+                } else {
+                    lines.push("dom::set_attr(\"{target_id}\", \"{name}\", string({expr}))")
+                }
+            }
+        } else if kind == "Bind" {
+            let expr = attr["expr"]
+            if expr_depends_on_state(expr, target_state, state_names, locals) {
+                lines.push("dom::set_attr(\"{target_id}\", \"value\", string({expr}))")
+            }
+        }
+        i = i + 1
+    }
+    lines
+}
+
+fn compile_state_update_nodes(
+    nodes: list<map>,
+    path: string,
+    target_state: string,
+    state_names: list<string>,
+    locals: list<string>,
+) -> list<string> {
+    state lines: list<string> = []
+    state i = 0
+    while i < len(nodes) {
+        let node = nodes[i]
+        let child_path = "{path}_{i}"
+        let kind = node["kind"]
+        if kind == "Interpolation" {
+            let expr = node["expr"]
+            if expr_depends_on_state(expr, target_state, state_names, locals) {
+                let target_id = text_target_id(path, i)
+                lines.push("dom::set_text(\"{target_id}\", string({expr}))")
+            }
+        } else if kind == "Element" || kind == "Component" {
+            let attr_lines = compile_state_attr_lines(node["attrs"], child_path, target_state, state_names, locals)
+            state j = 0
+            while j < len(attr_lines) {
+                lines.push(attr_lines[j])
+                j = j + 1
+            }
+            let child_lines = compile_state_update_nodes(node["children"], child_path, target_state, state_names, locals)
+            state k = 0
+            while k < len(child_lines) {
+                lines.push(child_lines[k])
+                k = k + 1
+            }
+        } else if kind == "If" {
+            let condition = node["condition"]
+            let html = html_skeleton_for_nodes(node["children"], child_path)
+            let child_lines = compile_state_update_nodes(node["children"], child_path, target_state, state_names, locals)
+            if expr_depends_on_state(condition, target_state, state_names, locals) || len(child_lines) > 0 {
+                lines.push("if {condition} {open_brace}")
+                lines.push("  dom::insert_node(\"{fragment_target_id(child_path)}\", \"{html}\")")
+                state j = 0
+                while j < len(child_lines) {
+                    lines.push("  {child_lines[j]}")
+                    j = j + 1
+                }
+                lines.push("{close_brace} else {open_brace}")
+                lines.push("  dom::remove_node(\"{fragment_target_id(child_path)}\")")
+                lines.push(close_brace)
+            }
+        } else if kind == "For" {
+            let child_locals = push_unique_string(locals, node["item"])
+            let child_lines = compile_state_update_nodes(node["children"], child_path, target_state, state_names, child_locals)
+            let iterable = node["iterable"]
+            let item = node["item"]
+            let html = html_skeleton_for_nodes(node["children"], child_path)
+            if expr_depends_on_state(iterable, target_state, state_names, locals) || len(child_lines) > 0 {
+                lines.push("dom::remove_node(\"{fragment_target_id(child_path)}\")")
+                lines.push("for {item} in {iterable} {open_brace}")
+                lines.push("  dom::insert_node(\"{fragment_target_id(child_path)}\", \"{html}\")")
+                state j = 0
+                while j < len(child_lines) {
+                    lines.push("  {child_lines[j]}")
+                    j = j + 1
+                }
+                lines.push(close_brace)
+            }
+        }
+        i = i + 1
+    }
+    lines
+}
+
+fn emit_attr_lines(attrs: list<map>, path: string) -> list<string> {
+    state lines: list<string> = []
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state i = 0
+    while i < len(attrs) {
+        let attr = attrs[i]
+        let kind = attr["kind"]
+        let target_id = path_id(path)
+        if kind == "Static" {
+            let name = attr["name"]
+            let value = attr["value"]
+            lines.push("dom::set_attr(\"{target_id}\", \"{name}\", \"{value}\")")
+        } else if kind == "Dynamic" {
+            let name = attr["name"]
+            let expr = attr["expr"]
+            if name == "class" {
+                lines.push("dom::set_class(\"{target_id}\", string({expr}))")
+            } else {
+                lines.push("dom::set_attr(\"{target_id}\", \"{name}\", string({expr}))")
+            }
+        } else if kind == "EventHandler" {
+            let handler = attr["handler"]
+            let event = attr["event"]
+            if handler.contains("=>") || handler.contains("fn(") {
+                let handler_id = closure_handler_id(path, i)
+                lines.push("fn {handler_id}(event) {open_brace} {handler} {close_brace}")
+                lines.push("dom::add_listener(\"{target_id}\", \"{event}\", \"{handler_id}\")")
+            } else {
+                lines.push("dom::add_listener(\"{target_id}\", \"{event}\", \"{handler}\")")
+            }
+        } else if kind == "Bind" {
+            let expr = attr["expr"]
+            let bind_handler = "__bloom_bind_{path}"
+            lines.push("dom::set_attr(\"{target_id}\", \"value\", string({expr}))")
+            lines.push("dom::add_listener(\"{target_id}\", \"input\", \"{bind_handler}\")")
+        }
+        i = i + 1
+    }
+    lines
+}
+
+fn compile_nodes(nodes: list<map>, path: string) -> list<string> {
+    state lines: list<string> = []
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    state i = 0
+    while i < len(nodes) {
+        let node = nodes[i]
+        let child_path = "{path}_{i}"
+        let kind = node["kind"]
+        if kind == "Text" {
+            let target_id = text_target_id(path, i)
+            let text = node["text"]
+            lines.push("dom::set_text(\"{target_id}\", \"{text}\")")
+        } else if kind == "Interpolation" {
+            let target_id = text_target_id(path, i)
+            let expr = node["expr"]
+            lines.push("dom::set_text(\"{target_id}\", string({expr}))")
+        } else if kind == "Element" || kind == "Component" {
+            let attrs = emit_attr_lines(node["attrs"], child_path)
+            state j = 0
+            while j < len(attrs) {
+                lines.push(attrs[j])
+                j = j + 1
+            }
+            let children = compile_nodes(node["children"], child_path)
+            state k = 0
+            while k < len(children) {
+                lines.push(children[k])
+                k = k + 1
+            }
+        } else if kind == "If" {
+            let condition = node["condition"]
+            lines.push("if {condition} {open_brace}")
+            let inner = compile_nodes(node["children"], child_path)
+            state j = 0
+            while j < len(inner) {
+                let line = inner[j]
+                lines.push("  {line}")
+                j = j + 1
+            }
+            lines.push(close_brace)
+        } else if kind == "For" {
+            let item = node["item"]
+            let iterable = node["iterable"]
+            lines.push("for {item} in {iterable} {open_brace}")
+            let inner = compile_nodes(node["children"], child_path)
+            state j = 0
+            while j < len(inner) {
+                let line = inner[j]
+                lines.push("  {line}")
+                j = j + 1
+            }
+            lines.push(close_brace)
+        } else if kind == "Slot" {
+            lines.push("// slot {child_path}")
+        }
+        i = i + 1
+    }
+    lines
+}
+
+pub fn generate_dom_code(file: map) -> string {
+    let script = file["script"]
+    let states = detect_state_names(script)
+    state lines: list<string> = []
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    lines.push("use bloom/dom")
+    lines.push("")
+    if trim_ascii(script) != "" {
+        lines.push(script)
+        lines.push("")
+    }
+    lines.push("fn __bloom_render() {open_brace}")
+    let body = compile_nodes(file["template"], "root")
+    state i = 0
+    while i < len(body) {
+        let line = body[i]
+        lines.push("  {line}")
+        i = i + 1
+    }
+    lines.push(close_brace)
+    lines.push("")
+    i = 0
+    while i < len(states) {
+        let state_name = states[i]
+        lines.push("fn __bloom_update_{state_name}() {open_brace}")
+        let updates = compile_state_update_nodes(file["template"], "root", state_name, states, [])
+        if len(updates) == 0 {
+            lines.push("  // no dependent nodes")
+        } else {
+            state j = 0
+            while j < len(updates) {
+                let line = updates[j]
+                lines.push("  {line}")
+                j = j + 1
+            }
+        }
+        lines.push(close_brace)
+        lines.push("")
+        i = i + 1
+    }
+    lines.push("fn __bloom_mount() {open_brace}")
+    lines.push("  __bloom_render()")
+    lines.push(close_brace)
+    join_lines(lines)
+}
+
+pub fn bloom_template(file: map) -> list<map> {
+    file["template"]
+}
+
+pub fn bloom_script(file: map) -> string {
+    file["script"]
+}
+
+pub fn node_kind(node: map) -> string {
+    node["kind"]
+}
+
+pub fn node_tag(node: map) -> string {
+    node["tag"]
+}
+
+pub fn node_text(node: map) -> string {
+    node["text"]
+}
+
+pub fn node_expr(node: map) -> string {
+    node["expr"]
+}
+
+pub fn node_condition(node: map) -> string {
+    node["condition"]
+}
+
+pub fn node_item(node: map) -> string {
+    node["item"]
+}
+
+pub fn node_iterable(node: map) -> string {
+    node["iterable"]
+}
+
+pub fn node_children(node: map) -> list<map> {
+    node["children"]
+}
+
+pub fn node_attrs(node: map) -> list<map> {
+    node["attrs"]
+}
+
+pub fn attr_kind(attr: map) -> string {
+    attr["kind"]
+}
+
+pub fn attr_name(attr: map) -> string {
+    attr["name"]
+}
+
+pub fn attr_value(attr: map) -> string {
+    attr["value"]
+}
+
+pub fn attr_event(attr: map) -> string {
+    attr["event"]
+}
+
+pub fn attr_handler(attr: map) -> string {
+    attr["handler"]
+}
+
+pub fn attr_expr(attr: map) -> string {
+    attr["expr"]
+}
+
+pub fn bloom_generated(file: map) -> string {
+    generate_dom_code(file)
+}
+
+pub fn typed_bloom_template(file: BloomFile) -> list<TemplateNode> {
+    file.template
+}
+
+pub fn typed_bloom_script(file: BloomFile) -> string {
+    file.script
+}
+
+pub fn typed_node_kind(node: TemplateNode) -> string {
+    match node {
+        TemplateNode::Element { tag, attrs, children } => "Element"
+        TemplateNode::Text(_) => "Text"
+        TemplateNode::Interpolation(_) => "Interpolation"
+        TemplateNode::If { condition, children } => "If"
+        TemplateNode::For { item, iterable, children } => "For"
+        TemplateNode::Component { tag, attrs, children } => "Component"
+        TemplateNode::Slot => "Slot"
+    }
+}
+
+pub fn typed_node_tag(node: TemplateNode) -> string {
+    match node {
+        TemplateNode::Element { tag, attrs, children } => tag
+        TemplateNode::Component { tag, attrs, children } => tag
+        _ => ""
+    }
+}
+
+pub fn typed_node_text(node: TemplateNode) -> string {
+    match node {
+        TemplateNode::Text(text) => text
+        TemplateNode::Interpolation(expr) => expr
+        _ => ""
+    }
+}
+
+pub fn typed_node_children(node: TemplateNode) -> list<TemplateNode> {
+    match node {
+        TemplateNode::Element { tag, attrs, children } => children
+        TemplateNode::If { condition, children } => children
+        TemplateNode::For { item, iterable, children } => children
+        TemplateNode::Component { tag, attrs, children } => children
+        _ => []
+    }
+}
+
+pub fn typed_node_attrs(node: TemplateNode) -> list<Attribute> {
+    match node {
+        TemplateNode::Element { tag, attrs, children } => attrs
+        TemplateNode::Component { tag, attrs, children } => attrs
+        _ => []
+    }
+}
+
+pub fn typed_attr_kind(attr: Attribute) -> string {
+    match attr {
+        Attribute::Static { name, value } => "Static"
+        Attribute::Dynamic { name, expr } => "Dynamic"
+        Attribute::EventHandler { event, handler } => "EventHandler"
+        Attribute::Bind { expr } => "Bind"
+    }
+}
+
+pub fn typed_attr_name(attr: Attribute) -> string {
+    match attr {
+        Attribute::Static { name, value } => name
+        Attribute::Dynamic { name, expr } => name
+        _ => ""
+    }
+}
+
+pub fn typed_attr_value(attr: Attribute) -> string {
+    match attr {
+        Attribute::Static { name, value } => value
+        Attribute::Dynamic { name, expr } => expr
+        Attribute::Bind { expr } => expr
+        _ => ""
+    }
+}
+
+pub fn typed_attr_event(attr: Attribute) -> string {
+    match attr {
+        Attribute::EventHandler { event, handler } => event
+        _ => ""
+    }
+}
+
+test "helpers: string utilities" {
+    assert_eq(str_find("abc", "b", 0), 1)
+    assert_eq(str_slice("abcd", 1, 3), "bc")
+    assert_eq(trim_ascii("  hi \n"), "hi")
+}
+
+test "parse basic template" {
+    let file = parse_bloom("<div class=\"card\">Hello</div><script>let count = 0</script>")
+    let nodes = bloom_template(file)
+    let script = bloom_script(file)
+    let attrs = node_attrs(nodes[0])
+    let children = node_children(nodes[0])
+
+    assert_eq(len(nodes), 1)
+    assert_eq(node_kind(nodes[0]), "Element")
+    assert_eq(node_tag(nodes[0]), "div")
+    assert_eq(attr_name(attrs[0]), "class")
+    assert_eq(attr_value(attrs[0]), "card")
+    assert_eq(node_kind(children[0]), "Text")
+    assert_eq(node_text(children[0]), "Hello")
+    assert(script.contains("let count = 0"))
+}
+
+test "parse event handler fn ref" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let nodes = parse_template_nodes("<button @click={open_brace}increment{close_brace}>+</button>")
+    let attrs = node_attrs(nodes[0])
+
+    assert_eq(node_tag(nodes[0]), "button")
+    assert_eq(attr_kind(attrs[0]), "EventHandler")
+    assert_eq(attr_event(attrs[0]), "click")
+    assert_eq(attr_handler(attrs[0]), "increment")
+}
+
+test "parse event handler closure" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let nodes = parse_template_nodes("<button @click={open_brace}e => count += 1{close_brace}>+</button>")
+    let attrs = node_attrs(nodes[0])
+
+    assert_eq(attr_kind(attrs[0]), "EventHandler")
+    assert_eq(attr_event(attrs[0]), "click")
+    assert(attr_handler(attrs[0]).contains("count += 1"))
+}
+
+test "parse interpolation" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let nodes = parse_template_nodes("<p>{open_brace}count{close_brace}</p>")
+    let children = node_children(nodes[0])
+
+    assert_eq(node_kind(children[0]), "Interpolation")
+    assert_eq(node_expr(children[0]), "count")
+}
+
+test "parse if for and slot" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let nodes = parse_template_nodes("{open_brace}#if ready{close_brace}<p>ok</p>{open_brace}/if{close_brace}{open_brace}#for item in items{close_brace}<ItemRow :value={open_brace}item{close_brace} /><slot />{open_brace}/for{close_brace}")
+    let if_children = node_children(nodes[0])
+    let for_children = node_children(nodes[1])
+
+    assert_eq(node_kind(nodes[0]), "If")
+    assert_eq(node_condition(nodes[0]), "ready")
+    assert_eq(node_tag(if_children[0]), "p")
+
+    assert_eq(node_kind(nodes[1]), "For")
+    assert_eq(node_item(nodes[1]), "item")
+    assert_eq(node_iterable(nodes[1]), "items")
+    assert_eq(node_kind(for_children[0]), "Component")
+    assert_eq(node_tag(for_children[0]), "ItemRow")
+    assert_eq(node_kind(for_children[1]), "Slot")
+}
+
+test "detect state declarations" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let names = detect_state_names("state count: i32 = 0\nstate ready = true\nfn noop() {open_brace}{close_brace}")
+    assert_eq(len(names), 2)
+    assert_eq(names[0], "count")
+    assert_eq(names[1], "ready")
+}
+
+test "generate dom code for counter" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let source = "<p>{open_brace}count{close_brace}</p><button @click={open_brace}increment{close_brace}>+</button><script>\nstate count: i32 = 0\nfn increment() {open_brace} count += 1 {close_brace}\n</script>"
+    let code = bloom_generated(parse_bloom(source))
+
+    assert(code.contains("use bloom/dom"))
+    assert(code.contains("state count: i32 = 0"))
+    assert(code.contains("dom::set_text(\"text_root_0_0\", string(count))"))
+    assert(code.contains("dom::add_listener(\"node_root_1\", \"click\", \"increment\")"))
+    assert(code.contains("fn __bloom_update_count()"))
+}
+
+test "generate dom code for closure and dynamic attr" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let source = "<button :class={open_brace}button_class{close_brace} @click={open_brace}e => count += 1{close_brace}>+</button>"
+    let code = bloom_generated(parse_bloom(source))
+
+    assert(code.contains("dom::set_class(\"node_root_0\", string(button_class))"))
+    assert(code.contains("fn __bloom_handler_root_0_1(event)"))
+    assert(code.contains("count += 1"))
+    assert(code.contains("dom::add_listener(\"node_root_0\", \"click\", \"__bloom_handler_root_0_1\")"))
+}
+
+test "generate dom code for if and for" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let source = "{open_brace}#if ready{close_brace}<p>{open_brace}message{close_brace}</p>{open_brace}/if{close_brace}{open_brace}#for item in items{close_brace}<li>{open_brace}item{close_brace}</li>{open_brace}/for{close_brace}"
+    let code = bloom_generated(parse_bloom(source))
+    let expected_if = "if ready {open_brace}"
+    let expected_for = "for item in items {open_brace}"
+
+    assert(code.contains(expected_if))
+    assert(code.contains(expected_for))
+    assert(code.contains("dom::set_text(\"text_root_0_0_0\", string(message))"))
+    assert(code.contains("dom::set_text(\"text_root_1_0_0\", string(item))"))
+}
+
+test "generate update functions touch only dependent nodes" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let source = "<p>{open_brace}count{close_brace}</p><p>{open_brace}name{close_brace}</p><script>\nstate count: i32 = 0\nstate name = \"a\"\n</script>"
+    let code = bloom_generated(parse_bloom(source))
+
+    assert(code.contains("fn __bloom_update_count()"))
+    assert(code.contains("dom::set_text(\"text_root_0_0\", string(count))"))
+    assert(!code.contains("dom::set_text(\"text_root_0_0\", string(name))"))
+    assert(code.contains("fn __bloom_update_name()"))
+    assert(code.contains("dom::set_text(\"text_root_1_0\", string(name))"))
+}
+
+test "generate update functions use set_class for class attr" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let source = "<div :class={open_brace}active_class{close_brace}>{open_brace}count{close_brace}</div><script>\nstate count: i32 = 0\nstate active_class = \"on\"\n</script>"
+    let code = bloom_generated(parse_bloom(source))
+
+    assert(code.contains("dom::set_class(\"node_root_0\", string(active_class))"))
+    assert(code.contains("fn __bloom_update_active_class()"))
+}
+
+test "typed bloom file exposes explicit ast" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let file = parse_bloom_typed("<div class=\"card\">{open_brace}count{close_brace}</div><script>state count: i32 = 0</script>")
+    let nodes = typed_bloom_template(file)
+    let attrs = typed_node_attrs(nodes[0])
+    let children = typed_node_children(nodes[0])
+
+    assert_eq(typed_node_kind(nodes[0]), "Element")
+    assert_eq(typed_node_tag(nodes[0]), "div")
+    assert_eq(typed_attr_kind(attrs[0]), "Static")
+    assert_eq(typed_attr_name(attrs[0]), "class")
+    assert_eq(typed_attr_value(attrs[0]), "card")
+    assert_eq(typed_node_kind(children[0]), "Interpolation")
+    assert_eq(typed_node_text(children[0]), "count")
+    assert(typed_bloom_script(file).contains("state count: i32 = 0"))
+}
+
+test "typed bloom file preserves component and event handler" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let file = parse_bloom_typed("<ItemRow @click={open_brace}save{close_brace} />")
+    let nodes = typed_bloom_template(file)
+    let attrs = typed_node_attrs(nodes[0])
+
+    assert_eq(typed_node_kind(nodes[0]), "Component")
+    assert_eq(typed_node_tag(nodes[0]), "ItemRow")
+    assert_eq(typed_attr_kind(attrs[0]), "EventHandler")
+    assert_eq(typed_attr_event(attrs[0]), "click")
+}

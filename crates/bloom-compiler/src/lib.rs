@@ -1,0 +1,12 @@
+pub mod bridge;
+pub mod web;
+
+pub use bridge::{
+    deserialize_dom_ops, deserialize_event_buffer, serialize_dom_ops, serialize_event_buffer,
+    DomOp, EncodedDomOps, EncodedEventBuffer, EventKind, EventRecord,
+};
+pub use web::{
+    collect_bloom_files, compile_generated_forge_to_wasm, generate_counter_wasm_rust,
+    generated_forge_path, inline_critical_css, parse_generated_forge_to_plan,
+    preprocess_render_calls, wasm_output_path, BloomSourceFile, WasmRenderPlan,
+};

@@ -1,0 +1,32 @@
+use ./dom.{ pending_ops, clear_pending_ops }
+
+state _event_queue: list<map> = []
+
+pub fn init() -> number {
+    clear_pending_ops()
+    _event_queue = []
+    0
+}
+
+pub fn pull_commands() -> list<map> {
+    let ops = pending_ops()
+    clear_pending_ops()
+    ops
+}
+
+pub fn push_event(target_id: string, kind: string) -> number {
+    _event_queue = _event_queue.push({
+        "target_id": target_id,
+        "kind": kind,
+    })
+    0
+}
+
+pub fn pending_events() -> list<map> {
+    _event_queue
+}
+
+pub fn clear_events() -> number {
+    _event_queue = []
+    0
+}
