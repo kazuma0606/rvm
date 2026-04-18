@@ -239,15 +239,26 @@ pub struct PipelineTraceEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayOutput {
-    Text { value: String },
-    Html { value: String },
-    Json { value: serde_json::Value },
+    Text {
+        value: String,
+    },
+    Html {
+        value: String,
+    },
+    Json {
+        value: serde_json::Value,
+    },
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<serde_json::Value>>,
     },
-    Image { mime: String, data: String },
-    Markdown { value: String },
+    Image {
+        mime: String,
+        data: String,
+    },
+    Markdown {
+        value: String,
+    },
 }
 
 // ── インタプリタ ─────────────────────────────────────────────────────────────
@@ -422,11 +433,7 @@ impl Interpreter {
                     }
                     let _self = args.remove(0);
                     let value = args.remove(0).to_string();
-                    emit_display_output(
-                        &listener,
-                        &output_buffer,
-                        DisplayOutput::Text { value },
-                    );
+                    emit_display_output(&listener, &output_buffer, DisplayOutput::Text { value });
                     Ok(Value::Unit)
                 }
             }))),
@@ -445,11 +452,7 @@ impl Interpreter {
                         Value::String(value) => value,
                         other => other.to_string(),
                     };
-                    emit_display_output(
-                        &listener,
-                        &output_buffer,
-                        DisplayOutput::Html { value },
-                    );
+                    emit_display_output(&listener, &output_buffer, DisplayOutput::Html { value });
                     Ok(Value::Unit)
                 }
             }))),
@@ -465,11 +468,7 @@ impl Interpreter {
                     }
                     let _self = args.remove(0);
                     let value = value_to_json(&args.remove(0));
-                    emit_display_output(
-                        &listener,
-                        &output_buffer,
-                        DisplayOutput::Json { value },
-                    );
+                    emit_display_output(&listener, &output_buffer, DisplayOutput::Json { value });
                     Ok(Value::Unit)
                 }
             }))),
@@ -513,8 +512,8 @@ impl Interpreter {
                             ))
                         }
                     };
-                    let bytes = std::fs::read(&path)
-                        .map_err(|e| format!("display::image(): {}", e))?;
+                    let bytes =
+                        std::fs::read(&path).map_err(|e| format!("display::image(): {}", e))?;
                     let mime = image_mime_type(&path);
                     let data = {
                         use base64::Engine;
@@ -1566,6 +1565,9 @@ impl Interpreter {
                 if path == "forge/std/wasm" {
                     self.register_wasm_module(symbols)
                         .map_err(RuntimeError::Custom)?;
+                } else if path == "forge/std/fs" {
+                    self.register_fs_module(symbols)
+                        .map_err(RuntimeError::Custom)?;
                 }
                 Ok(Value::Unit)
             }
@@ -1584,6 +1586,11 @@ impl Interpreter {
         // M-4-D: シンボル衝突検出
         if self.imported_symbols.contains_key(bind_name) {
             let existing_source = self.imported_symbols[bind_name].source_path.clone();
+            if existing_source == source_path {
+                // 同じソースからの重複インポートは追跡記録をスキップするが値はバインドする
+                self.define(bind_name, value, false);
+                return Ok(());
+            }
             if is_wildcard {
                 // use * の衝突は警告のみ
                 eprintln!(
@@ -6479,6 +6486,82 @@ impl Interpreter {
         );
     }
 
+    fn register_fs_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
+        macro_rules! native {
+            ($f:expr) => {
+                Value::NativeFunction(NativeFn(Rc::new($f)))
+            };
+        }
+
+        let fns: &[(&str, Value)] = &[
+            (
+                "read_file",
+                native!(|args: Vec<Value>| {
+                    let path = match args.first() {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(v) => return Err(format!("read_file() expects string, got {}", v.type_name())),
+                        None => return Err("read_file() requires 1 argument".to_string()),
+                    };
+                    match std::fs::read_to_string(&path) {
+                        Ok(s) => Ok(Value::Result(Ok(Box::new(Value::String(s))))),
+                        Err(e) => Ok(Value::Result(Err(format!("failed to read '{}': {}", path, e)))),
+                    }
+                }),
+            ),
+            (
+                "write_file",
+                native!(|args: Vec<Value>| {
+                    let path = match args.first() {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => return Err("write_file() requires (path, content)".to_string()),
+                    };
+                    let content = match args.get(1) {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => return Err("write_file() requires (path, content)".to_string()),
+                    };
+                    match std::fs::write(&path, &content) {
+                        Ok(_) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
+                        Err(e) => Ok(Value::Result(Err(format!("failed to write '{}': {}", path, e)))),
+                    }
+                }),
+            ),
+            (
+                "file_exists",
+                native!(|args: Vec<Value>| {
+                    let path = match args.first() {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => return Err("file_exists() requires 1 argument".to_string()),
+                    };
+                    Ok(Value::Bool(std::path::Path::new(&path).is_file()))
+                }),
+            ),
+        ];
+
+        for (name, val) in fns {
+            let should_bind = match symbols {
+                UseSymbols::All => true,
+                UseSymbols::Single(n, _) => n == name,
+                UseSymbols::Multiple(pairs) => pairs.iter().any(|(n, _)| n == name),
+            };
+            if !should_bind {
+                continue;
+            }
+            let bind_name = match symbols {
+                UseSymbols::Single(_, Some(alias)) => alias.clone(),
+                UseSymbols::Multiple(pairs) => pairs
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .and_then(|(_, alias)| alias.clone())
+                    .unwrap_or_else(|| name.to_string()),
+                _ => name.to_string(),
+            };
+            self.record_import(name, &bind_name, "forge/std/fs", val.clone(), matches!(symbols, UseSymbols::All))
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
     fn register_http_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
         // 型レジストリに HttpRequest / HttpResponse がなければ初回登録
         if !self.type_registry.structs.contains_key("HttpRequest") {
@@ -7403,9 +7486,9 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Option(None) => serde_json::Value::Null,
         Value::Result(Ok(value)) => value_to_json(value),
         Value::Result(Err(error)) => serde_json::Value::String(error.clone()),
-        Value::List(items) => serde_json::Value::Array(
-            items.borrow().iter().map(value_to_json).collect::<Vec<_>>(),
-        ),
+        Value::List(items) => {
+            serde_json::Value::Array(items.borrow().iter().map(value_to_json).collect::<Vec<_>>())
+        }
         Value::Map(entries) => serde_json::Value::Object(
             entries
                 .iter()
@@ -7482,9 +7565,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
     }
 }
 
-fn value_to_table(
-    value: &Value,
-) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
+fn value_to_table(value: &Value) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
     let rows = match value {
         Value::List(items) => items.borrow().clone(),
         other => {
@@ -8595,7 +8676,10 @@ impl Foo {
             "#,
         )
         .expect("run");
-        assert!(!output.contains("[name, score]"), "header row should not appear: {output}");
+        assert!(
+            !output.contains("[name, score]"),
+            "header row should not appear: {output}"
+        );
         assert!(output.contains("[alice, 90]"), "got: {output}");
         assert!(output.contains("[bob, 75]"), "got: {output}");
     }
@@ -8616,7 +8700,10 @@ impl Foo {
             "#,
         )
         .expect("run");
-        assert!(!output.contains("[name, score]"), "header row should not appear: {output}");
+        assert!(
+            !output.contains("[name, score]"),
+            "header row should not appear: {output}"
+        );
         assert!(output.contains("[alice, 90]"), "got: {output}");
     }
 
@@ -11238,7 +11325,10 @@ s == "Hello"
 
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].corrupted.len(), 2);
-        assert!(trace[0].corrupted.iter().any(|record| record.reason.contains("score is NaN")));
+        assert!(trace[0]
+            .corrupted
+            .iter()
+            .any(|record| record.reason.contains("score is NaN")));
         assert!(trace[0]
             .corrupted
             .iter()

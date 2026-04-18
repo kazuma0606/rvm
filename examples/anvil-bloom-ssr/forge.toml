@@ -1,0 +1,13 @@
+[package]
+name    = "anvil-bloom-ssr"
+version = "0.1.0"
+forge   = "0.1.0"
+entry   = "src/main.forge"
+
+[dependencies]
+anvil = { path = "../../packages/anvil" }
+bloom = { path = "../../packages/bloom" }
+
+[bloom]
+components = "src/components"
+pages      = "src/app"

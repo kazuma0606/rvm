@@ -229,6 +229,48 @@ fn find_tag_close(source: string, start: number) -> number {
     len
 }
 
+fn find_matching_close_tag(source: string, tag: string, after: number) -> number {
+    let open_pat = "<{tag}"
+    let close_pat = "</{tag}>"
+    let open_pat_bytes = string_to_bytes(open_pat)
+    let close_pat_bytes = string_to_bytes(close_pat)
+    let source_bytes = string_to_bytes(source)
+    let src_len = source_bytes.len()
+    state depth = 1
+    state cursor = after
+
+    loop {
+        let next_open = str_find(source, open_pat, cursor)
+        let next_close = str_find(source, close_pat, cursor)
+
+        if next_close < 0 {
+            return 0 - 1
+        }
+
+        if next_open >= 0 && next_open < next_close {
+            let after_tag = next_open + open_pat_bytes.len()
+            let is_real_open = if after_tag >= src_len {
+                false
+            } else {
+                let b = source_bytes[after_tag]
+                b == 62 || b == 32 || b == 47
+            }
+            if is_real_open {
+                depth = depth + 1
+            }
+            cursor = next_open + 1
+        } else {
+            depth = depth - 1
+            if depth == 0 {
+                return next_close
+            }
+            cursor = next_close + close_pat_bytes.len()
+        }
+    }
+
+    0 - 1
+}
+
 pub fn parse_template_nodes(source: string) -> list<map> {
     state out: list<map> = []
     let source_bytes = string_to_bytes(source)
@@ -346,7 +388,7 @@ pub fn parse_template_nodes(source: string) -> list<map> {
                         cursor = tag_end + 1
                     } else {
                         let close_tag = "</{tag}>"
-                        let close_start = str_find(source, close_tag, tag_end + 1)
+                        let close_start = find_matching_close_tag(source, tag, tag_end + 1)
                         let inner = str_slice(source, tag_end + 1, close_start)
                         let close_tag_bytes = string_to_bytes(close_tag)
                         out.push({
@@ -543,6 +585,10 @@ fn render_attrs(attrs: list<map>, context: map, target_id: string) -> string {
             let name = attr["name"]
             let value = escape_html(lookup_value(context, attr["expr"]))
             out = "{out} {name}={quote}{value}{quote}"
+        } else if kind == "EventHandler" {
+            let event = attr["event"]
+            let handler = attr["handler"]
+            out = "{out} data-on-{event}={quote}{handler}{quote}"
         }
         i = i + 1
     }
@@ -564,7 +610,8 @@ fn render_nodes(nodes: list<map>, path: string, context: map) -> string {
         } else if kind == "Interpolation" {
             let target_id = text_target_id(path, i)
             let value = escape_html(lookup_value(context, node["expr"]))
-            out = "{out}<span id={quote}{target_id}{quote}>{value}</span>"
+            let expr = node["expr"]
+            out = "{out}<span id={quote}{target_id}{quote} data-reactive={quote}{expr}{quote}>{value}</span>"
         } else if kind == "Element" || kind == "Component" {
             let tag = node["tag"]
             let attrs = render_attrs(node["attrs"], context, path_id(child_path))
@@ -609,11 +656,85 @@ pub fn render(component: map) -> string {
     render_source(component["source"], component["props"])
 }
 
+fn script_to_js(script: string) -> string {
+    let lines = script.split("\n")
+    state out = ""
+    state fn_depth = 0
+    state i = 0
+    while i < len(lines) {
+        let line = lines[i]
+        let trimmed = trim_ascii(line)
+        if trimmed == "" {
+            out = "{out}\n"
+        } else if fn_depth == 0 && trimmed.starts_with("state ") {
+            let rest = str_slice(trimmed, 6, len(string_to_bytes(trimmed)))
+            let eq_pos = str_find(rest, " = ", 0)
+            let colon_pos = str_find(rest, ":", 0)
+            let clean = if colon_pos >= 0 && eq_pos > 0 && colon_pos < eq_pos {
+                let name = trim_ascii(str_slice(rest, 0, colon_pos))
+                let val = trim_ascii(str_slice(rest, eq_pos + 3, len(string_to_bytes(rest))))
+                "{name} = {val}"
+            } else {
+                rest
+            }
+            out = "{out}var {clean};\n"
+        } else if fn_depth == 0 && trimmed.starts_with("fn ") {
+            let rest = str_slice(trimmed, 3, len(string_to_bytes(trimmed)))
+            out = "{out}function {rest}\n"
+            fn_depth = 1
+        } else if fn_depth > 0 {
+            let line_bytes = string_to_bytes(trimmed)
+            state opens = 0
+            state closes = 0
+            state j = 0
+            while j < len(line_bytes) {
+                let b = line_bytes[j]
+                if b == 123 { opens = opens + 1 }
+                if b == 125 { closes = closes + 1 }
+                j = j + 1
+            }
+            fn_depth = fn_depth + opens - closes
+            if fn_depth == 0 {
+                out = "{out}  __bloom_update();\n}\n"
+            } else {
+                out = "{out}  {trimmed}\n"
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn state_vars_js_obj(state_vars: map) -> string {
+    let ob = char_from_byte(123)
+    let cb = char_from_byte(125)
+    state parts = []
+    for key in state_vars.keys() {
+        parts.push("{key}: {key}")
+    }
+    let joined = parts.join(", ")
+    "{ob}{joined}{cb}"
+}
+
+pub fn hydrate_inline_script(source: string) -> string {
+    let file = parse_bloom(source)
+    let script = file["script"]
+    let state_vars = parse_state_bindings(script)
+    let js_body = script_to_js(script)
+    let state_obj = state_vars_js_obj(state_vars)
+    let q = char_from_byte(39)
+    let ob = char_from_byte(123)
+    let cb = char_from_byte(125)
+    let update_fn = "function __bloom_update() {ob}\n  var __s = {state_obj};\n  document.querySelectorAll({q}[data-reactive]{q}).forEach(function(el) {ob}\n    var n = el.getAttribute({q}data-reactive{q});\n    if (n in __s) el.textContent = String(__s[n]);\n  {cb});\n{cb}"
+    let event_fn = "document.addEventListener({q}DOMContentLoaded{q}, function() {ob}\n  document.querySelectorAll({q}[data-on-click]{q}).forEach(function(el) {ob}\n    var h = el.getAttribute({q}data-on-click{q});\n    el.addEventListener({q}click{q}, function() {ob} if (typeof window[h] === {q}function{q}) window[h](); {cb});\n  {cb});\n{cb});"
+    "<script>\n{js_body}\n{update_fn}\n{event_fn}\n</script>"
+}
+
 pub fn hydrate_script_with(wasm_path: string) -> string {
     let quote = char_from_byte(34)
     let open_brace = char_from_byte(123)
     let close_brace = char_from_byte(125)
-    "<script src={quote}/forge.min.js{quote} defer></script><script>window.addEventListener({quote}DOMContentLoaded{quote}, fn() {open_brace} ForgeBloom.load({quote}{wasm_path}{quote}) {close_brace})</script>"
+    "<script src={quote}/forge.min.js{quote} defer></script><script>window.addEventListener({quote}DOMContentLoaded{quote}, function() {open_brace} ForgeBloom.load({quote}{wasm_path}{quote}) {close_brace})</script>"
 }
 
 pub fn hydrate_script() -> string {
@@ -657,4 +778,25 @@ test "hydrate script contains runtime loader" {
     let html = hydrate_script_with("/dist/app/page.wasm")
     assert(html.contains("/forge.min.js"))
     assert(html.contains("/dist/app/page.wasm"))
+}
+
+test "ssr renders nested same-tag elements correctly" {
+    let quote = char_from_byte(34)
+    let source = "<div class={quote}outer{quote}><div class={quote}inner{quote}>hello</div></div>"
+    let html = render_source(source, {})
+    assert(html.contains("outer"))
+    assert(html.contains("inner"))
+    assert(html.contains("hello"))
+    assert(!html.contains("outer{quote}>inner"))
+}
+
+test "ssr renders counter component with nested divs" {
+    let open_brace = char_from_byte(123)
+    let close_brace = char_from_byte(125)
+    let quote = char_from_byte(34)
+    let source = "<div class={quote}page{quote}><h1>Counter</h1><div class={quote}controls{quote}><span>{open_brace}count{close_brace}</span></div></div>"
+    let html = render_source(source, {"count": "0"})
+    assert(html.contains("Counter"))
+    assert(html.contains("controls"))
+    assert(html.contains("0"))
 }

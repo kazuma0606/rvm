@@ -1,0 +1,68 @@
+use ./anvil.*
+use ./request.*
+use ./response.*
+use bloom/ssr.{ render_source, hydrate_script, hydrate_script_with }
+
+// ----------------------------------------------------------------
+// test_anvil_bloom_ssr_route
+// Anvil ルートが Bloom コンポーネントを HTML にレンダリングする
+// ----------------------------------------------------------------
+test "anvil_bloom_ssr_route: render bloom component via route handler" {
+    let source = "<div><h1>Hello</h1></div>"
+
+    fn page_handler(req: Request<string>) -> Response<string>! {
+        let page_html = render_source(source, {})
+        let script = hydrate_script()
+        let doc = "<!doctype html><html><body><div id=\"app\">{page_html}</div>{script}</body></html>"
+        ok(Response::html(doc))
+    }
+
+    let req = new_request("GET", "/", "")
+    let response = page_handler(req)?
+
+    assert_eq(response.headers.get("Content-Type"), some("text/html; charset=utf-8"))
+    let body = response.body.unwrap_or("")
+    assert(body.contains("<!doctype html>"))
+    assert(body.contains("<div id=\"app\">"))
+    assert(body.contains("Hello"))
+}
+
+// ----------------------------------------------------------------
+// test_anvil_bloom_hydrate_script
+// hydrate_script() が正しい <script> タグを生成する
+// ----------------------------------------------------------------
+test "anvil_bloom_hydrate_script: contains forge.min.js loader" {
+    let script = hydrate_script()
+    assert(script.contains("<script"))
+    assert(script.contains("forge.min.js"))
+}
+
+test "anvil_bloom_hydrate_script_with: custom wasm path" {
+    let script = hydrate_script_with("/dist/counter_page.wasm")
+    assert(script.contains("forge.min.js"))
+    assert(script.contains("/dist/counter_page.wasm"))
+}
+
+// ----------------------------------------------------------------
+// test_anvil_bloom_ssr_with_props
+// props を渡したレンダリングが Anvil ルートで正しく動作する
+// ----------------------------------------------------------------
+test "anvil_bloom_ssr_with_props: dynamic values are embedded" {
+    let source = "<h1>{title}</h1>"
+    let html = render_source(source, {"title": "Bloom"})
+    assert(html.contains("Bloom"))
+}
+
+// ----------------------------------------------------------------
+// test_anvil_bloom_ssr_full_page
+// SSR HTML が完全なページ構造を持つ
+// ----------------------------------------------------------------
+test "anvil_bloom_ssr_full_page: html structure is valid" {
+    let source = "<section><p>welcome</p></section>"
+    let html = render_source(source, {})
+    let script = hydrate_script()
+    let doc = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"app\">{html}</div>{script}</body></html>"
+    assert(doc.contains("welcome"))
+    assert(doc.contains("/forge.min.js"))
+    assert(doc.contains("<div id=\"app\">"))
+}

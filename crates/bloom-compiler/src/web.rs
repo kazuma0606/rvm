@@ -445,7 +445,7 @@ fn pascal_to_snake(name: &str) -> String {
 }
 
 /// Anvil の .forge ファイル内に含まれる render(<Foo />) を
-/// render_source(std::fs::read_to_string("src/components/foo.bloom")?, {}) に変換する。
+/// render_source(bytes_to_str([..]), {}) に変換する。
 ///
 /// props 付き: render(<Counter count={5} />) -> render_source(..., {"count": count})
 pub fn preprocess_render_calls(source: &str, project_root: &Path) -> Result<String, String> {
@@ -477,10 +477,14 @@ pub fn preprocess_render_calls(source: &str, project_root: &Path) -> Result<Stri
             .join("src")
             .join("components")
             .join(format!("{}.bloom", snake));
-        let path_str = bloom_path
-            .to_str()
-            .ok_or_else(|| format!("invalid path: {}", bloom_path.display()))?
-            .replace('\\', "/");
+        let bloom_source = fs::read_to_string(&bloom_path)
+            .map_err(|e| format!("{}: {}", bloom_path.display(), e))?;
+        let bytes_literal = bloom_source
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
 
         // props_raw をシンプルな map リテラルに変換 (key={expr} -> "key": expr)
         let props_map = if props_raw.is_empty() {
@@ -502,8 +506,8 @@ pub fn preprocess_render_calls(source: &str, project_root: &Path) -> Result<Stri
         };
 
         let replacement = format!(
-            "render_source(std::fs::read(\"{}\"), {})",
-            path_str, props_map
+            "render_source(bytes_to_str([{}]), {})",
+            bytes_literal, props_map
         );
         replacements.push((start, end, replacement));
     }
@@ -631,16 +635,23 @@ mod tests {
         let source = r#"use bloom/ssr.{ render_source, hydrate_script }
 let html = render(<Counter />)
 "#;
-        let root = Path::new("/project");
-        let result = preprocess_render_calls(source, root).expect("preprocess");
+        let dir = temp_dir("preprocess_render");
+        fs::create_dir_all(dir.join("src/components")).expect("mkdir");
+        fs::write(dir.join("src/components/counter.bloom"), "<p>hello</p>").expect("write");
+        let result = preprocess_render_calls(source, &dir).expect("preprocess");
         assert!(
             result.contains("render_source("),
             "render_source が含まれていない: {}",
             result
         );
         assert!(
-            result.contains("counter.bloom"),
-            "counter.bloom が含まれていない: {}",
+            result.contains("bytes_to_str(["),
+            "bytes_to_str が含まれていない: {}",
+            result
+        );
+        assert!(
+            result.contains("104, 101, 108, 108, 111"),
+            "コンポーネント本文が埋め込まれていない: {}",
             result
         );
         assert!(
@@ -653,13 +664,16 @@ let html = render(<Counter />)
     #[test]
     fn test_preprocess_render_calls_with_props() {
         let source = "render(<Counter count={5} />)";
-        let root = Path::new("/project");
-        let result = preprocess_render_calls(source, root).expect("preprocess");
+        let dir = temp_dir("preprocess_render_props");
+        fs::create_dir_all(dir.join("src/components")).expect("mkdir");
+        fs::write(dir.join("src/components/counter.bloom"), "<p>hello</p>").expect("write");
+        let result = preprocess_render_calls(source, &dir).expect("preprocess");
         assert!(
             result.contains("\"count\": 5"),
             "props が変換されていない: {}",
             result
         );
+        assert!(result.contains("bytes_to_str(["), "{}", result);
     }
 
     #[test]

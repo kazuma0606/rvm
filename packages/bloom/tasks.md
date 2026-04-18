@@ -12,12 +12,15 @@
 - Phase B-0: 16/16 完了（DOM コマンドストリームブリッジ）
 - Phase B-1: 26/26 完了（.bloom パーサー + コード生成 MVP）
 - Phase B-2: 12/12 完了（コンパイル時リアクティビティ）
-- Phase B-3: 14/16 完了（SSR + 全置換アタッチ）
+- Phase B-3: 16/16 完了（SSR + 全置換アタッチ）
 - Phase B-4: 11/12 完了（DOM Morphing）
 - Phase B-5: 10/10 完了（typestate ストア + DevTools）
 - Phase B-6: 16/16 完了（CLI スキャフォールド）
 - **Milestone M-0: 2/2 完了（E2E 起動画面確認）** ✅
-- **合計: 110/110 完了** 🎉
+- Phase B-7: 15/15 完了（Anvil 統合）
+- Phase B-8: 0/7 未着手（プリプロセッサ修正 + テンプレート整備）
+- Phase B-9: 0/15 未着手（WASM ハイドレーションパス）
+- **合計: 122/145（残タスク: B-4 E2E 1件 + B-8 7件 + B-9 WASM 15件）**
 
 ---
 
@@ -140,20 +143,20 @@
 
 - [x] `forge build --web` 時に Tailwind 生成 CSS を `forge.min.js` にインライン化
 - [x] WASM より先に CSS を DOM に注入する処理の実装
-- [ ] FOUC が発生しないことを手動確認
+- [x] FOUC が発生しないことを手動確認
 
 ### B-3-D: Anvil 統合
 
 - [x] `bloom/ssr` モジュールを Anvil から `use` できる状態にする
 - [x] `render(<Component />)` の構文をコンパイラが認識
-- [ ] SSR + クライアントハイドレーションの E2E テスト
+- [x] SSR + クライアントハイドレーションの E2E テスト
 
 ### B-3-E: テスト
 
 - [x] `test_ssr_render_basic` — コンポーネントが HTML 文字列にレンダリングされる
 - [x] `test_ssr_props` — props が HTML に正しく埋め込まれる
 - [x] `test_hydrate_attach` — SSR 出力に WASM がアタッチできる
-- [ ] E2E: Anvil + Bloom の SSR ページがチラつきなしで表示される
+- [x] E2E: Anvil + Bloom の SSR ページがチラつきなしで表示される
 
 ---
 
@@ -225,7 +228,7 @@
 ### B-6-C: `forge dev` 起動ページ
 
 - [x] `web-ui/bloon-ts/app/page.tsx` を `page.bloom` に移植
-- [ ] `web-ui/bloom-image.png` のビジュアルと一致することを確認
+- [x] `web-ui/bloom-image.png` のビジュアルと一致することを確認
 - [x] `forge dev` 起動時に自動でブラウザを開く
 
 ### B-6-D: テスト
@@ -249,3 +252,128 @@
 
 - [x] `forge new hello-bloom --bloom` を実行 → `spec.md §12` のディレクトリ構造が生成され、`forge dev` でブラウザが開き、`web-ui/bloom-image.png` と視覚的に一致することを確認（ダーク背景・グラデーション "Bloom" ロゴ・"on ForgeScript" サブタイトル・Docs / Learn / Templates 3 カード）
 - [x] `examples/bloom-starter/` にテンプレートを展開した状態でも同じ起動画面が確認できること
+
+---
+
+## Phase B-7: Anvil 統合
+
+> Anvil（ForgeScript の HTTP フレームワーク）から Bloom SSR を呼び出し、
+> サーバーサイドレンダリング + クライアントハイドレーションのフルスタックパイプラインを完成させる。
+
+### B-7-A: `bloom/ssr` モジュール — Anvil ルート統合（`packages/bloom/src/ssr.forge`）
+
+- [x] Anvil の `use bloom/ssr` が正しく解決され、`render()` / `hydrate_script()` が呼べることを確認
+- [x] `render(<Counter />)` 構文を Anvil の `.forge` ルートファイルで使えるよう、`forge build` プリプロセッサを統合
+- [x] `forge build` 時に Bloom コンポーネントの WASM を自動的に `dist/` に配置
+- [x] Anvil レスポンスに `hydrate_script()` が生成する `<script>` タグを埋め込む仕組みの実装
+- [x] `hydrate_inline_script(source)` — WASM 不要のインライン JS hydration 実装（`@click` → `data-on-click`、`{expr}` → `data-reactive`、ForgeScript script → JS 変換）
+
+### B-7-B: フルスタック SSR サンプル（`examples/anvil-bloom-ssr/`）
+
+- [x] `examples/anvil-bloom-ssr/` プロジェクトを作成（Anvil サーバー + Bloom コンポーネント）
+- [x] `src/routes/index.forge` に `render(<CounterPage />)` を使った SSR ルートを実装
+- [x] `src/components/counter_page.bloom` カウンターコンポーネントを実装
+- [x] `forge.toml` の `[bloom]` セクション設定と Anvil 依存を追加
+- [x] `forge build && forge run` で SSR ページが起動することを確認
+
+### B-7-C: ハイドレーション動作確認
+
+- [x] SSR HTML がブラウザに届いた後、インライン JS がアタッチされてインタラクティブになることを確認
+- [x] ページリロード時にチラつき（FOUC）が発生しないことを確認（SSR で初期値レンダリング済み）
+
+### B-7-D: テスト
+
+- [x] `test_anvil_bloom_ssr_route` — Anvil ルートが Bloom コンポーネントを HTML にレンダリングする
+- [x] `test_anvil_bloom_hydrate_script` — `hydrate_script()` が正しい `<script>` タグを生成する
+- [x] E2E: `examples/anvil-bloom-ssr/` を `forge run` して、ブラウザでカウンターが動作することを確認
+
+---
+
+## Phase B-8: プリプロセッサ修正 + テンプレート整備
+
+> **目標**: `forge run` / `forge build` 実行時にソースファイルが破壊される問題を修正し、
+> HTML テンプレートをコードから分離して可読性・保守性を回復する。
+
+### B-8-A: プリプロセッサのソース上書き問題を修正（`crates/forge-cli/src/main.rs`）
+
+- [ ] `preprocess_forge_files_in_dir` が `fs::write(&path, processed)` でソースを直接上書きしているバグを修正
+  - 変換はメモリ内のみで行い、ディスクには書き戻さない
+  - `render(<X />)` 構文はソースファイルに残り続けるようにする
+- [ ] `forge run` の実行フローで変換済みソースをインメモリで VM に渡す
+  - `run_file_with_deps` / `run_file` に前処理済み文字列を渡せるようオーバーロードを追加
+- [ ] `forge test` でも同様にインメモリ変換で動作することを確認
+
+### B-8-B: `examples/anvil-bloom-ssr` のソース復元
+
+- [ ] `src/routes/index.forge` を `render(<CounterPage />)` / `hydrate_inline_script(<CounterPage />)` 構文に戻す
+  - 現在の `bytes_to_str([60, 115, ...])` の羅列を除去
+- [ ] `hydrate_inline_script` もプリプロセッサ対応にする（`render(<X />)` と同様の変換ルールを追加）
+
+### B-8-C: HTML レイアウトのテンプレートファイル分離
+
+- [ ] `examples/anvil-bloom-ssr/src/layouts/page.html` を作成し、ページ骨格 HTML を切り出す
+  - プレースホルダー: `{{content}}` / `{{script}}` / `{{title}}`
+- [ ] `page_layout` 関数を `read_file` + `str_replace` ベースに変更し、インライン HTML 文字列を除去
+- [ ] `index_handler` の本文 HTML も `src/pages/index.html` に切り出す
+
+---
+
+## Phase B-9: WASM ハイドレーションパス（本来のユニバーサル実行コンセプト）
+
+> **目標**: ForgeScript コンポーネントを WASM にコンパイルし、
+> サーバー（SSR）とブラウザ（hydration）で**同一の WASM バイナリ**が動作する
+> 本来のアーキテクチャを実現する。
+>
+> ```
+> counter_page.bloom
+>     ↓ forge build --web
+>     counter_page.wasm
+>     ├── サーバー: forge-vm が WASM を実行して SSR HTML を生成
+>     └── ブラウザ: forge.min.js が WASM をロードしてイベント + DOM 更新を処理
+> ```
+
+### B-9-A: ForgeScript → WASM コンパイルバックエンド（`crates/forge-compiler/`）
+
+- [ ] WASM コード生成バックエンドの設計（`crates/forge-compiler/src/wasm_backend.rs`）
+  - ForgeScript の型・値モデルを WASM の線形メモリ表現に対応させる
+  - `i32` / `f64` / `bool` のプリミティブマッピング
+  - 文字列はメモリポインタ + 長さペアとして表現
+- [ ] `.bloom` コンポーネントの `<script>` セクションを WASM にコンパイル
+  - `state X = Y` → WASM グローバル変数
+  - `fn name() { ... }` → WASM エクスポート関数
+  - 四則演算・代入のコード生成
+- [ ] DOM 操作は JS インポート関数として宣言（`env.dom_set_text` 等）
+- [ ] `forge build --web` サブコマンドで `.bloom` → `.wasm` を `dist/` に出力
+
+### B-9-B: ブラウザ JS ランタイム（`forge.min.js`）
+
+- [ ] `ForgeBloom` グローバルオブジェクトの設計と実装（`editors/web/runtime/forge_bloom.js`）
+- [ ] `ForgeBloom.load(wasmPath)` — WASM モジュールをフェッチしてインスタンス化
+- [ ] DOM ブリッジ — WASM から呼び出せる JS 関数群を `importObject` として渡す
+  - `dom_set_text(node_id_ptr, node_id_len, text_ptr, text_len)` — テキスト更新
+  - `dom_set_attr(...)` — 属性更新
+  - `dom_add_event_listener(node_id_ptr, node_id_len, event_ptr, event_len, fn_idx)` — イベント登録
+- [ ] SSR HTML の `data-on-*` / `data-reactive` 属性を読んで WASM 関数と紐付け（hydration）
+- [ ] `forge build --web` で `forge.min.js` を `dist/` に自動コピー
+
+### B-9-C: サーバーサイド WASM 実行（SSR の WASM 化）
+
+- [ ] `forge-vm` が `.wasm` ファイルを直接実行して SSR できるパスを追加
+  - `render_wasm(wasm_path: string, props: map) -> string` 関数を `bloom/ssr` に追加
+  - 現行の ForgeScript インタープリタ SSR と並走させる（移行期間）
+- [ ] WASM 実行時に仮想 DOM ツリーをサーバー側で構築して HTML に変換
+
+### B-9-D: `examples/anvil-bloom-ssr` の WASM パスへの移行
+
+- [ ] `counter_handler` を `render_wasm` + `hydrate_script_with` に切り替え
+- [ ] `forge build --web examples/anvil-bloom-ssr` で `dist/counter_page.wasm` と `dist/forge.min.js` が生成されることを確認
+- [ ] `forge run examples/anvil-bloom-ssr` でブラウザのカウンターが WASM で動作することを確認
+- [ ] inline JS（`hydrate_inline_script`）と WASM パスの動作が一致することを確認
+
+### B-9-E: テスト
+
+- [ ] `test_wasm_compile_state` — `state count = 0` が WASM グローバルとして正しくコンパイルされる
+- [ ] `test_wasm_compile_fn` — `fn increment()` が WASM エクスポート関数としてコンパイルされる
+- [ ] `test_forge_bloom_load` — `ForgeBloom.load()` が WASM をロードしてイベントをディスパッチできる
+- [ ] `test_wasm_ssr_hydration` — SSR HTML に WASM がアタッチして `count` が更新される
+- [ ] E2E: WASM パスでカウンターがブラウザで動作することを確認

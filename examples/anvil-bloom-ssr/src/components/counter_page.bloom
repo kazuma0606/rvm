@@ -1,0 +1,22 @@
+<script>
+state count = 0
+
+fn increment() {
+    count = count + 1
+}
+
+fn decrement() {
+    count = count - 1
+}
+</script>
+
+<div class="page">
+  <h1>Counter</h1>
+  <p class="subtitle">Powered by Anvil + Bloom SSR</p>
+
+  <div class="counter">
+    <button @click={decrement}>-</button>
+    <span id="count-display">{count}</span>
+    <button @click={increment}>+</button>
+  </div>
+</div>

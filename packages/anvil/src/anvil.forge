@@ -3,7 +3,6 @@ use ./cors.*
 use ./middleware.*
 use ./request.*
 use ./response.*
-use ./router.{ match_route_pattern }
 use ./router.*
 use ./ssr.{ init, render, hydrate_script, layout }
 

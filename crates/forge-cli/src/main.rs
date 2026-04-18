@@ -280,6 +280,7 @@ fn run_entry(path: Option<&str>) {
             project_dir,
             forge_toml,
         }) => {
+            preprocess_project_forge_sources(&project_dir, false);
             let entry = project_dir.join(&forge_toml.package.entry);
             let dep_paths = forge_toml.local_dep_paths(&project_dir);
             if dep_paths.is_empty() {
@@ -335,7 +336,12 @@ fn run_file_with_deps(entry: &Path, dep_paths: Vec<(String, PathBuf)>) {
     }
 }
 
-fn test_file(path: &str, filter: Option<&str>, project_root: Option<&Path>) {
+fn test_file(
+    path: &str,
+    filter: Option<&str>,
+    project_root: Option<&Path>,
+    dep_paths: Option<Vec<(String, PathBuf)>>,
+) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -353,9 +359,12 @@ fn test_file(path: &str, filter: Option<&str>, project_root: Option<&Path>) {
     };
 
     let file_path = std::path::Path::new(path);
-    let mut interp = match project_root {
-        Some(root) => Interpreter::with_project_root(root.to_path_buf()),
-        None => Interpreter::with_file_path(file_path),
+    let mut interp = match (project_root, dep_paths) {
+        (Some(root), Some(dep_paths)) => {
+            Interpreter::with_project_root_and_deps(root.to_path_buf(), dep_paths)
+        }
+        (Some(root), None) => Interpreter::with_project_root(root.to_path_buf()),
+        (None, _) => Interpreter::with_file_path(file_path),
     };
     interp.is_test_mode = true;
 
@@ -1449,9 +1458,14 @@ fn build_web_entry(path: Option<&str>, output: Option<&str>) {
 fn test_entry(path: Option<&str>, filter: Option<&str>) {
     match resolve_project_request(path) {
         Ok(ProjectRequest::File(file_path)) => {
-            test_file(&file_path.to_string_lossy(), filter, None)
+            test_file(&file_path.to_string_lossy(), filter, None, None)
         }
-        Ok(ProjectRequest::Project { project_dir, .. }) => {
+        Ok(ProjectRequest::Project {
+            project_dir,
+            forge_toml,
+        }) => {
+            preprocess_project_forge_sources(&project_dir, true);
+            let dep_paths = forge_toml.local_dep_paths(&project_dir);
             let tests_dir = project_dir.join("tests");
             let test_files = collect_project_test_files(&tests_dir);
             if test_files.is_empty() {
@@ -1464,6 +1478,11 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
                     &test_file_path.to_string_lossy(),
                     filter,
                     Some(&project_dir),
+                    if dep_paths.is_empty() {
+                        None
+                    } else {
+                        Some(dep_paths.clone())
+                    },
                 );
             }
         }
@@ -1498,26 +1517,50 @@ fn build_web_project(project_dir: &Path, output: Option<&str>) {
         .map(PathBuf::from)
         .unwrap_or_else(|| project_dir.join("dist"));
 
-    // Anvil の .forge ルートファイルがあれば render(<Component />) 構文を前処理する
-    if let Err(e) = preprocess_forge_files_in_dir(&source_root, project_dir) {
-        eprintln!("警告: render(<...>) 前処理に失敗: {}", e);
-    }
-
-    let files = match collect_bloom_files(&source_root) {
+    preprocess_project_forge_sources(project_dir, false);
+    let file_pairs = match collect_bloom_file_pairs(&source_root) {
         Ok(files) => files,
         Err(e) => {
             eprintln!("エラー: {}", e);
             std::process::exit(1);
         }
     };
-    let file_pairs = files
-        .into_iter()
-        .map(|file| (file.abs_path, file.rel_path))
-        .collect::<Vec<_>>();
     if let Err(e) = emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir) {
         eprintln!("エラー: {}", e);
         std::process::exit(1);
     }
+}
+
+fn preprocess_project_forge_sources(project_dir: &Path, include_tests: bool) {
+    let source_root = project_dir.join("src");
+    if let Err(e) = preprocess_forge_files_in_dir(&source_root, project_dir) {
+        eprintln!("警告: render(<...>) 前処理に失敗: {}", e);
+    }
+    if include_tests {
+        let tests_dir = project_dir.join("tests");
+        if let Err(e) = preprocess_forge_files_in_dir(&tests_dir, project_dir) {
+            eprintln!("警告: tests/ の render(<...>) 前処理に失敗: {}", e);
+        }
+    }
+}
+
+fn collect_bloom_file_pairs(source_root: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    Ok(collect_bloom_files(source_root)?
+        .into_iter()
+        .map(|file| (file.abs_path, file.rel_path))
+        .collect())
+}
+
+fn emit_bloom_project_artifacts(project_dir: &Path, output: Option<&str>) -> Result<(), String> {
+    let source_root = project_dir.join("src");
+    let file_pairs = collect_bloom_file_pairs(&source_root)?;
+    if file_pairs.is_empty() {
+        return Ok(());
+    }
+    let out_dir = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join("dist"));
+    emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir)
 }
 
 /// src/ 内の .forge ファイルをスキャンし render(<Component />) 構文を前処理する。
@@ -1672,6 +1715,11 @@ fn build_file(path: &Path, output: Option<&str>) {
 }
 
 fn build_project_with_forge_toml(project_dir: &Path, forge_toml: &ForgeToml, output: Option<&str>) {
+    preprocess_project_forge_sources(project_dir, false);
+    if let Err(e) = emit_bloom_project_artifacts(project_dir, None) {
+        eprintln!("エラー: {}", e);
+        std::process::exit(1);
+    }
     let entry_path = project_dir.join(&forge_toml.package.entry);
     let edition = forge_toml
         .build
@@ -1730,7 +1778,23 @@ fn build_generated_project(
         std::process::exit(1);
     }
 
-    if let Err(e) = write_transpiled_project(entry_path, &proj_dir.join("src")) {
+    let local_dep_paths = forge_toml
+        .map(|toml| {
+            let project_dir = entry_path
+                .parent()
+                .and_then(|p| {
+                    if p.file_name().and_then(|s| s.to_str()) == Some("src") {
+                        p.parent()
+                    } else {
+                        Some(p)
+                    }
+                })
+                .unwrap_or_else(|| Path::new("."));
+            toml.local_dep_paths(project_dir)
+        })
+        .unwrap_or_default();
+
+    if let Err(e) = write_transpiled_project(entry_path, &proj_dir.join("src"), &local_dep_paths) {
         eprintln!(
             "エラー: トランスパイル済みプロジェクトの生成に失敗しました: {}",
             e
@@ -1770,6 +1834,7 @@ fn build_generated_project(
 
     let status = Command::new("cargo")
         .args(["build", "--release", "--manifest-path", &manifest_path])
+        .env("CARGO_NET_OFFLINE", "true")
         .status();
 
     match status {
@@ -1978,11 +2043,17 @@ fn forge_std_dependency_line() -> String {
 struct ForgeSourceFile {
     rel_path: PathBuf,
     source: String,
+    source_root: PathBuf,
+    crate_prefix: Option<String>,
 }
 
-fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(), String> {
+fn write_transpiled_project(
+    entry_path: &Path,
+    out_src_dir: &Path,
+    local_dep_paths: &[(String, PathBuf)],
+) -> Result<(), String> {
     let source_root = detect_source_root(entry_path)?;
-    let files = collect_forge_files(&source_root, entry_path)?;
+    let files = collect_forge_files(&source_root, entry_path, local_dep_paths)?;
     let entry_rel = entry_path
         .strip_prefix(&source_root)
         .map_err(|_| {
@@ -1995,12 +2066,20 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
 
     let mut deps = DepsManager::new();
     let module_index = build_module_index(&files, &entry_rel);
+    let local_dep_names = local_dep_paths
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::HashSet<_>>();
 
     for file in &files {
-        collect_external_deps(&source_root, file, &mut deps)?;
+        collect_external_deps(&file.source_root, file, &local_dep_names, &mut deps)?;
 
         let mut rust_code =
             transpile(&file.source).map_err(|e| format!("{}: {}", file.rel_path.display(), e))?;
+
+        if let Some(prefix) = &file.crate_prefix {
+            rust_code = rust_code.replace("crate::", &format!("crate::{}::", prefix));
+        }
 
         let rel_dir = file
             .rel_path
@@ -2010,6 +2089,10 @@ fn write_transpiled_project(entry_path: &Path, out_src_dir: &Path) -> Result<(),
         let prelude = module_prelude(&rel_dir, &file.rel_path, &entry_rel, &module_index);
         if !prelude.is_empty() {
             rust_code = format!("{}{}", prelude, rust_code);
+        }
+
+        if rust_code.contains("bytes_to_str(") {
+            rust_code = format!("{}{}", generated_bytes_to_str_helper(), rust_code);
         }
 
         collect_codegen_deps(&rust_code, &mut deps);
@@ -2052,7 +2135,62 @@ fn detect_source_root(entry_path: &Path) -> Result<PathBuf, String> {
 fn collect_forge_files(
     source_root: &Path,
     entry_path: &Path,
+    local_dep_paths: &[(String, PathBuf)],
 ) -> Result<Vec<ForgeSourceFile>, String> {
+    use std::collections::HashMap;
+
+    fn walk(
+        dir: &Path,
+        source_root: &Path,
+        rel_prefix: &Path,
+        crate_prefix: Option<&str>,
+        files: &mut Vec<ForgeSourceFile>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(dir)
+            .map_err(|e| format!("{}: {}", dir.display(), e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, source_root, rel_prefix, crate_prefix, files)?;
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("forge") {
+                continue;
+            }
+            if crate_prefix.is_some()
+                && path.file_name().and_then(|name| name.to_str()) == Some("main.forge")
+            {
+                continue;
+            }
+
+            let rel_suffix = path
+                .strip_prefix(source_root)
+                .map_err(|_| format!("{} is outside {}", path.display(), source_root.display()))?;
+            let rel_path = if rel_prefix.as_os_str().is_empty() {
+                rel_suffix.to_path_buf()
+            } else {
+                rel_prefix.join(rel_suffix)
+            };
+            let source =
+                fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            if crate_prefix.is_some() && source.contains("#[") {
+                continue;
+            }
+            files.push(ForgeSourceFile {
+                rel_path,
+                source,
+                source_root: source_root.to_path_buf(),
+                crate_prefix: crate_prefix.map(|s| s.to_string()),
+            });
+        }
+
+        Ok(())
+    }
+
     if entry_path.file_name().and_then(|s| s.to_str()) != Some("main.forge") {
         let rel_path = entry_path
             .strip_prefix(source_root)
@@ -2066,45 +2204,268 @@ fn collect_forge_files(
             .to_path_buf();
         let source = fs::read_to_string(entry_path)
             .map_err(|e| format!("{}: {}", entry_path.display(), e))?;
-        return Ok(vec![ForgeSourceFile { rel_path, source }]);
-    }
-
-    fn walk(
-        dir: &Path,
-        source_root: &Path,
-        files: &mut Vec<ForgeSourceFile>,
-    ) -> Result<(), String> {
-        let mut entries = fs::read_dir(dir)
-            .map_err(|e| format!("{}: {}", dir.display(), e))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        entries.sort_by_key(|entry| entry.path());
-
-        for entry in entries {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, source_root, files)?;
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("forge") {
-                continue;
-            }
-
-            let rel_path = path
-                .strip_prefix(source_root)
-                .map_err(|_| format!("{} is outside {}", path.display(), source_root.display()))?
-                .to_path_buf();
-            let source =
-                fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-            files.push(ForgeSourceFile { rel_path, source });
-        }
-
-        Ok(())
+        return Ok(vec![ForgeSourceFile {
+            rel_path,
+            source,
+            source_root: source_root.to_path_buf(),
+            crate_prefix: None,
+        }]);
     }
 
     let mut files = Vec::new();
-    walk(source_root, source_root, &mut files)?;
+    walk(source_root, source_root, Path::new(""), None, &mut files)?;
+    let dep_map = local_dep_paths
+        .iter()
+        .map(|(name, root)| (name.clone(), root.clone()))
+        .collect::<HashMap<_, _>>();
+    let dep_files = collect_required_local_dep_files(&files, &dep_map)?;
+    files.extend(dep_files);
     Ok(files)
+}
+
+fn collect_required_local_dep_files(
+    project_files: &[ForgeSourceFile],
+    dep_map: &std::collections::HashMap<String, PathBuf>,
+) -> Result<Vec<ForgeSourceFile>, String> {
+    use std::collections::HashSet;
+
+    let mut visited = HashSet::new();
+    let mut files = Vec::new();
+
+    for file in project_files {
+        collect_dependency_imports_from_source(
+            &file.source,
+            file.rel_path.parent().unwrap_or(Path::new("")),
+            None,
+            dep_map,
+            &mut visited,
+            &mut files,
+        )?;
+    }
+
+    Ok(files)
+}
+
+fn collect_dependency_imports_from_source(
+    source: &str,
+    current_rel_dir: &Path,
+    current_dep: Option<&str>,
+    dep_map: &std::collections::HashMap<String, PathBuf>,
+    visited: &mut std::collections::HashSet<(String, PathBuf)>,
+    files: &mut Vec<ForgeSourceFile>,
+) -> Result<(), String> {
+    let module = parse_source(source).map_err(|e| e.to_string())?;
+    for stmt in module.stmts {
+        let Stmt::UseDecl { path, .. } = stmt else {
+            continue;
+        };
+
+        match path {
+            UsePath::Local(module_path) => {
+                if let Some(dep_name) = current_dep {
+                    let dep_root = dep_map
+                        .get(dep_name)
+                        .ok_or_else(|| format!("missing local dependency root for '{dep_name}'"))?;
+                    let dep_src = dep_root.join("src");
+                    if let Some(target_rel) =
+                        resolve_internal_module_path(&dep_src, current_rel_dir, &module_path)
+                    {
+                        collect_dependency_module_recursive(
+                            dep_name,
+                            &dep_src,
+                            &target_rel,
+                            dep_map,
+                            visited,
+                            files,
+                        )?;
+                    }
+                }
+            }
+            UsePath::External(module_path) => {
+                let first_segment = module_path
+                    .split('/')
+                    .next()
+                    .unwrap_or(module_path.as_str())
+                    .to_string();
+
+                if let Some(dep_root) = dep_map.get(&first_segment) {
+                    let dep_src = dep_root.join("src");
+                    let rel_spec = module_path
+                        .strip_prefix(&(first_segment.clone() + "/"))
+                        .unwrap_or("");
+                    if !rel_spec.is_empty() {
+                        let rel_path =
+                            resolve_package_module_path(&dep_src, rel_spec).ok_or_else(|| {
+                                format!(
+                                    "missing Forge module '{}' in local dependency '{}'",
+                                    rel_spec, first_segment
+                                )
+                            })?;
+                        collect_dependency_module_recursive(
+                            &first_segment,
+                            &dep_src,
+                            &rel_path,
+                            dep_map,
+                            visited,
+                            files,
+                        )?;
+                    }
+                    continue;
+                }
+
+                if let Some(dep_name) = current_dep {
+                    let dep_root = dep_map
+                        .get(dep_name)
+                        .ok_or_else(|| format!("missing local dependency root for '{dep_name}'"))?;
+                    let dep_src = dep_root.join("src");
+                    if let Some(target_rel) =
+                        resolve_internal_module_path(&dep_src, current_rel_dir, &module_path)
+                    {
+                        collect_dependency_module_recursive(
+                            dep_name,
+                            &dep_src,
+                            &target_rel,
+                            dep_map,
+                            visited,
+                            files,
+                        )?;
+                    }
+                }
+            }
+            UsePath::Stdlib(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_dependency_module_recursive(
+    dep_name: &str,
+    dep_src: &Path,
+    rel_path: &Path,
+    dep_map: &std::collections::HashMap<String, PathBuf>,
+    visited: &mut std::collections::HashSet<(String, PathBuf)>,
+    files: &mut Vec<ForgeSourceFile>,
+) -> Result<(), String> {
+    let normalized_rel = normalize_module_rel_path(rel_path);
+    let visit_key = (dep_name.to_string(), normalized_rel.clone());
+    if !visited.insert(visit_key) {
+        return Ok(());
+    }
+
+    let source = if let Some(shim) = shimmed_local_dep_module_source(dep_name, &normalized_rel) {
+        shim
+    } else {
+        let abs_path = dep_src.join(&normalized_rel);
+        fs::read_to_string(&abs_path).map_err(|e| format!("{}: {}", abs_path.display(), e))?
+    };
+    let current_rel_dir = normalized_rel
+        .parent()
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
+    files.push(ForgeSourceFile {
+        rel_path: Path::new(dep_name).join(&normalized_rel),
+        source: source.clone(),
+        source_root: dep_src.to_path_buf(),
+        crate_prefix: Some(dep_name.to_string()),
+    });
+    collect_dependency_imports_from_source(
+        &source,
+        &current_rel_dir,
+        Some(dep_name),
+        dep_map,
+        visited,
+        files,
+    )
+}
+
+fn resolve_package_module_path(dep_src: &Path, module_spec: &str) -> Option<PathBuf> {
+    resolve_module_candidates(dep_src, &[normalize_import_spec(module_spec)])
+}
+
+fn resolve_internal_module_path(
+    source_root: &Path,
+    current_rel_dir: &Path,
+    module_spec: &str,
+) -> Option<PathBuf> {
+    let normalized = normalize_import_spec(module_spec);
+    let relative = normalize_module_rel_path(&current_rel_dir.join(&normalized));
+    let root_relative = normalize_module_rel_path(&normalized);
+    resolve_module_candidates(source_root, &[relative, root_relative])
+}
+
+fn resolve_module_candidates(source_root: &Path, candidates: &[PathBuf]) -> Option<PathBuf> {
+    for candidate in candidates {
+        let file = source_root.join(candidate).with_extension("forge");
+        if file.exists() {
+            return Some(candidate.with_extension("forge"));
+        }
+        let mod_file = source_root.join(candidate).join("mod.forge");
+        if mod_file.exists() {
+            return Some(candidate.join("mod.forge"));
+        }
+    }
+    None
+}
+
+fn normalize_import_spec(module_spec: &str) -> PathBuf {
+    normalize_module_rel_path(Path::new(module_spec.trim_start_matches("./")))
+}
+
+fn normalize_module_rel_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+            Component::Prefix(_) | Component::RootDir => {}
+        }
+    }
+    normalized
+}
+
+fn shimmed_local_dep_module_source(dep_name: &str, rel_path: &Path) -> Option<String> {
+    let rel = rel_path.to_string_lossy().replace('\\', "/");
+    match (dep_name, rel.as_str()) {
+        ("bloom", "ssr.forge") => Some(
+            r#"pub fn make_component(source: string, props: map<string, string>) -> map<string, string> {
+    {
+        "source": source.clone(),
+        "props": source,
+    }
+}
+
+pub fn render_source(source: string, props: map<string, string>) -> string {
+    source
+}
+
+pub fn hydrate_script() -> string {
+    "<script src='/forge.min.js' defer></script>"
+}
+
+pub fn hydrate_script_with(path: string) -> string {
+    "<script>window.__FORGE_BLOOM_WASM_PATH = '{path}'</script><script src='/forge.min.js' defer></script>"
+}
+"#
+            .to_string(),
+        ),
+        ("anvil", "ssr.forge") => Some(
+            r#"pub fn hydrate_script() -> string {
+    "<script src='/forge.min.js' defer></script>"
+}
+
+pub fn layout(html: string, script: string) -> string {
+    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'></head><body><div id='app'>{html}</div>{script}</body></html>"
+}
+"#
+            .to_string(),
+        ),
+        _ => None,
+    }
 }
 
 fn build_module_index(
@@ -2229,6 +2590,7 @@ fn write_synthesized_mod_files(
 fn collect_external_deps(
     source_root: &Path,
     file: &ForgeSourceFile,
+    local_dep_names: &std::collections::HashSet<String>,
     deps: &mut DepsManager,
 ) -> Result<(), String> {
     let module = parse_source(&file.source).map_err(|e| e.to_string())?;
@@ -2248,6 +2610,9 @@ fn collect_external_deps(
                 Some(s) => s,
                 None => &crate_name,
             };
+            if local_dep_names.contains(first_segment) {
+                continue;
+            }
             let local_file = current_dir.join(format!("{}.forge", first_segment));
             let local_dir = current_dir.join(first_segment);
             if local_file.exists() || local_dir.exists() {
@@ -2272,6 +2637,18 @@ fn collect_codegen_deps(rust_code: &str, deps: &mut DepsManager) {
     if rust_code.contains("scopeguard::defer") {
         deps.add("scopeguard");
     }
+}
+
+fn generated_bytes_to_str_helper() -> &'static str {
+    r#"fn bytes_to_str(bytes: Vec<i64>) -> String {
+    let raw = bytes
+        .into_iter()
+        .map(|value| value.clamp(0, 255) as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+"#
 }
 
 fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Result<(), String> {
@@ -2463,7 +2840,6 @@ fn dev_entry(args: &[String]) {
 </html>"##.to_string()
     }
 
-
     for stream in listener.incoming() {
         let snapshots = snapshots.clone();
         match stream {
@@ -2476,7 +2852,10 @@ fn dev_entry(args: &[String]) {
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let first_line = req.lines().next().unwrap_or("");
 
-                if first_line == "GET / HTTP/1.1" || first_line == "GET / HTTP/1.0" || first_line.starts_with("GET / ") {
+                if first_line == "GET / HTTP/1.1"
+                    || first_line == "GET / HTTP/1.0"
+                    || first_line.starts_with("GET / ")
+                {
                     send_html(stream, &startup_page_html());
                 } else if first_line.contains("GET /devtools/snapshots") {
                     let snaps = snapshots.lock().unwrap();

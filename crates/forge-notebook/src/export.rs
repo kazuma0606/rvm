@@ -104,7 +104,10 @@ fn export_output_item(item: &OutputItem) -> Value {
                     "rows": rows,
                 }),
             ),
-            ("text/markdown", Value::String(render_markdown_table(columns, rows))),
+            (
+                "text/markdown",
+                Value::String(render_markdown_table(columns, rows)),
+            ),
         ]),
         OutputItem::PipelineTrace {
             pipeline_name,
@@ -184,7 +187,11 @@ fn render_markdown_table(columns: &[String], rows: &[Vec<Value>]) -> String {
     lines.push(format!("| {} |", columns.join(" | ")));
     lines.push(format!(
         "| {} |",
-        columns.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")
+        columns
+            .iter()
+            .map(|_| "---")
+            .collect::<Vec<_>>()
+            .join(" | ")
     ));
     for row in rows {
         let values = row.iter().map(render_plain_value).collect::<Vec<_>>();

@@ -1,5 +1,5 @@
-use std::io::{self, BufRead, Write};
 use std::collections::BTreeMap;
+use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -360,14 +360,21 @@ fn build_pipeline_trace_output(
     let pipeline_name = graph
         .function_name
         .clone()
-        .or_else(|| graph.roots.first().and_then(|id| {
-            graph
-                .nodes
-                .iter()
-                .find(|node| node.id == *id)
-                .map(|node| node.label.clone())
-        }))
-        .unwrap_or_else(|| format!("pipeline_{}", graph.roots.first().map(|id| id.0).unwrap_or(1)));
+        .or_else(|| {
+            graph.roots.first().and_then(|id| {
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == *id)
+                    .map(|node| node.label.clone())
+            })
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "pipeline_{}",
+                graph.roots.first().map(|id| id.0).unwrap_or(1)
+            )
+        });
 
     let mut previous_out = 0usize;
     let mut saw_count = false;
@@ -475,10 +482,13 @@ fn pipeline_source_snippet(code: &str, graph: &PipelineGraph) -> (String, usize)
                 (span.start, span.end)
             })
         })
-        .fold(None, |acc: Option<(usize, usize)>, (start, end)| match acc {
-            Some((min_start, max_end)) => Some((min_start.min(start), max_end.max(end))),
-            None => Some((start, end)),
-        });
+        .fold(
+            None,
+            |acc: Option<(usize, usize)>, (start, end)| match acc {
+                Some((min_start, max_end)) => Some((min_start.min(start), max_end.max(end))),
+                None => Some((start, end)),
+            },
+        );
 
     let snippet = bounds
         .and_then(|(start, end)| code.get(start..end))
@@ -546,9 +556,9 @@ fn runtime_value_to_json(value: &Value) -> serde_json::Value {
         Value::Option(None) => serde_json::Value::Null,
         Value::Result(Ok(value)) => runtime_value_to_json(value),
         Value::Result(Err(message)) => serde_json::json!({ "error": message }),
-        Value::List(items) => serde_json::Value::Array(
-            items.borrow().iter().map(runtime_value_to_json).collect(),
-        ),
+        Value::List(items) => {
+            serde_json::Value::Array(items.borrow().iter().map(runtime_value_to_json).collect())
+        }
         Value::Map(entries) => serde_json::Value::Object(
             entries
                 .iter()
@@ -561,17 +571,17 @@ fn runtime_value_to_json(value: &Value) -> serde_json::Value {
         Value::Set(items) => {
             serde_json::Value::Array(items.iter().map(runtime_value_to_json).collect())
         }
-        Value::Struct { fields, .. } | Value::Typestate { fields, .. } => serde_json::Value::Object(
-            fields
-                .borrow()
-                .iter()
-                .map(|(name, value)| (name.clone(), runtime_value_to_json(value)))
-                .collect(),
-        ),
+        Value::Struct { fields, .. } | Value::Typestate { fields, .. } => {
+            serde_json::Value::Object(
+                fields
+                    .borrow()
+                    .iter()
+                    .map(|(name, value)| (name.clone(), runtime_value_to_json(value)))
+                    .collect(),
+            )
+        }
         Value::Enum {
-            type_name,
-            variant,
-            ..
+            type_name, variant, ..
         } => serde_json::json!({
             "_type": type_name,
             "variant": variant

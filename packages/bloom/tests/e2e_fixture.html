@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Bloom Bridge E2E</title>
+  </head>
+  <body>
+    <h1 id="title">Before</h1>
+    <button id="btn" type="button">Push</button>
+    <p id="status">pending</p>
+
+    <script src="../forge.min.js"></script>
+    <script>
+      const memory = new WebAssembly.Memory({ initial: 1 });
+      const bytes = new Uint8Array(memory.buffer);
+      const encoder = new TextEncoder();
+
+      bytes.set(encoder.encode("title"), 0);
+      bytes.set(encoder.encode("Hello, Bloom!"), 5);
+      bytes.set(encoder.encode("btn"), 18);
+      bytes.set(encoder.encode("click"), 21);
+
+      let eventCount = 0;
+      const runtime = globalThis.ForgeBloom.createRuntime(memory, {
+        __forge_receive_events(kind, targetId) {
+          eventCount += 1;
+          document.getElementById("status").textContent =
+            "event:" + kind + ":" + targetId + ":" + eventCount;
+        }
+      });
+
+      runtime.applyCommands(
+        new Int32Array([
+          1, 0, 5, 5, 13,
+          3, 18, 3, 21, 5, 7
+        ])
+      );
+
+      document.getElementById("btn").click();
+    </script>
+  </body>
+</html>

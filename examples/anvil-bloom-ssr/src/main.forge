@@ -1,0 +1,23 @@
+use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
+use anvil/anvil.*
+use ./routes/index.{ index_handler, counter_handler, runtime_handler }
+
+let APP = Anvil::new()
+    .get("/", index_handler)
+    .get("/counter", counter_handler)
+    .get("/forge.min.js", runtime_handler)
+
+fn dispatch(raw: RawRequest) -> RawResponse! {
+    APP.dispatch_async(raw).await?
+}
+
+fn main() -> number! {
+    println("Anvil + Bloom SSR example")
+    println("  1. forge build examples/anvil-bloom-ssr")
+    println("  2. forge run examples/anvil-bloom-ssr")
+    println("  3. open http://localhost:8080/counter")
+    tcp_listen_async(8080, dispatch)?
+    ok(0)
+}
+
+main()?

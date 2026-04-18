@@ -1092,22 +1092,33 @@ fn infer_closure_return(
         }
     }
 
-    if let Some(field) = closure_field_access(node) {
-        if let Some(resolved) = resolve_field_path(param_type, &field) {
-            return resolved;
+    // Only use field-access shortcut when the body is a pure field access.
+    // If the body contains a comparison operator (e.g. `s.score >= 80`), the
+    // comparison's return type (bool) takes priority over the field's type (number).
+    let body_is_comparison = [
+        " Gt ", " Ge ", " Lt ", " Le ", " Eq ", " Ne ", " And ", " Or ",
+    ]
+    .iter()
+    .any(|op| body.contains(op));
+
+    if !body_is_comparison {
+        if let Some(field) = closure_field_access(node) {
+            if let Some(resolved) = resolve_field_path(param_type, &field) {
+                return resolved;
+            }
+            add_error(
+                graph,
+                idx,
+                "InvalidFieldAccess",
+                format!(
+                    "field access `{field}` is invalid on `{}`",
+                    param_type.display
+                ),
+                None,
+                Some(param_type.display.clone()),
+            );
+            return ResolvedType::unknown();
         }
-        add_error(
-            graph,
-            idx,
-            "InvalidFieldAccess",
-            format!(
-                "field access `{field}` is invalid on `{}`",
-                param_type.display
-            ),
-            None,
-            Some(param_type.display.clone()),
-        );
-        return ResolvedType::unknown();
     }
 
     infer_simple_body(&body, param_type)
