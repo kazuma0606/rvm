@@ -1,0 +1,4 @@
+use forge/std/fs.{ read_file }
+use ./packages/bloom/src/compiler.{ parse_bloom, bloom_generated }
+let source = read_file("examples/anvil-bloom-ssr/src/components/counter_page.bloom")?
+println(bloom_generated(parse_bloom(source)))

@@ -650,6 +650,10 @@ impl Interpreter {
         interp
     }
 
+    pub fn module_loader_mut(&mut self) -> Option<&mut ModuleLoader> {
+        self.module_loader.as_mut()
+    }
+
     pub fn set_pipeline_trace_nodes(&mut self, nodes: Vec<PipelineTraceNodeRef>) {
         self.pipeline_trace_nodes = nodes;
         self.pipeline_trace_events.clear();
@@ -877,6 +881,49 @@ impl Interpreter {
                 Value::NativeFunction(NativeFn(Rc::new($f)))
             };
         }
+
+        // Bloom WASM SSR ネイティブ関数
+        // ssr.forge から `__bloom_render_wasm(wasm_path, template_html)` として呼ぶ
+        let wasm_project_root = self
+            .module_loader
+            .as_ref()
+            .map(|l| l.project_root().to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        self.define(
+            "__bloom_render_wasm",
+            native!({
+                let root = wasm_project_root.clone();
+                move |args: Vec<Value>| {
+                    let rel_path = match args.first() {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => {
+                            return Err(
+                                "__bloom_render_wasm: arg1 must be string (wasm_path)".to_string()
+                            )
+                        }
+                    };
+                    let template_html = match args.get(1) {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => {
+                            return Err(
+                                "__bloom_render_wasm: arg2 must be string (template_html)".to_string()
+                            )
+                        }
+                    };
+                    let full_path = if std::path::Path::new(&rel_path).is_absolute() {
+                        std::path::PathBuf::from(&rel_path)
+                    } else {
+                        root.join(&rel_path)
+                    };
+                    let wasm_path_str = full_path.to_string_lossy().to_string();
+                    match vm_bloom_render_wasm(&wasm_path_str, &template_html) {
+                        Ok(html) => Ok(Value::Result(Ok(Box::new(Value::String(html))))),
+                        Err(e) => Ok(Value::Result(Err(e))),
+                    }
+                }
+            }),
+            false,
+        );
 
         self.define(
             "some",
@@ -1566,7 +1613,11 @@ impl Interpreter {
                     self.register_wasm_module(symbols)
                         .map_err(RuntimeError::Custom)?;
                 } else if path == "forge/std/fs" {
-                    self.register_fs_module(symbols)
+                    let project_root = self
+                        .module_loader
+                        .as_ref()
+                        .map(|l| l.project_root().to_path_buf());
+                    self.register_fs_module(symbols, project_root)
                         .map_err(RuntimeError::Custom)?;
                 }
                 Ok(Value::Unit)
@@ -6314,8 +6365,29 @@ impl Interpreter {
                 other => other,
             };
 
-            let (status, headers, body) = extract_raw_response(resp_struct);
-            let _ = write_http_response(&stream, status, &headers, &body);
+            let (status, mut headers, body) = extract_raw_response(resp_struct);
+            // X-Forge-Serve-File ヘッダーがある場合はファイルをバイナリで直接返す
+            if let Some(file_path) = headers.remove("X-Forge-Serve-File") {
+                let full_path = self
+                    .module_loader
+                    .as_ref()
+                    .map(|l| l.project_root().join(&file_path))
+                    .unwrap_or_else(|| std::path::PathBuf::from(&file_path));
+                match std::fs::read(&full_path) {
+                    Ok(bytes) => {
+                        let _ = write_http_response_bytes(&stream, status, &headers, &bytes);
+                    }
+                    Err(e) => {
+                        let msg = format!("File not found: {}", e);
+                        let _ = write_http_response(&stream, 404, &headers, &msg);
+                    }
+                }
+            } else {
+                let _ = match body {
+                    RawResponseBody::Text(ref s) => write_http_response(&stream, status, &headers, s),
+                    RawResponseBody::Bytes(ref b) => write_http_response_bytes(&stream, status, &headers, b),
+                };
+            }
         }
     }
 
@@ -6486,53 +6558,134 @@ impl Interpreter {
         );
     }
 
-    fn register_fs_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
+    fn register_fs_module(
+        &mut self,
+        symbols: &UseSymbols,
+        project_root: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
         macro_rules! native {
             ($f:expr) => {
                 Value::NativeFunction(NativeFn(Rc::new($f)))
             };
         }
 
-        let fns: &[(&str, Value)] = &[
+        let root = project_root.unwrap_or_else(|| std::path::PathBuf::from("."));
+        let root_read = root.clone();
+        let root_write = root.clone();
+
+        let fns: Vec<(&str, Value)> = vec![
             (
                 "read_file",
-                native!(|args: Vec<Value>| {
-                    let path = match args.first() {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(v) => return Err(format!("read_file() expects string, got {}", v.type_name())),
-                        None => return Err("read_file() requires 1 argument".to_string()),
-                    };
-                    match std::fs::read_to_string(&path) {
-                        Ok(s) => Ok(Value::Result(Ok(Box::new(Value::String(s))))),
-                        Err(e) => Ok(Value::Result(Err(format!("failed to read '{}': {}", path, e)))),
+                native!({
+                    let root = root_read.clone();
+                    move |args: Vec<Value>| {
+                        let rel = match args.first() {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => {
+                                return Err(format!(
+                                    "read_file() expects string, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                            None => return Err("read_file() requires 1 argument".to_string()),
+                        };
+                        let path = if std::path::Path::new(&rel).is_absolute() {
+                            std::path::PathBuf::from(&rel)
+                        } else {
+                            root.join(&rel)
+                        };
+                        match std::fs::read_to_string(&path) {
+                            Ok(s) => Ok(Value::Result(Ok(Box::new(Value::String(s))))),
+                            Err(e) => Ok(Value::Result(Err(format!(
+                                "failed to read '{}': {}",
+                                path.display(),
+                                e
+                            )))),
+                        }
                     }
                 }),
             ),
             (
                 "write_file",
-                native!(|args: Vec<Value>| {
-                    let path = match args.first() {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => return Err("write_file() requires (path, content)".to_string()),
-                    };
-                    let content = match args.get(1) {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => return Err("write_file() requires (path, content)".to_string()),
-                    };
-                    match std::fs::write(&path, &content) {
-                        Ok(_) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
-                        Err(e) => Ok(Value::Result(Err(format!("failed to write '{}': {}", path, e)))),
+                native!({
+                    let root = root_write.clone();
+                    move |args: Vec<Value>| {
+                        let rel = match args.first() {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => return Err("write_file() requires (path, content)".to_string()),
+                        };
+                        let content = match args.get(1) {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => return Err("write_file() requires (path, content)".to_string()),
+                        };
+                        let path = if std::path::Path::new(&rel).is_absolute() {
+                            std::path::PathBuf::from(&rel)
+                        } else {
+                            root.join(&rel)
+                        };
+                        match std::fs::write(&path, &content) {
+                            Ok(_) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
+                            Err(e) => Ok(Value::Result(Err(format!(
+                                "failed to write '{}': {}",
+                                path.display(),
+                                e
+                            )))),
+                        }
                     }
                 }),
             ),
             (
                 "file_exists",
-                native!(|args: Vec<Value>| {
-                    let path = match args.first() {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => return Err("file_exists() requires 1 argument".to_string()),
-                    };
-                    Ok(Value::Bool(std::path::Path::new(&path).is_file()))
+                native!({
+                    let root = root.clone();
+                    move |args: Vec<Value>| {
+                        let rel = match args.first() {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => return Err("file_exists() requires 1 argument".to_string()),
+                        };
+                        let path = if std::path::Path::new(&rel).is_absolute() {
+                            std::path::PathBuf::from(&rel)
+                        } else {
+                            root.join(&rel)
+                        };
+                        Ok(Value::Bool(path.is_file()))
+                    }
+                }),
+            ),
+            (
+                "read_file_bytes",
+                native!({
+                    let root = root_read.clone();
+                    move |args: Vec<Value>| {
+                        let rel = match args.first() {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => return Err(format!(
+                                "read_file_bytes() expects string, got {}", v.type_name()
+                            )),
+                            None => return Err("read_file_bytes() requires 1 argument".to_string()),
+                        };
+                        let path = if std::path::Path::new(&rel).is_absolute() {
+                            std::path::PathBuf::from(&rel)
+                        } else {
+                            root.join(&rel)
+                        };
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                let list = bytes
+                                    .iter()
+                                    .map(|b| Value::Int(*b as i64))
+                                    .collect::<Vec<_>>();
+                                Ok(Value::Result(Ok(Box::new(Value::List(
+                                    std::rc::Rc::new(std::cell::RefCell::new(list)),
+                                )))))
+                            }
+                            Err(e) => Ok(Value::Result(Err(format!(
+                                "failed to read '{}': {}",
+                                path.display(),
+                                e
+                            )))),
+                        }
+                    }
                 }),
             ),
         ];
@@ -6555,8 +6708,14 @@ impl Interpreter {
                     .unwrap_or_else(|| name.to_string()),
                 _ => name.to_string(),
             };
-            self.record_import(name, &bind_name, "forge/std/fs", val.clone(), matches!(symbols, UseSymbols::All))
-                .map_err(|e| e.to_string())?;
+            self.record_import(
+                name,
+                &bind_name,
+                "forge/std/fs",
+                val.clone(),
+                matches!(symbols, UseSymbols::All),
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -7071,6 +7230,242 @@ fn vm_wasm_call_from_file(
         .map_err(|err| format!("WasmCallError: wasm output is not valid utf-8: {}", err))
 }
 
+// ─── Bloom WASM SSR ──────────────────────────────────────────────────────────
+
+/// Bloom WASM コンポーネントを SSR モードで実行し、HTML に初期状態を注入する。
+///
+/// 手順:
+/// 1. wasmtime で `.wasm` をロード
+/// 2. `__forge_init()` を実行 → コマンドバッファに OP_SET_TEXT / OP_ADD_LISTENER を書き込む
+/// 3. `__forge_pull_commands_ptr/len` でバッファを取得
+/// 4. バッファを解釈して `template_html` の対応要素にテキスト/イベント属性を注入
+/// 5. 更新後の HTML を返す
+///
+/// `template_html` は `render(<Component />)` が生成した SSR HTML 骨格を想定。
+pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<String, String> {
+    let engine = Engine::default();
+    let module = WasmModule::from_file(&engine, wasm_path)
+        .map_err(|e| format!("BloomWasmLoad: {}: {}", wasm_path, e))?;
+    let mut store: Store<()> = Store::new(&engine, ());
+
+    let instance = Instance::new(&mut store, &module, &[])
+        .map_err(|e| format!("BloomWasmInstantiate: {}", e))?;
+
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .ok_or_else(|| "BloomWasmSSR: WASM exports no memory".to_string())?;
+
+    // __forge_init() — 状態初期化 + コマンドバッファへの書き込み
+    if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&mut store, "__forge_init") {
+        init_fn
+            .call(&mut store, ())
+            .map_err(|e| format!("BloomWasmSSR __forge_init: {}", e))?;
+    } else {
+        return Err("BloomWasmSSR: __forge_init not found".to_string());
+    }
+
+    // コマンドバッファのポインタと長さを取得
+    let ptr_fn = instance
+        .get_typed_func::<(), i32>(&mut store, "__forge_pull_commands_ptr")
+        .map_err(|e| format!("BloomWasmSSR: __forge_pull_commands_ptr: {}", e))?;
+    let len_fn = instance
+        .get_typed_func::<(), i32>(&mut store, "__forge_pull_commands_len")
+        .map_err(|e| format!("BloomWasmSSR: __forge_pull_commands_len: {}", e))?;
+
+    let cmd_ptr = ptr_fn
+        .call(&mut store, ())
+        .map_err(|e| format!("BloomWasmSSR ptr call: {}", e))? as usize;
+    let cmd_len = len_fn
+        .call(&mut store, ())
+        .map_err(|e| format!("BloomWasmSSR len call: {}", e))? as usize;
+
+    // WASM メモリ全体をコピー
+    let mem_size = memory.data_size(&store);
+    let mut mem_bytes = vec![0u8; mem_size];
+    memory
+        .read(&store, 0, &mut mem_bytes)
+        .map_err(|e| format!("BloomWasmSSR mem read: {}", e))?;
+
+    // コマンドバッファを i32 スライスとして解釈
+    if cmd_ptr + cmd_len * 4 > mem_size {
+        return Err("BloomWasmSSR: command buffer out of bounds".to_string());
+    }
+    let mut commands: Vec<i32> = Vec::with_capacity(cmd_len);
+    for k in 0..cmd_len {
+        let off = cmd_ptr + k * 4;
+        let word = i32::from_le_bytes([
+            mem_bytes[off],
+            mem_bytes[off + 1],
+            mem_bytes[off + 2],
+            mem_bytes[off + 3],
+        ]);
+        commands.push(word);
+    }
+
+    Ok(bloom_apply_commands_to_html(
+        template_html,
+        &commands,
+        &mem_bytes,
+    ))
+}
+
+const BLOOM_OP_SET_TEXT: i32 = 1;
+const BLOOM_OP_SET_ATTR: i32 = 2;
+const BLOOM_OP_ADD_LISTENER: i32 = 3;
+const BLOOM_OP_ATTACH: i32 = 9;
+
+/// コマンドバッファの内容を HTML テンプレートに適用する。
+fn bloom_apply_commands_to_html(html: &str, commands: &[i32], mem: &[u8]) -> String {
+    let mut result = html.to_string();
+    let mut i = 0;
+    while i < commands.len() {
+        let op = commands[i];
+        i += 1;
+        match op {
+            BLOOM_OP_SET_TEXT => {
+                if i + 4 > commands.len() {
+                    break;
+                }
+                let id_ptr = commands[i] as usize;
+                i += 1;
+                let id_len = commands[i] as usize;
+                i += 1;
+                let v_ptr = commands[i] as usize;
+                i += 1;
+                let v_len = commands[i] as usize;
+                i += 1;
+                if let (Some(id_b), Some(v_b)) = (
+                    mem.get(id_ptr..id_ptr + id_len),
+                    mem.get(v_ptr..v_ptr + v_len),
+                ) {
+                    let id = String::from_utf8_lossy(id_b);
+                    let val = String::from_utf8_lossy(v_b);
+                    result = bloom_inject_text(&result, &id, &val);
+                }
+            }
+            BLOOM_OP_SET_ATTR => {
+                if i + 6 > commands.len() {
+                    break;
+                }
+                let id_ptr = commands[i] as usize;
+                i += 1;
+                let id_len = commands[i] as usize;
+                i += 1;
+                let attr_ptr = commands[i] as usize;
+                i += 1;
+                let attr_len = commands[i] as usize;
+                i += 1;
+                let v_ptr = commands[i] as usize;
+                i += 1;
+                let v_len = commands[i] as usize;
+                i += 1;
+                if let (Some(id_b), Some(attr_b), Some(v_b)) = (
+                    mem.get(id_ptr..id_ptr + id_len),
+                    mem.get(attr_ptr..attr_ptr + attr_len),
+                    mem.get(v_ptr..v_ptr + v_len),
+                ) {
+                    let id = String::from_utf8_lossy(id_b);
+                    let attr = String::from_utf8_lossy(attr_b);
+                    let val = String::from_utf8_lossy(v_b);
+                    result = bloom_inject_attr(&result, &id, &attr, &val);
+                }
+            }
+            BLOOM_OP_ADD_LISTENER => {
+                if i + 6 > commands.len() {
+                    break;
+                }
+                let id_ptr = commands[i] as usize;
+                i += 1;
+                let id_len = commands[i] as usize;
+                i += 1;
+                let ev_ptr = commands[i] as usize;
+                i += 1;
+                let ev_len = commands[i] as usize;
+                i += 1;
+                let h_ptr = commands[i] as usize;
+                i += 1;
+                let h_len = commands[i] as usize;
+                i += 1;
+                if let (Some(id_b), Some(ev_b), Some(h_b)) = (
+                    mem.get(id_ptr..id_ptr + id_len),
+                    mem.get(ev_ptr..ev_ptr + ev_len),
+                    mem.get(h_ptr..h_ptr + h_len),
+                ) {
+                    let id = String::from_utf8_lossy(id_b);
+                    let event = String::from_utf8_lossy(ev_b);
+                    let handler = String::from_utf8_lossy(h_b);
+                    let attr_name = format!("data-on-{}", event);
+                    result = bloom_inject_attr(&result, &id, &attr_name, &handler);
+                }
+            }
+            BLOOM_OP_ATTACH => {
+                if i + 2 > commands.len() {
+                    break;
+                }
+                let id_ptr = commands[i] as usize;
+                i += 1;
+                let id_len = commands[i] as usize;
+                i += 1;
+                if let Some(id_b) = mem.get(id_ptr..id_ptr + id_len) {
+                    let id = String::from_utf8_lossy(id_b);
+                    result = bloom_inject_attr(&result, &id, "data-bloom-attached", "true");
+                }
+            }
+            0 => break, // パディングゼロ — バッファ終端
+            _ => break,
+        }
+    }
+    result
+}
+
+/// id="X" を持つ要素のテキスト内容を置換する。
+/// `<... id="X">OLD</tag>` → `<... id="X">NEW</tag>`
+fn bloom_inject_text(html: &str, id: &str, text: &str) -> String {
+    let id_attr = format!(r#" id="{}""#, id);
+    let Some(tag_start) = html.find(&id_attr) else {
+        return html.to_string();
+    };
+    // タグの終わり '>' を探す
+    let Some(rel_gt) = html[tag_start..].find('>') else {
+        return html.to_string();
+    };
+    let content_start = tag_start + rel_gt + 1;
+    // 直後の '</' を内容の終わりとする
+    let Some(rel_lt) = html[content_start..].find("</") else {
+        return html.to_string();
+    };
+    let content_end = content_start + rel_lt;
+    format!(
+        "{}{}{}",
+        &html[..content_start],
+        html_escape_text(text),
+        &html[content_end..]
+    )
+}
+
+/// id="X" を持つ要素に属性を追加する。
+/// 既に同名の属性が存在する場合はスキップ（重複防止）。
+fn bloom_inject_attr(html: &str, id: &str, attr_name: &str, attr_val: &str) -> String {
+    let id_attr = format!(r#" id="{}""#, id);
+    // 既に attr_name が存在するか確認（タグ内に限定）
+    let Some(tag_start) = html.find(&id_attr) else {
+        return html.to_string();
+    };
+    let tag_end = html[tag_start..].find('>').map(|p| tag_start + p).unwrap_or(html.len());
+    if html[tag_start..tag_end].contains(attr_name) {
+        return html.to_string(); // 既にある場合はスキップ
+    }
+    let new_attr = format!(r#" id="{}" {}="{}""#, id, attr_name, attr_val);
+    html.replacen(&id_attr, &new_attr, 1)
+}
+
+/// HTML テキスト内容のエスケープ（最低限）
+fn html_escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// fields HashMap から HttpRequest Value を作る
 fn http_req_from_map(fields: HashMap<String, Value>) -> Value {
     Value::Struct {
@@ -7306,14 +7701,20 @@ fn parse_path_query(full_path: &str) -> (String, std::collections::HashMap<Strin
     }
 }
 
-fn extract_raw_response(val: Value) -> (i64, std::collections::HashMap<String, String>, String) {
+/// HTTP レスポンス本体: テキストまたはバイナリ
+enum RawResponseBody {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+fn extract_raw_response(val: Value) -> (i64, std::collections::HashMap<String, String>, RawResponseBody) {
     let fields = match val {
         Value::Struct { fields, .. } => fields,
         _ => {
             return (
                 500,
                 std::collections::HashMap::new(),
-                "invalid response".to_string(),
+                RawResponseBody::Text("invalid response".to_string()),
             )
         }
     };
@@ -7323,9 +7724,27 @@ fn extract_raw_response(val: Value) -> (i64, std::collections::HashMap<String, S
         Some(Value::Float(n)) => *n as i64,
         _ => 200,
     };
-    let body = match f.get("body") {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
+    // body が list<number> の場合はバイナリとして扱う
+    // Response.body は Option<T> なので Value::Option(Some(inner)) でラップされている
+    let body_inner = match f.get("body") {
+        Some(Value::Option(Some(inner))) => Some(inner.as_ref()),
+        Some(Value::List(_)) | Some(Value::String(_)) => f.get("body"),
+        _ => None,
+    };
+    let body = match body_inner {
+        Some(Value::List(items)) => {
+            let bytes: Vec<u8> = items
+                .borrow()
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Int(n) => Some(*n as u8),
+                    _ => None,
+                })
+                .collect();
+            RawResponseBody::Bytes(bytes)
+        }
+        Some(Value::String(s)) => RawResponseBody::Text(s.clone()),
+        _ => RawResponseBody::Text(String::new()),
     };
     let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Some(Value::Map(hmap)) = f.get("headers") {
@@ -7343,6 +7762,15 @@ fn write_http_response(
     status: i64,
     headers: &std::collections::HashMap<String, String>,
     body: &str,
+) -> std::io::Result<()> {
+    write_http_response_bytes(stream, status, headers, body.as_bytes())
+}
+
+fn write_http_response_bytes(
+    mut stream: &std::net::TcpStream,
+    status: i64,
+    headers: &std::collections::HashMap<String, String>,
+    body: &[u8],
 ) -> std::io::Result<()> {
     use std::io::Write;
     let reason = match status {
@@ -7363,7 +7791,7 @@ fn write_http_response(
         write!(stream, "{}: {}\r\n", k, v)?;
     }
     write!(stream, "\r\n")?;
-    write!(stream, "{}", body)?;
+    stream.write_all(body)?;
     stream.flush()
 }
 
@@ -11758,6 +12186,94 @@ s == "Hello"
             let score = 92
             let s = { name, score }
             if s.name == "Alice" && s.score == 92 { "ok" } else { "ng" }
+        "#);
+        assert_eq!(result.unwrap(), Value::String("ok".to_string()));
+    }
+
+    // ─── Bloom WASM SSR ユニットテスト ─────────────────────────────────────
+
+    #[test]
+    fn bloom_inject_text_replaces_content() {
+        let html = r#"<span id="count_display">old</span>"#;
+        let result = bloom_inject_text(html, "count_display", "42");
+        assert_eq!(result, r#"<span id="count_display">42</span>"#);
+    }
+
+    #[test]
+    fn bloom_inject_text_noop_on_missing_id() {
+        let html = r#"<span id="other">old</span>"#;
+        let result = bloom_inject_text(html, "count_display", "42");
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn bloom_inject_attr_adds_attribute() {
+        let html = r#"<button id="btn-inc" class="btn">+</button>"#;
+        let result = bloom_inject_attr(html, "btn-inc", "data-on-click", "increment");
+        assert!(result.contains(r#"data-on-click="increment""#));
+        assert!(result.contains(r#"id="btn-inc""#));
+    }
+
+    #[test]
+    fn bloom_apply_commands_set_text() {
+        // コマンドバッファ: OP_SET_TEXT(id_ptr, id_len, val_ptr, val_len)
+        let id_bytes = b"count_display";
+        let val_bytes = b"7";
+
+        // フラットなメモリレイアウト
+        let mut mem = vec![0u8; 64];
+        let id_off: usize = 8;
+        let val_off: usize = 8 + id_bytes.len();
+        mem[id_off..id_off + id_bytes.len()].copy_from_slice(id_bytes);
+        mem[val_off..val_off + val_bytes.len()].copy_from_slice(val_bytes);
+
+        let commands = vec![
+            1i32,          // OP_SET_TEXT
+            id_off as i32, // id_ptr
+            id_bytes.len() as i32,
+            val_off as i32, // val_ptr
+            val_bytes.len() as i32,
+        ];
+
+        let html = r#"<span id="count_display">0</span>"#;
+        let result = bloom_apply_commands_to_html(html, &commands, &mem);
+        assert_eq!(result, r#"<span id="count_display">7</span>"#);
+    }
+
+    #[test]
+    fn bloom_apply_commands_add_listener() {
+        let id_bytes = b"btn-inc";
+        let event_bytes = b"click";
+        let fn_bytes = b"increment";
+
+        let mut mem = vec![0u8; 128];
+        let id_off: usize = 8;
+        let ev_off: usize = id_off + id_bytes.len();
+        let fn_off: usize = ev_off + event_bytes.len();
+        mem[id_off..id_off + id_bytes.len()].copy_from_slice(id_bytes);
+        mem[ev_off..ev_off + event_bytes.len()].copy_from_slice(event_bytes);
+        mem[fn_off..fn_off + fn_bytes.len()].copy_from_slice(fn_bytes);
+
+        let commands = vec![
+            3i32, // OP_ADD_LISTENER
+            id_off as i32,
+            id_bytes.len() as i32,
+            ev_off as i32,
+            event_bytes.len() as i32,
+            fn_off as i32,
+            fn_bytes.len() as i32,
+        ];
+
+        let html = r#"<button id="btn-inc">+</button>"#;
+        let result = bloom_apply_commands_to_html(html, &commands, &mem);
+        assert!(result.contains(r#"data-on-click="increment""#));
+    }
+
+    #[test]
+    fn bloom_render_wasm_builtin_is_registered() {
+        let result = run(r#"
+            let f = __bloom_render_wasm
+            "ok"
         "#);
         assert_eq!(result.unwrap(), Value::String("ok".to_string()));
     }

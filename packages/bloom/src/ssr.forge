@@ -730,6 +730,23 @@ pub fn hydrate_inline_script(source: string) -> string {
     "<script>\n{js_body}\n{update_fn}\n{event_fn}\n</script>"
 }
 
+/// WASM コンポーネントをサーバーサイドで実行して HTML を生成する。
+///
+/// `wasm_path` に Bloom の `.wasm` ファイルのパスを指定する。
+/// `template_html` に `render(<Component />)` で生成した SSR HTML 骨格を渡す。
+///
+/// WASM の `__forge_init()` を実行し、コマンドバッファの OP_SET_TEXT / OP_ADD_LISTENER を
+/// `template_html` に注入した HTML を返す。
+///
+/// 例:
+/// ```forge
+/// let html_base = render(<CounterPage />)
+/// let html = render_wasm("/dist/counter_page.wasm", html_base)?
+/// ```
+pub fn render_wasm(wasm_path: string, template_html: string) -> string! {
+    __bloom_render_wasm(wasm_path, template_html)
+}
+
 pub fn hydrate_script_with(wasm_path: string) -> string {
     let quote = char_from_byte(34)
     let open_brace = char_from_byte(123)

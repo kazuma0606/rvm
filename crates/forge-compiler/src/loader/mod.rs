@@ -61,6 +61,9 @@ pub struct ModuleLoader {
     pub dep_paths: HashMap<String, PathBuf>,
     /// キャッシュ: use_path → パース済み AST
     cache: HashMap<String, Vec<Stmt>>,
+    /// インメモリ前処理済みソース: 絶対パス → 変換済みソース文字列
+    /// ディスクのファイルより優先して使用される（プリプロセッサ用）
+    source_overrides: HashMap<PathBuf, String>,
 }
 
 /// mod.forge の解析結果: re-export されたシンボルとその元パス
@@ -77,12 +80,23 @@ impl ModuleLoader {
             project_root,
             dep_paths: HashMap::new(),
             cache: HashMap::new(),
+            source_overrides: HashMap::new(),
         }
     }
 
     /// ローカル依存パスを登録する（[dependencies] path = "..." から）
     pub fn add_dep_path(&mut self, name: String, path: PathBuf) {
         self.dep_paths.insert(name, path);
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// インメモリ前処理済みソースを登録する。
+    /// `load()` 時にディスクより優先して使用される。
+    pub fn add_source_override(&mut self, path: PathBuf, source: String) {
+        self.source_overrides.insert(path, source);
     }
 
     /// `use_path` からファイルの絶対パスを解決する
@@ -351,10 +365,23 @@ impl ModuleLoader {
 
         let file_path = self.resolve_path(use_path)?;
 
-        let source = std::fs::read_to_string(&file_path).map_err(|e| LoadError::Io {
-            path: file_path.clone(),
-            message: e.to_string(),
-        })?;
+        let source = {
+            // source_overrides のキーは canonicalize() 済みのパスの場合があるため両方で照合する
+            let canonical = file_path.canonicalize().ok();
+            let overridden = self.source_overrides.get(&file_path).or_else(|| {
+                canonical
+                    .as_ref()
+                    .and_then(|c| self.source_overrides.get(c))
+            });
+            if let Some(src) = overridden {
+                src.clone()
+            } else {
+                std::fs::read_to_string(&file_path).map_err(|e| LoadError::Io {
+                    path: file_path.clone(),
+                    message: e.to_string(),
+                })?
+            }
+        };
 
         let module = parse_source(&source).map_err(|e| LoadError::Parse {
             path: file_path.clone(),

@@ -5,3 +5,4 @@ pub mod lexer;
 pub mod loader;
 pub mod parser;
 pub mod typechecker;
+pub mod wasm_backend;

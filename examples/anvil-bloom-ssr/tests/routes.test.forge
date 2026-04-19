@@ -1,17 +1,27 @@
-use anvil/ssr.{ layout }
-use bloom/ssr.{ render_source, hydrate_script_with }
+use bloom/ssr.{ render_source, hydrate_inline_script }
 
-test "anvil bloom example: counter route renders SSR html" {
+test "counter page SSR renders html with Counter heading" {
     let html = render(<CounterPage />)
-    let script = hydrate_script_with("/components/counter_page.wasm")
-    let doc = layout(html, script)
-    assert(doc.contains("Counter"))
-    assert(doc.contains("/forge.min.js"))
-    assert(doc.contains("/components/counter_page.wasm"))
+    assert(html.contains("Counter"))
 }
 
-test "anvil bloom example: hydrate script targets component wasm" {
-    let script = hydrate_script_with("/components/counter_page.wasm")
-    assert(script.contains("forge.min.js"))
-    assert(script.contains("/components/counter_page.wasm"))
+test "counter page SSR renders buttons with event attributes" {
+    let html = render(<CounterPage />)
+    assert(html.contains("data-on-click"))
+}
+
+test "counter page SSR renders reactive count span" {
+    let html = render(<CounterPage />)
+    assert(html.contains("data-reactive"))
+}
+
+test "counter page hydrate script contains inline script tag" {
+    let script = hydrate_inline_script(<CounterPage />)
+    assert(script.contains("<script>"))
+    assert(script.contains("</script>"))
+}
+
+test "counter page hydrate script contains bloom update function" {
+    let script = hydrate_inline_script(<CounterPage />)
+    assert(script.contains("__bloom_update"))
 }

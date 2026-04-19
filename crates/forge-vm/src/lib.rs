@@ -6,3 +6,5 @@ pub mod env;
 pub mod interpreter;
 pub mod test_runner;
 pub mod value;
+
+pub use interpreter::vm_bloom_render_wasm;

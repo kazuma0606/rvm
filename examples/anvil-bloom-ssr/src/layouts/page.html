@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Counter page */
+      .counter-page {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #fff;
+        padding: 1rem;
+        position: relative;
+      }
+      .back-link {
+        position: absolute;
+        top: 1.5rem;
+        left: 2rem;
+        font-size: 0.875rem;
+        color: #94a3b8;
+        text-decoration: none;
+        transition: color .15s;
+      }
+      .back-link:hover { color: #334155; }
+      .counter-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2rem;
+        width: 100%;
+        max-width: 24rem;
+      }
+      .counter-title-wrap { text-align: center; }
+      .counter-title {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(to right, #ec4899, #7c3aed);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      .counter-sub { color: #94a3b8; font-size: 0.875rem; margin-top: 0.5rem; }
+      .counter-widget {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 1rem;
+        padding: 1.5rem 2rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,.06);
+      }
+      .btn-dec, .btn-inc {
+        width: 3rem;
+        height: 3rem;
+        border-radius: 50%;
+        border: 1px solid #cbd5e1;
+        font-size: 1.5rem;
+        font-weight: 300;
+        cursor: pointer;
+        transition: all .15s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .btn-dec { background: #fff; color: #475569; }
+      .btn-dec:hover { background: #e2e8f0; border-color: #94a3b8; }
+      .btn-inc { background: #7c3aed; color: #fff; border-color: #7c3aed; box-shadow: 0 4px 12px rgba(124,58,237,.3); }
+      .btn-inc:hover { background: #6d28d9; }
+      .btn-dec:active, .btn-inc:active { transform: scale(.93); }
+      .counter-value {
+        font-size: 3rem;
+        font-weight: 700;
+        color: #0f172a;
+        min-width: 3.5rem;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      .wasm-badge {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.75rem;
+        color: #94a3b8;
+      }
+      .badge-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: #34d399;
+        display: inline-block;
+      }
+    </style>
+  </head>
+  <body class="bg-white text-slate-900 antialiased">
+    <div id="app">__CONTENT__</div>
+    __SCRIPT__
+  </body>
+</html>

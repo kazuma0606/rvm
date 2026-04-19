@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 regex = "1"
+forge-compiler = { path = "../forge-compiler" }
 

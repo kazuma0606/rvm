@@ -1,11 +1,12 @@
 use forge/std/net.{ tcp_listen_async, RawRequest, RawResponse }
 use anvil/anvil.*
-use ./routes/index.{ index_handler, counter_handler, runtime_handler }
+use ./routes/index.{ index_handler, counter_handler, runtime_handler, wasm_handler }
 
 let APP = Anvil::new()
     .get("/", index_handler)
     .get("/counter", counter_handler)
     .get("/forge.min.js", runtime_handler)
+    .get("/components/counter_page.wasm", wasm_handler)
 
 fn dispatch(raw: RawRequest) -> RawResponse! {
     APP.dispatch_async(raw).await?

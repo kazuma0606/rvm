@@ -32,6 +32,19 @@ impl<T> Response<T> {
         }
     }
 
+    fn bytes(body: list<number>) -> Response<list<number>> {
+        let headers: map<string, string> = {}
+        Response {
+            status: 200,
+            headers: headers,
+            body: some(body),
+        }
+    }
+
+    fn file(path: string) -> Response<string> {
+        Response::text("").header("X-Forge-Serve-File", path)
+    }
+
     fn empty(code: number) -> Response<()> {
         let headers: map<string, string> = {}
         Response {

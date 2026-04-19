@@ -1,0 +1,38 @@
+<div class="min-h-screen flex flex-col">
+  <!-- Navbar -->
+  <nav class="flex items-center justify-between px-8 py-4 border-b border-slate-100">
+    <span class="text-sm text-slate-400 font-mono">src/app/page.bloom</span>
+    <a href="https://github.com" class="text-sm text-slate-500 hover:text-slate-900 transition-colors">GitHub</a>
+  </nav>
+
+  <!-- Hero -->
+  <main class="flex-1 flex flex-col items-center justify-center gap-4 text-center px-4">
+    <h1 class="text-8xl font-bold tracking-tight bg-gradient-to-r from-pink-500 to-violet-600 bg-clip-text text-transparent">
+      Bloom
+    </h1>
+    <p class="text-slate-500 text-lg">
+      on <span class="font-semibold text-slate-700">ForgeScript</span>
+    </p>
+    <a href="/counter"
+       class="mt-6 inline-flex items-center gap-2 px-6 py-3 rounded-full bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 transition-colors">
+      Try the counter demo &rarr;
+    </a>
+  </main>
+
+  <!-- Cards -->
+  <section class="max-w-3xl mx-auto w-full px-8 pb-16 grid grid-cols-1 sm:grid-cols-3 gap-4">
+    <a href="/counter"
+       class="border border-slate-200 rounded-xl p-5 hover:border-slate-400 hover:shadow-sm transition-all group">
+      <p class="font-semibold text-slate-800 group-hover:text-violet-600 transition-colors">Counter &rarr;</p>
+      <p class="text-sm text-slate-500 mt-1">WASM ハイドレーション デモ</p>
+    </a>
+    <div class="border border-slate-200 rounded-xl p-5">
+      <p class="font-semibold text-slate-800">Docs &rarr;</p>
+      <p class="text-sm text-slate-500 mt-1">Bloom の機能と API の詳細</p>
+    </div>
+    <div class="border border-slate-200 rounded-xl p-5">
+      <p class="font-semibold text-slate-800">Templates &rarr;</p>
+      <p class="text-sm text-slate-500 mt-1">スターターテンプレート集</p>
+    </div>
+  </section>
+</div>

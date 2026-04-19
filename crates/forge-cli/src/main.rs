@@ -5,6 +5,7 @@ mod forge_toml;
 mod new;
 mod templates;
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -14,8 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::forge_toml::{DependencyValue, ForgeToml};
 use bloom_compiler::{
-    collect_bloom_files, compile_generated_forge_to_wasm, generated_forge_path,
-    inline_critical_css, preprocess_render_calls, wasm_output_path,
+    collect_bloom_files, compile_bloom_direct, compile_bloom_to_wasm,
+    compile_generated_forge_to_wasm, extract_script_section, generated_forge_path,
+    inline_critical_css, plan_from_bloom_source, plan_to_generated_forge, preprocess_render_calls,
+    wasm_output_path,
 };
 use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
@@ -280,13 +283,13 @@ fn run_entry(path: Option<&str>) {
             project_dir,
             forge_toml,
         }) => {
-            preprocess_project_forge_sources(&project_dir, false);
+            let overrides = preprocess_project_forge_sources(&project_dir, false);
             let entry = project_dir.join(&forge_toml.package.entry);
             let dep_paths = forge_toml.local_dep_paths(&project_dir);
             if dep_paths.is_empty() {
-                run_file(&entry.to_string_lossy());
+                run_file_with_overrides(&entry.to_string_lossy(), overrides);
             } else {
-                run_file_with_deps(&entry, dep_paths);
+                run_file_with_deps_and_overrides(&entry, dep_paths, overrides);
             }
         }
         Err(e) => {
@@ -336,16 +339,23 @@ fn run_file_with_deps(entry: &Path, dep_paths: Vec<(String, PathBuf)>) {
     }
 }
 
-fn test_file(
-    path: &str,
-    filter: Option<&str>,
-    project_root: Option<&Path>,
-    dep_paths: Option<Vec<(String, PathBuf)>>,
+fn run_file_with_overrides(path: &str, overrides: HashMap<PathBuf, String>) {
+    run_file_with_deps_and_overrides(Path::new(path), vec![], overrides);
+}
+
+fn run_file_with_deps_and_overrides(
+    entry: &Path,
+    dep_paths: Vec<(String, PathBuf)>,
+    overrides: HashMap<PathBuf, String>,
 ) {
-    let source = match fs::read_to_string(path) {
+    let source = match fs::read_to_string(entry) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
+            eprintln!(
+                "エラー: ファイル '{}' を読み込めませんでした: {}",
+                entry.display(),
+                e
+            );
             std::process::exit(1);
         }
     };
@@ -358,14 +368,78 @@ fn test_file(
         }
     };
 
-    let file_path = std::path::Path::new(path);
+    let project_root = entry
+        .parent()
+        .and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        })
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut interp = Interpreter::with_project_root_and_deps(project_root, dep_paths);
+    if let Some(loader) = interp.module_loader_mut() {
+        for (path, source) in overrides {
+            loader.add_source_override(path, source);
+        }
+    }
+    if let Err(e) = interp.eval(&module) {
+        eprintln!("実行エラー: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn test_file(
+    path: &str,
+    filter: Option<&str>,
+    project_root: Option<&Path>,
+    dep_paths: Option<Vec<(String, PathBuf)>>,
+) {
+    test_file_with_overrides(path, filter, project_root, dep_paths, HashMap::new());
+}
+
+fn test_file_with_overrides(
+    path: &str,
+    filter: Option<&str>,
+    project_root: Option<&Path>,
+    dep_paths: Option<Vec<(String, PathBuf)>>,
+    overrides: HashMap<PathBuf, String>,
+) {
+    let file_path_buf = PathBuf::from(path);
+    let canonical = file_path_buf.canonicalize().ok();
+    let source = overrides
+        .get(&file_path_buf)
+        .or_else(|| canonical.as_ref().and_then(|c| overrides.get(c)))
+        .cloned()
+        .or_else(|| fs::read_to_string(path).ok())
+        .unwrap_or_else(|| {
+            eprintln!("エラー: ファイル '{}' を読み込めませんでした", path);
+            std::process::exit(1);
+        });
+
+    let module = match parse_source(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("構文エラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     let mut interp = match (project_root, dep_paths) {
         (Some(root), Some(dep_paths)) => {
             Interpreter::with_project_root_and_deps(root.to_path_buf(), dep_paths)
         }
         (Some(root), None) => Interpreter::with_project_root(root.to_path_buf()),
-        (None, _) => Interpreter::with_file_path(file_path),
+        (None, _) => Interpreter::with_file_path(&file_path_buf),
     };
+    if let Some(loader) = interp.module_loader_mut() {
+        for (p, s) in overrides {
+            loader.add_source_override(p, s);
+        }
+    }
     interp.is_test_mode = true;
 
     let results = interp.run_tests(&module.stmts, filter);
@@ -1464,7 +1538,7 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
             project_dir,
             forge_toml,
         }) => {
-            preprocess_project_forge_sources(&project_dir, true);
+            let overrides = preprocess_project_forge_sources(&project_dir, true);
             let dep_paths = forge_toml.local_dep_paths(&project_dir);
             let tests_dir = project_dir.join("tests");
             let test_files = collect_project_test_files(&tests_dir);
@@ -1474,7 +1548,7 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
             }
 
             for test_file_path in test_files {
-                test_file(
+                test_file_with_overrides(
                     &test_file_path.to_string_lossy(),
                     filter,
                     Some(&project_dir),
@@ -1483,6 +1557,7 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
                     } else {
                         Some(dep_paths.clone())
                     },
+                    overrides.clone(),
                 );
             }
         }
@@ -1531,17 +1606,22 @@ fn build_web_project(project_dir: &Path, output: Option<&str>) {
     }
 }
 
-fn preprocess_project_forge_sources(project_dir: &Path, include_tests: bool) {
+fn preprocess_project_forge_sources(
+    project_dir: &Path,
+    include_tests: bool,
+) -> HashMap<PathBuf, String> {
+    let mut overrides = HashMap::new();
     let source_root = project_dir.join("src");
-    if let Err(e) = preprocess_forge_files_in_dir(&source_root, project_dir) {
+    if let Err(e) = collect_preprocessed_forge_files(&source_root, project_dir, &mut overrides) {
         eprintln!("警告: render(<...>) 前処理に失敗: {}", e);
     }
     if include_tests {
         let tests_dir = project_dir.join("tests");
-        if let Err(e) = preprocess_forge_files_in_dir(&tests_dir, project_dir) {
+        if let Err(e) = collect_preprocessed_forge_files(&tests_dir, project_dir, &mut overrides) {
             eprintln!("警告: tests/ の render(<...>) 前処理に失敗: {}", e);
         }
     }
+    overrides
 }
 
 fn collect_bloom_file_pairs(source_root: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
@@ -1564,8 +1644,12 @@ fn emit_bloom_project_artifacts(project_dir: &Path, output: Option<&str>) -> Res
 }
 
 /// src/ 内の .forge ファイルをスキャンし render(<Component />) 構文を前処理する。
-/// 変換後の内容でファイルを上書きする（プロジェクトコピー先の dist/generated/ に書く）。
-fn preprocess_forge_files_in_dir(dir: &Path, project_root: &Path) -> Result<(), String> {
+/// 変換結果はメモリ上の HashMap に収集するのみで、ソースファイルは一切書き換えない。
+fn collect_preprocessed_forge_files(
+    dir: &Path,
+    project_root: &Path,
+    out: &mut HashMap<PathBuf, String>,
+) -> Result<(), String> {
     if !dir.exists() {
         return Ok(());
     }
@@ -1574,16 +1658,17 @@ fn preprocess_forge_files_in_dir(dir: &Path, project_root: &Path) -> Result<(), 
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if path.is_dir() {
-            preprocess_forge_files_in_dir(&path, project_root)?;
+            collect_preprocessed_forge_files(&path, project_root, out)?;
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("forge") {
             continue;
         }
         let source = fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        if source.contains("render(<") {
+        if source.contains("render(<") || source.contains("hydrate_inline_script(<") {
             let processed = preprocess_render_calls(&source, project_root)?;
-            fs::write(&path, processed).map_err(|e| format!("{}: {}", path.display(), e))?;
+            let abs = path.canonicalize().unwrap_or(path);
+            out.insert(abs, processed);
         }
     }
     Ok(())
@@ -1598,27 +1683,41 @@ fn emit_bloom_web_artifacts(
     for (abs_path, rel_path) in files {
         let bloom_source =
             fs::read_to_string(abs_path).map_err(|e| format!("{}: {}", abs_path.display(), e))?;
-        let generated = compile_bloom_with_compiler_forge(source_root, &bloom_source)?;
+        // 生成 Forge ファイルを出力（後方互換・テスト用）
+        let plan = plan_from_bloom_source(&bloom_source)?;
+        let script = extract_script_section(&bloom_source).unwrap_or("");
+        let generated = plan_to_generated_forge(&plan, script);
         let out_path = out_dir
             .join("generated")
             .join(generated_forge_path(rel_path));
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
         }
-        fs::write(&out_path, generated).map_err(|e| format!("{}: {}", out_path.display(), e))?;
+        fs::write(&out_path, &generated).map_err(|e| format!("{}: {}", out_path.display(), e))?;
+        // WASM をコンパイル
         let wasm_path = out_dir.join(wasm_output_path(rel_path));
-        compile_generated_forge_to_wasm(
-            &fs::read_to_string(&out_path).map_err(|e| format!("{}: {}", out_path.display(), e))?,
-            &wasm_path,
-        )?;
+        compile_bloom_direct(&bloom_source, &wasm_path)?;
     }
 
+    // editors/web/runtime/forge_bloom.js が正規ソース。
+    // packages/bloom/forge.min.js はフォールバック（旧形式との互換）。
+    let editors_runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("editors")
+        .join("web")
+        .join("runtime")
+        .join("forge_bloom.js");
     let bloom_pkg = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("packages")
         .join("bloom");
-    let runtime_src = bloom_pkg.join("forge.min.js");
+    let runtime_src = if editors_runtime.exists() {
+        editors_runtime
+    } else {
+        bloom_pkg.join("forge.min.js")
+    };
     let runtime_dst = out_dir.join("forge.min.js");
 
     let js_source = fs::read_to_string(&runtime_src)
@@ -1637,63 +1736,6 @@ fn emit_bloom_web_artifacts(
         .map_err(|e| format!("{}: {}", runtime_dst.display(), e))?;
 
     Ok(())
-}
-
-fn compile_bloom_with_compiler_forge(
-    source_root: &Path,
-    bloom_source: &str,
-) -> Result<String, String> {
-    let compiler_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("packages")
-        .join("bloom")
-        .join("src")
-        .join("compiler.forge");
-    let compiler_source = fs::read_to_string(&compiler_path)
-        .map_err(|e| format!("{}: {}", compiler_path.display(), e))?;
-
-    let mut temp_dir = env::temp_dir();
-    temp_dir.push(format!("forge_bloom_web_{}", unique_suffix()));
-    fs::create_dir_all(&temp_dir).map_err(|e| format!("{}: {}", temp_dir.display(), e))?;
-
-    let local_source_root = source_root.to_path_buf();
-    let result = (|| {
-        let compiler_copy = temp_dir.join("compiler.forge");
-        fs::write(&compiler_copy, compiler_source)
-            .map_err(|e| format!("{}: {}", compiler_copy.display(), e))?;
-
-        let runner_path = temp_dir.join("main.forge");
-        let bytes = bloom_source
-            .as_bytes()
-            .iter()
-            .map(|b| b.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let runner = format!(
-            "use ./compiler.{{ parse_bloom, bloom_generated }}\nlet source = bytes_to_str([{}])\nprintln(bloom_generated(parse_bloom(source)))\n",
-            bytes
-        );
-        fs::write(&runner_path, runner).map_err(|e| format!("{}: {}", runner_path.display(), e))?;
-
-        let cli = env::current_exe().map_err(|e| e.to_string())?;
-        let output = Command::new(cli)
-            .arg("run")
-            .arg(&runner_path)
-            .current_dir(&local_source_root)
-            .output()
-            .map_err(|e| format!("compiler.forge invocation failed: {}", e))?;
-        if !output.status.success() {
-            return Err(format!(
-                "compiler.forge invocation failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    })();
-
-    let _ = fs::remove_dir_all(&temp_dir);
-    result
 }
 
 fn build_file(path: &Path, output: Option<&str>) {

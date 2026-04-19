@@ -1,20 +1,16 @@
 {
   "version": 1,
   "file": "smoke.fnb",
-  "executed_at": "2026-04-17T20:00:14.857Z",
+  "executed_at": "2026-04-18T23:45:53.127Z",
   "cells": [
     {
       "index": 11,
-      "name": "after_error",
-      "status": "ok",
+      "name": "error_case",
+      "status": "error",
       "outputs": [
         {
-          "type": "text",
-          "value": "after error\n"
-        },
-        {
-          "type": "text",
-          "value": "after error\n"
+          "type": "error",
+          "message": "未定義の変数 'y'"
         }
       ],
       "duration_ms": 0

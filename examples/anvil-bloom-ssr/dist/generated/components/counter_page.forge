@@ -1,0 +1,29 @@
+use bloom/dom
+
+state count = 0
+
+fn increment() {
+    {
+}
+    count = count + 1
+}
+
+fn decrement() {
+    {
+}
+    count = count - 1
+}
+
+fn __bloom_render() {
+  dom::set_text("text_root_0_1_1_1_0", string(count))
+  dom::add_listener("node_root_0_1_1_0", "click", "decrement")
+  dom::add_listener("node_root_0_1_1_2", "click", "increment")
+}
+
+fn __bloom_update_count() {
+  dom::set_text("text_root_0_1_1_1_0", string(count))
+}
+
+fn __bloom_mount() {
+  __bloom_render()
+}

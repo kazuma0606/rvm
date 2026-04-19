@@ -1,23 +1,47 @@
+use forge/std/fs.{ read_file }
 use anvil/request.*
 use anvil/response.*
-use bloom/ssr.{ render_source, hydrate_inline_script }
+use bloom/ssr.{ render_source, hydrate_inline_script, render_wasm, hydrate_script_with }
 
-fn page_layout(content: string, script: string) -> string {
-    "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Anvil + Bloom SSR</title></head><body><div id=\"app\">{content}</div>{script}</body></html>"
+fn page_layout(title: string, content: string, script: string) -> string! {
+    let tmpl = read_file("src/layouts/page.html")?
+    let t1 = tmpl.replace("__TITLE__", title)
+    let t2 = t1.replace("__CONTENT__", content)
+    let t3 = t2.replace("__SCRIPT__", script)
+    ok(t3)
 }
 
 pub fn index_handler(req: Request<string>) -> Response<string>! {
-    let html = "<h1>Anvil + Bloom SSR</h1><p>Visit <a href=\"/counter\">/counter</a> to see the counter.</p>"
-    ok(Response::html(page_layout(html, "")))
+    let content = read_file("src/pages/index.html")?
+    let html = page_layout("Anvil + Bloom SSR", content, "")?
+    ok(Response::html(html))
 }
 
 pub fn counter_handler(req: Request<string>) -> Response<string>! {
-    let html = render_source(bytes_to_str([60, 115, 99, 114, 105, 112, 116, 62, 10, 115, 116, 97, 116, 101, 32, 99, 111, 117, 110, 116, 32, 61, 32, 48, 10, 10, 102, 110, 32, 105, 110, 99, 114, 101, 109, 101, 110, 116, 40, 41, 32, 123, 10, 32, 32, 32, 32, 99, 111, 117, 110, 116, 32, 61, 32, 99, 111, 117, 110, 116, 32, 43, 32, 49, 10, 125, 10, 10, 102, 110, 32, 100, 101, 99, 114, 101, 109, 101, 110, 116, 40, 41, 32, 123, 10, 32, 32, 32, 32, 99, 111, 117, 110, 116, 32, 61, 32, 99, 111, 117, 110, 116, 32, 45, 32, 49, 10, 125, 10, 60, 47, 115, 99, 114, 105, 112, 116, 62, 10, 10, 60, 100, 105, 118, 32, 99, 108, 97, 115, 115, 61, 34, 112, 97, 103, 101, 34, 62, 10, 32, 32, 60, 104, 49, 62, 67, 111, 117, 110, 116, 101, 114, 60, 47, 104, 49, 62, 10, 32, 32, 60, 112, 32, 99, 108, 97, 115, 115, 61, 34, 115, 117, 98, 116, 105, 116, 108, 101, 34, 62, 80, 111, 119, 101, 114, 101, 100, 32, 98, 121, 32, 65, 110, 118, 105, 108, 32, 43, 32, 66, 108, 111, 111, 109, 32, 83, 83, 82, 60, 47, 112, 62, 10, 10, 32, 32, 60, 100, 105, 118, 32, 99, 108, 97, 115, 115, 61, 34, 99, 111, 117, 110, 116, 101, 114, 34, 62, 10, 32, 32, 32, 32, 60, 98, 117, 116, 116, 111, 110, 32, 64, 99, 108, 105, 99, 107, 61, 123, 100, 101, 99, 114, 101, 109, 101, 110, 116, 125, 62, 45, 60, 47, 98, 117, 116, 116, 111, 110, 62, 10, 32, 32, 32, 32, 60, 115, 112, 97, 110, 32, 105, 100, 61, 34, 99, 111, 117, 110, 116, 45, 100, 105, 115, 112, 108, 97, 121, 34, 62, 123, 99, 111, 117, 110, 116, 125, 60, 47, 115, 112, 97, 110, 62, 10, 32, 32, 32, 32, 60, 98, 117, 116, 116, 111, 110, 32, 64, 99, 108, 105, 99, 107, 61, 123, 105, 110, 99, 114, 101, 109, 101, 110, 116, 125, 62, 43, 60, 47, 98, 117, 116, 116, 111, 110, 62, 10, 32, 32, 60, 47, 100, 105, 118, 62, 10, 60, 47, 100, 105, 118, 62, 10]), {})
-    let script = hydrate_inline_script(bytes_to_str([60, 115, 99, 114, 105, 112, 116, 62, 10, 115, 116, 97, 116, 101, 32, 99, 111, 117, 110, 116, 32, 61, 32, 48, 10, 10, 102, 110, 32, 105, 110, 99, 114, 101, 109, 101, 110, 116, 40, 41, 32, 123, 10, 32, 32, 32, 32, 99, 111, 117, 110, 116, 32, 61, 32, 99, 111, 117, 110, 116, 32, 43, 32, 49, 10, 125, 10, 10, 102, 110, 32, 100, 101, 99, 114, 101, 109, 101, 110, 116, 40, 41, 32, 123, 10, 32, 32, 32, 32, 99, 111, 117, 110, 116, 32, 61, 32, 99, 111, 117, 110, 116, 32, 45, 32, 49, 10, 125, 10, 60, 47, 115, 99, 114, 105, 112, 116, 62, 10, 10, 60, 100, 105, 118, 32, 99, 108, 97, 115, 115, 61, 34, 112, 97, 103, 101, 34, 62, 10, 32, 32, 60, 104, 49, 62, 67, 111, 117, 110, 116, 101, 114, 60, 47, 104, 49, 62, 10, 32, 32, 60, 112, 32, 99, 108, 97, 115, 115, 61, 34, 115, 117, 98, 116, 105, 116, 108, 101, 34, 62, 80, 111, 119, 101, 114, 101, 100, 32, 98, 121, 32, 65, 110, 118, 105, 108, 32, 43, 32, 66, 108, 111, 111, 109, 32, 83, 83, 82, 60, 47, 112, 62, 10, 10, 32, 32, 60, 100, 105, 118, 32, 99, 108, 97, 115, 115, 61, 34, 99, 111, 117, 110, 116, 101, 114, 34, 62, 10, 32, 32, 32, 32, 60, 98, 117, 116, 116, 111, 110, 32, 64, 99, 108, 105, 99, 107, 61, 123, 100, 101, 99, 114, 101, 109, 101, 110, 116, 125, 62, 45, 60, 47, 98, 117, 116, 116, 111, 110, 62, 10, 32, 32, 32, 32, 60, 115, 112, 97, 110, 32, 105, 100, 61, 34, 99, 111, 117, 110, 116, 45, 100, 105, 115, 112, 108, 97, 121, 34, 62, 123, 99, 111, 117, 110, 116, 125, 60, 47, 115, 112, 97, 110, 62, 10, 32, 32, 32, 32, 60, 98, 117, 116, 116, 111, 110, 32, 64, 99, 108, 105, 99, 107, 61, 123, 105, 110, 99, 114, 101, 109, 101, 110, 116, 125, 62, 43, 60, 47, 98, 117, 116, 116, 111, 110, 62, 10, 32, 32, 60, 47, 100, 105, 118, 62, 10, 60, 47, 100, 105, 118, 62, 10]))
-    ok(Response::html(page_layout(html, script)))
+    let html_base = render(<CounterPage />)
+    // dist/components/counter_page.wasm は forge build --web で生成される
+    let wasm_path = "dist/components/counter_page.wasm"
+    // WASM パス: forge build --web でビルド済みの場合に WASM で状態を注入
+    // WASM ファイルが存在しない場合はインライン JS にフォールバック
+    let wasm_result = render_wasm(wasm_path, html_base)
+    let html = wasm_result.unwrap_or(html_base)
+    let script = if wasm_result.is_ok() {
+        hydrate_script_with("/components/counter_page.wasm")
+    } else {
+        hydrate_inline_script(<CounterPage />)
+    }
+    let page = page_layout("Counter — Anvil + Bloom SSR", html, script)?
+    ok(Response::html(page))
 }
 
 pub fn runtime_handler(req: Request<string>) -> Response<string>! {
-    let js = "/* forge.min.js not yet built — run: forge build --web examples/anvil-bloom-ssr */"
+    let dist_js = "dist/forge.min.js"
+    let js_result = read_file(dist_js)
+    let js = js_result.unwrap_or("/* forge.min.js not yet built — run: forge build --web examples/anvil-bloom-ssr */")
     ok(Response::text(js).header("Content-Type", "text/javascript; charset=utf-8"))
+}
+
+pub fn wasm_handler(req: Request<string>) -> Response<string>! {
+    let wasm_file = "dist/components/counter_page.wasm"
+    ok(Response::file(wasm_file).header("Content-Type", "application/wasm"))
 }

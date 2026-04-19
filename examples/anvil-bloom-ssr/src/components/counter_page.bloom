@@ -10,13 +10,21 @@ fn decrement() {
 }
 </script>
 
-<div class="page">
-  <h1>Counter</h1>
-  <p class="subtitle">Powered by Anvil + Bloom SSR</p>
-
-  <div class="counter">
-    <button @click={decrement}>-</button>
-    <span id="count-display">{count}</span>
-    <button @click={increment}>+</button>
+<div class="counter-page">
+  <a href="/" class="back-link">&larr; Home</a>
+  <div class="counter-card">
+    <div class="counter-title-wrap">
+      <h1 class="counter-title">Counter</h1>
+      <p class="counter-sub">Powered by Bloom + WASM</p>
+    </div>
+    <div class="counter-widget">
+      <button @click={decrement} class="btn-dec">-</button>
+      <span class="counter-value">{count}</span>
+      <button @click={increment} class="btn-inc">+</button>
+    </div>
+    <div class="wasm-badge">
+      <span class="badge-dot"></span>
+      WASM hydrated
+    </div>
   </div>
 </div>

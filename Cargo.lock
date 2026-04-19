@@ -211,6 +211,7 @@ dependencies = [
 name = "bloom-compiler"
 version = "0.1.0"
 dependencies = [
+ "forge-compiler",
  "regex",
  "serde",
 ]
