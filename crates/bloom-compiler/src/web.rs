@@ -1,5 +1,5 @@
 use forge_compiler::wasm_backend::{
-    parse_bloom_script, StateDelta, WasmConst, WasmModule, WasmStateVar,
+    parse_bloom_script, StateDelta, WasmConst, WasmLogExpr, WasmModule,
 };
 use regex::Regex;
 use std::fs;
@@ -209,6 +209,19 @@ static mut COUNT: i32 = 0;
 static mut COMMANDS: [i32; 32] = [0; 32];
 static mut COMMAND_LEN: i32 = 0;
 static mut COUNT_BUF: [u8; 12] = [0; 12];
+
+unsafe extern "C" {
+    fn forge_log(ptr: i32, len: i32);
+}
+
+pub fn log(msg: &str) {
+    unsafe { forge_log(msg.as_ptr() as i32, msg.len() as i32); }
+}
+
+pub fn log_i32(value: i32) {
+    let len = write_num_bytes(value);
+    unsafe { forge_log(NUM_BUF.as_ptr() as i32, len); }
+}
 
 "#,
     );
@@ -880,6 +893,19 @@ static mut COMMANDS: [i32; 64] = [0; 64];
 static mut COMMAND_LEN: i32 = 0;
 static mut NUM_BUF: [u8; 24] = [0; 24];
 
+unsafe extern "C" {
+    fn forge_log(ptr: i32, len: i32);
+}
+
+pub fn log(msg: &str) {
+    unsafe { forge_log(msg.as_ptr() as i32, msg.len() as i32); }
+}
+
+pub fn log_i32(value: i32) {
+    let len = write_num_bytes(value);
+    unsafe { forge_log(NUM_BUF.as_ptr() as i32, len); }
+}
+
 "#,
     );
 
@@ -1046,6 +1072,9 @@ pub extern "C" fn alloc(size: usize) -> *mut u8 {
             init
         ));
     }
+    for log_expr in &wasm.init_logs {
+        body.push_str(&wasm_log_expr_code(log_expr));
+    }
     body.push_str("        render();\n    }\n}\n\n");
 
     // __forge_attach
@@ -1057,6 +1086,9 @@ pub extern "C" fn alloc(size: usize) -> *mut u8 {
             state.name.to_uppercase(),
             init
         ));
+    }
+    for log_expr in &wasm.init_logs {
+        body.push_str(&wasm_log_expr_code(log_expr));
     }
     body.push_str("        attach();\n    }\n}\n\n");
 
@@ -1084,12 +1116,17 @@ pub extern "C" fn __forge_receive_events(kind: i32, target_ptr: *const u8, targe
     );
 
     // ハンドラーと対応するリスナーを結びつける
-    for (idx, (l_target, _, l_handler)) in plan.listeners.iter().enumerate() {
+    for (idx, (_, _, l_handler)) in plan.listeners.iter().enumerate() {
         // リスナーのターゲット ID に対応するハンドラー関数を探す
         let fn_opt = wasm.functions.iter().find(|f| f.name == *l_handler);
         let mutations = fn_opt.map(|f| f.mutations.as_slice()).unwrap_or_default();
+        let logs = fn_opt.map(|f| f.logs.as_slice()).unwrap_or_default();
 
         body.push_str(&format!("    if target == LISTENER_TARGET_{} {{\n", idx));
+
+        for log_expr in logs {
+            body.push_str(&wasm_log_expr_code(log_expr));
+        }
 
         for (state_name, delta) in mutations {
             let upper = state_name.to_uppercase();
@@ -1126,6 +1163,15 @@ fn wasm_const_rust_literal(c: &WasmConst) -> String {
         WasmConst::Bool(true) => "1".to_string(),
         WasmConst::Bool(false) => "0".to_string(),
         WasmConst::EmptyString => "0".to_string(),
+    }
+}
+
+fn wasm_log_expr_code(log_expr: &WasmLogExpr) -> String {
+    match log_expr {
+        WasmLogExpr::Static(message) => format!("        log({message:?});\n"),
+        WasmLogExpr::State(state_name) => {
+            format!("        unsafe {{ log_i32(STATE_{}); }}\n", state_name.to_uppercase())
+        }
     }
 }
 
@@ -1778,6 +1824,39 @@ let html = render(<Counter />)
             rust.contains("btn-inc"),
             "listener target constant not found"
         );
+    }
+
+    #[test]
+    fn test_wasm_log_extern_declared() {
+        use forge_compiler::wasm_backend::parse_bloom_script;
+
+        let script = r#"state count = 0
+log("counter initialized")
+fn increment() {
+    log(count)
+    count = count + 1
+}
+"#;
+        let wasm_module = parse_bloom_script(script).expect("parse");
+        let plan = WasmRenderPlan {
+            state_name: "count".to_string(),
+            initial_value: 0,
+            dynamic_text_target: Some("count-display".to_string()),
+            static_texts: vec![],
+            listeners: vec![(
+                "btn-inc".to_string(),
+                "click".to_string(),
+                "increment".to_string(),
+            )],
+            increment_handlers: vec!["increment".to_string()],
+        };
+
+        let rust = generate_wasm_rust(&wasm_module, &plan).expect("generate");
+        assert!(rust.contains("fn forge_log(ptr: i32, len: i32);"), "{}", rust);
+        assert!(rust.contains("pub fn log(msg: &str)"), "{}", rust);
+        assert!(rust.contains("pub fn log_i32(value: i32)"), "{}", rust);
+        assert!(rust.contains("log(\"counter initialized\");"), "{}", rust);
+        assert!(rust.contains("log_i32(STATE_COUNT)"), "{}", rust);
     }
 
     /// WASM SSR ハイドレーションパスが `generate_wasm_rust` の出力と整合することを確認する。

@@ -91,6 +91,13 @@
           }
         });
       },
+
+      // forge_log(ptr: i32, len: i32)
+      forge_log: function (msgPtr, msgLen) {
+        if (!memRef.current) return;
+        const msg = readString(memRef.current, msgPtr, msgLen);
+        console.log("[Bloom]", msg);
+      },
     };
   }
 

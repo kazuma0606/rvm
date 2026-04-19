@@ -1,0 +1,4 @@
+Anvil + Bloom SSR example
+  1. forge build examples/anvil-bloom-ssr
+  2. forge run examples/anvil-bloom-ssr
+  3. open http://localhost:8080/counter

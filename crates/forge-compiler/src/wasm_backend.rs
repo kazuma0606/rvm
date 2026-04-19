@@ -68,6 +68,15 @@ pub struct WasmFn {
     pub name: String,
     /// (state_name, delta) のリスト — 関数が各状態変数に与える変更
     pub mutations: Vec<(String, StateDelta)>,
+    /// `log("...")` や `log(count)` のようなログ出力
+    pub logs: Vec<WasmLogExpr>,
+}
+
+/// WASM 側で扱う簡易ログ式
+#[derive(Debug, Clone, PartialEq)]
+pub enum WasmLogExpr {
+    Static(String),
+    State(String),
 }
 
 /// JS 環境から WASM にインポートする DOM 操作関数
@@ -85,6 +94,7 @@ pub struct WasmModule {
     pub states: Vec<WasmStateVar>,
     pub functions: Vec<WasmFn>,
     pub dom_imports: Vec<WasmDomImport>,
+    pub init_logs: Vec<WasmLogExpr>,
 }
 
 // ─── 型変換ヘルパー ──────────────────────────────────────────────────────────
@@ -159,6 +169,7 @@ pub fn parse_bloom_script(source: &str) -> Result<WasmModule, String> {
 
     let mut states = Vec::new();
     let mut functions = Vec::new();
+    let mut init_logs = Vec::new();
 
     for stmt in &module.stmts {
         match stmt {
@@ -178,10 +189,15 @@ pub fn parse_bloom_script(source: &str) -> Result<WasmModule, String> {
             }
             Stmt::Fn { name, body, .. } => {
                 let mutations = extract_mutations_from_expr(body, &state_names);
+                let logs = extract_logs_from_expr(body, &state_names);
                 functions.push(WasmFn {
                     name: name.clone(),
                     mutations,
+                    logs,
                 });
+            }
+            Stmt::Expr(expr) => {
+                init_logs.extend(extract_logs_from_expr(expr, &state_names));
             }
             _ => {}
         }
@@ -191,6 +207,7 @@ pub fn parse_bloom_script(source: &str) -> Result<WasmModule, String> {
         states,
         functions,
         dom_imports: bloom_dom_imports(),
+        init_logs,
     })
 }
 
@@ -217,6 +234,12 @@ fn expr_to_wasm_const(expr: &Expr) -> Option<WasmConst> {
 fn extract_mutations_from_expr(expr: &Expr, state_names: &[String]) -> Vec<(String, StateDelta)> {
     let mut out = Vec::new();
     collect_mutations(expr, state_names, &mut out);
+    out
+}
+
+fn extract_logs_from_expr(expr: &Expr, state_names: &[String]) -> Vec<WasmLogExpr> {
+    let mut out = Vec::new();
+    collect_logs(expr, state_names, &mut out);
     out
 }
 
@@ -255,6 +278,86 @@ fn collect_mutations(expr: &Expr, state_names: &[String], out: &mut Vec<(String,
     }
 }
 
+fn collect_logs(expr: &Expr, state_names: &[String], out: &mut Vec<WasmLogExpr>) {
+    match expr {
+        Expr::Block { stmts, tail, .. } => {
+            for stmt in stmts {
+                collect_logs_from_stmt(stmt, state_names, out);
+            }
+            if let Some(tail_expr) = tail {
+                collect_logs(tail_expr, state_names, out);
+            }
+        }
+        Expr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_logs(cond, state_names, out);
+            collect_logs(then_block, state_names, out);
+            if let Some(expr) = else_block {
+                collect_logs(expr, state_names, out);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_logs(cond, state_names, out);
+            collect_logs(body, state_names, out);
+        }
+        Expr::Loop { body, .. } => collect_logs(body, state_names, out),
+        Expr::For { iter, body, .. } => {
+            collect_logs(iter, state_names, out);
+            collect_logs(body, state_names, out);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_logs(scrutinee, state_names, out);
+            for arm in arms {
+                collect_logs(&arm.body, state_names, out);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            if matches!(callee.as_ref(), Expr::Ident(name, _) if name == "log") {
+                if let Some(first) = args.first() {
+                    match first {
+                        Expr::Literal(Literal::String(value), _) => {
+                            out.push(WasmLogExpr::Static(value.clone()));
+                        }
+                        Expr::Ident(name, _) if state_names.contains(name) => {
+                            out.push(WasmLogExpr::State(name.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            collect_logs(callee, state_names, out);
+            for arg in args {
+                collect_logs(arg, state_names, out);
+            }
+        }
+        Expr::MethodCall { object, args, .. } => {
+            collect_logs(object, state_names, out);
+            for arg in args {
+                collect_logs(arg, state_names, out);
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            collect_logs(left, state_names, out);
+            collect_logs(right, state_names, out);
+        }
+        Expr::UnaryOp { operand, .. } => collect_logs(operand, state_names, out),
+        Expr::Assign { value, .. } => collect_logs(value, state_names, out),
+        Expr::Field { object, .. } => collect_logs(object, state_names, out),
+        Expr::Index { object, index, .. } => {
+            collect_logs(object, state_names, out);
+            collect_logs(index, state_names, out);
+        }
+        Expr::Closure { body, .. } => collect_logs(body, state_names, out),
+        _ => {}
+    }
+}
+
 fn collect_mutations_from_stmt(
     stmt: &Stmt,
     state_names: &[String],
@@ -263,6 +366,20 @@ fn collect_mutations_from_stmt(
     match stmt {
         Stmt::Expr(e) => collect_mutations(e, state_names, out),
         Stmt::Let { value, .. } => collect_mutations(value, state_names, out),
+        _ => {}
+    }
+}
+
+fn collect_logs_from_stmt(
+    stmt: &Stmt,
+    state_names: &[String],
+    out: &mut Vec<WasmLogExpr>,
+) {
+    match stmt {
+        Stmt::Expr(expr) => collect_logs(expr, state_names, out),
+        Stmt::Let { value, .. } | Stmt::State { value, .. } => {
+            collect_logs(value, state_names, out)
+        }
         _ => {}
     }
 }

@@ -12,7 +12,7 @@ use forge_compiler::ast::*;
 use forge_compiler::deps::DepsManager;
 use forge_compiler::lexer::Span;
 use forge_compiler::loader::{ModForgeExport, ModuleLoader};
-use wasmtime::{Engine, Instance, Module as WasmModule, Store};
+use wasmtime::{Engine, Instance, Linker, Module as WasmModule, Store};
 
 /// struct 型のメソッド（Forge 定義 or ネイティブ関数）
 #[derive(Clone)]
@@ -7247,8 +7247,12 @@ pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<Stri
     let module = WasmModule::from_file(&engine, wasm_path)
         .map_err(|e| format!("BloomWasmLoad: {}: {}", wasm_path, e))?;
     let mut store: Store<()> = Store::new(&engine, ());
-
-    let instance = Instance::new(&mut store, &module, &[])
+    let mut linker = Linker::new(&engine);
+    linker
+        .func_wrap("env", "forge_log", |_caller: wasmtime::Caller<'_, ()>, _ptr: i32, _len: i32| {})
+        .map_err(|e| format!("BloomWasmLink forge_log: {}", e))?;
+    let instance = linker
+        .instantiate(&mut store, &module)
         .map_err(|e| format!("BloomWasmInstantiate: {}", e))?;
 
     let memory = instance

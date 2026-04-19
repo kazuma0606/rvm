@@ -1,17 +1,20 @@
 use bloom/dom
 
 state count = 0
+log("Counter initialized")
 
 fn increment() {
     {
 }
     count = count + 1
+    log(count)
 }
 
 fn decrement() {
     {
 }
     count = count - 1
+    log(count)
 }
 
 fn __bloom_render() {

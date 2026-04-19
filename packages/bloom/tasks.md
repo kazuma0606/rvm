@@ -26,7 +26,8 @@
   - B-9-D: 4/4 完了 ✅
   - B-9-E: 5/5 完了 ✅
 - **Phase B-9: 15/15 完了 ✅**
-- **合計: 144/145（残タスク: B-4 E2E 1件）**
+- Phase B-10: 7/7 完了（WASM デバッグ: `log()` ブラウザコンソール出力）
+- **合計: 157/158（残タスク: B-4 E2E 1件）**
 
 ---
 
@@ -416,3 +417,33 @@
 - [x] `test_wasm_ssr_hydration` — SSR HTML の id が生成 WASM Rust ソースに正しく含まれることを確認 (`web::tests::test_wasm_ssr_hydration`)
 - [x] E2E: WASM パスでカウンターがブラウザで動作することを確認（`forge build --web` + `forge run` 手動確認）
   - 全エンドポイント確認済み: `/`(200), `/counter`(200,WASM SSR), `/forge.min.js`(200,16KB), `/components/counter_page.wasm`(200,22KB)
+
+---
+
+## Phase B-10: WASM デバッグ — `log()` ブラウザコンソール出力
+
+> 仕様変更: `.bloom` スクリプト内で `log(msg)` を呼ぶと、ブラウザの `console.log` に出力できるようにする。
+> WASM は単体で `console.log` にアクセスできないため、JS インポートを介してブリッジする。
+
+### B-10-A: JS ランタイム側（`forge.min.js`）
+
+- [x] `createEnvImports` に `forge_log(ptr: i32, len: i32)` を追加
+  - `readString(memory, ptr, len)` で文字列を復元して `console.log('[Bloom]', msg)` を呼ぶ
+  - `memory` 参照は `memRef.current` を使う（インスタンス化前に参照が解決されるよう `memRef` パターンを維持）
+- [x] `packages/bloom/forge.min.js`（ソース）と `forge build --web` で生成される `dist/forge.min.js` の両方を更新
+
+### B-10-B: Rust WASM コード生成（`crates/bloom-compiler/src/web.rs`）
+
+- [x] `generate_wasm_rust` / `generate_counter_wasm_rust` の extern ブロックに `forge_log(ptr: i32, len: i32)` を追加
+- [x] `pub fn log(msg: &str)` ヘルパーを生成コードに追加
+  ```rust
+  pub fn log(msg: &str) {
+      unsafe { forge_log(msg.as_ptr() as i32, msg.len() as i32); }
+  }
+  ```
+- [x] `.bloom` の `<script>` ブロックで `log("...")` が Rust コードの `log("...")` 呼び出しとして出力されることを確認
+
+### B-10-C: テスト
+
+- [x] `test_wasm_log_extern_declared` — 生成 Rust ソースに `forge_log` extern 宣言が含まれることを確認
+- [x] E2E: `.bloom` で `log("hello from wasm")` → ブラウザコンソールに `[Bloom] hello from wasm` が表示されることを手動確認

@@ -682,6 +682,8 @@ fn script_to_js(script: string) -> string {
             let rest = str_slice(trimmed, 3, len(string_to_bytes(trimmed)))
             out = "{out}function {rest}\n"
             fn_depth = 1
+        } else if fn_depth == 0 {
+            out = "{out}{trimmed}\n"
         } else if fn_depth > 0 {
             let line_bytes = string_to_bytes(trimmed)
             state opens = 0
@@ -725,9 +727,10 @@ pub fn hydrate_inline_script(source: string) -> string {
     let q = char_from_byte(39)
     let ob = char_from_byte(123)
     let cb = char_from_byte(125)
+    let log_fn = "function log(value) {ob}\n  console.log({q}[Bloom]{q}, value);\n{cb}"
     let update_fn = "function __bloom_update() {ob}\n  var __s = {state_obj};\n  document.querySelectorAll({q}[data-reactive]{q}).forEach(function(el) {ob}\n    var n = el.getAttribute({q}data-reactive{q});\n    if (n in __s) el.textContent = String(__s[n]);\n  {cb});\n{cb}"
     let event_fn = "document.addEventListener({q}DOMContentLoaded{q}, function() {ob}\n  document.querySelectorAll({q}[data-on-click]{q}).forEach(function(el) {ob}\n    var h = el.getAttribute({q}data-on-click{q});\n    el.addEventListener({q}click{q}, function() {ob} if (typeof window[h] === {q}function{q}) window[h](); {cb});\n  {cb});\n{cb});"
-    "<script>\n{js_body}\n{update_fn}\n{event_fn}\n</script>"
+    "<script>\n{log_fn}\n{js_body}\n{update_fn}\n{event_fn}\n</script>"
 }
 
 /// WASM コンポーネントをサーバーサイドで実行して HTML を生成する。
