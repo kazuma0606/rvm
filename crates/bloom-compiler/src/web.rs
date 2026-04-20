@@ -69,6 +69,31 @@ pub struct WasmRenderPlan {
     pub increment_handlers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BloomSourceMap {
+    pub generated_to_source: Vec<Option<usize>>,
+}
+
+pub fn generate_bloom_source_map(bloom_source: &str, generated_forge: &str) -> BloomSourceMap {
+    let bloom_lines: Vec<&str> = bloom_source.lines().collect();
+    let generated_to_source = generated_forge
+        .lines()
+        .map(|generated| {
+            let needle = generated.trim();
+            if needle.is_empty() {
+                return None;
+            }
+            bloom_lines
+                .iter()
+                .position(|line| line.trim() == needle)
+                .map(|idx| idx + 1)
+        })
+        .collect();
+    BloomSourceMap {
+        generated_to_source,
+    }
+}
+
 fn quoted_strings(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();
@@ -219,8 +244,11 @@ pub fn log(msg: &str) {
 }
 
 pub fn log_i32(value: i32) {
-    let len = write_num_bytes(value);
-    unsafe { forge_log(NUM_BUF.as_ptr() as i32, len); }
+    unsafe {
+        COUNT = value;
+        let len = write_count_bytes();
+        forge_log(COUNT_BUF.as_ptr() as i32, len);
+    }
 }
 
 "#,
@@ -783,11 +811,54 @@ fn extract_increment_handlers_from_text(script: &str, state_name: &str) -> Vec<S
     result
 }
 
+fn validate_bloom_directives(bloom_source: &str) -> Result<(), String> {
+    let mut offset = 0usize;
+    while let Some(rel) = bloom_source[offset..].find("{#") {
+        let start = offset + rel;
+        let rest = &bloom_source[start..];
+        if rest.starts_with("{#if ") || rest.starts_with("{#for ") {
+            offset = start + 2;
+            continue;
+        }
+        let (line, col) = line_col_at(bloom_source, start);
+        let end = rest.find('}').map(|n| start + n + 1).unwrap_or(start + 2);
+        let directive = &bloom_source[start..end.min(bloom_source.len())];
+        let hint = if directive.starts_with("{#iff") {
+            "\nhint: use `{#if ...}` instead of `{#iff ...}`"
+        } else {
+            "\nhint: supported directives are `{#if ...}` and `{#for ...}`"
+        };
+        return Err(format!(
+            "Bloom compile error: unknown directive `{}`\n  --> <bloom>:{}:{}{}",
+            directive, line, col, hint
+        ));
+    }
+    Ok(())
+}
+
+fn line_col_at(source: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (idx, ch) in source.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 /// .bloom ソースから直接 WasmRenderPlan を生成する。
 ///
 /// compiler.forge のサブプロセス実行（compile_bloom_with_compiler_forge）を
 /// 不要にする Rust ネイティブ実装。
 pub fn plan_from_bloom_source(bloom_source: &str) -> Result<WasmRenderPlan, String> {
+    validate_bloom_directives(bloom_source)?;
     let script = extract_script_section(bloom_source).unwrap_or("");
 
     // ForgeScript パーサーで解析を試みる（`+=` 非サポートのためフォールバックあり）
@@ -1170,7 +1241,10 @@ fn wasm_log_expr_code(log_expr: &WasmLogExpr) -> String {
     match log_expr {
         WasmLogExpr::Static(message) => format!("        log({message:?});\n"),
         WasmLogExpr::State(state_name) => {
-            format!("        unsafe {{ log_i32(STATE_{}); }}\n", state_name.to_uppercase())
+            format!(
+                "        unsafe {{ log_i32(STATE_{}); }}\n",
+                state_name.to_uppercase()
+            )
         }
     }
 }
@@ -1517,6 +1591,35 @@ mod tests {
     }
 
     #[test]
+    fn test_bloom_error_span() {
+        let source = "<script>\nstate count = 0\n</script>\n<div>\n{#iff count > 0}\n</div>";
+        let err = plan_from_bloom_source(source).expect_err("expected directive error");
+        assert!(
+            err.contains("Bloom compile error: unknown directive"),
+            "{}",
+            err
+        );
+        assert!(err.contains("--> <bloom>:5:1"), "{}", err);
+        assert!(err.contains("hint: use `{#if ...}`"), "{}", err);
+    }
+
+    #[test]
+    fn bloom_source_map_maps_script_lines() {
+        let bloom = "<script>\nstate count = 0\nfn inc() { count += 1 }\n</script>\n<p>{count}</p>";
+        let plan = plan_from_bloom_source(bloom).expect("plan");
+        let generated = plan_to_generated_forge(&plan, extract_script_section(bloom).unwrap());
+        let source_map = generate_bloom_source_map(bloom, &generated);
+        assert!(
+            source_map
+                .generated_to_source
+                .iter()
+                .any(|line| *line == Some(2)),
+            "{:?}",
+            source_map
+        );
+    }
+
+    #[test]
     fn wasm_output_path_rewrites_extension() {
         assert_eq!(
             wasm_output_path(Path::new("app/page.bloom")),
@@ -1668,7 +1771,7 @@ let html = render(<Counter />)
 
     #[test]
     fn generate_wasm_rust_handles_counter_with_decrement() {
-        use forge_compiler::wasm_backend::{parse_bloom_script, StateDelta, WasmConst};
+        use forge_compiler::wasm_backend::parse_bloom_script;
         let script = "state count = 0\nfn increment() {\n    count = count + 1\n}\nfn decrement() {\n    count = count - 1\n}\n";
         let wasm_module = parse_bloom_script(script).expect("parse");
 
@@ -1852,7 +1955,11 @@ fn increment() {
         };
 
         let rust = generate_wasm_rust(&wasm_module, &plan).expect("generate");
-        assert!(rust.contains("fn forge_log(ptr: i32, len: i32);"), "{}", rust);
+        assert!(
+            rust.contains("fn forge_log(ptr: i32, len: i32);"),
+            "{}",
+            rust
+        );
         assert!(rust.contains("pub fn log(msg: &str)"), "{}", rust);
         assert!(rust.contains("pub fn log_i32(value: i32)"), "{}", rust);
         assert!(rust.contains("log(\"counter initialized\");"), "{}", rust);

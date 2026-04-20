@@ -215,9 +215,13 @@ pub fn apply_request_middleware(req: Request<string>, middleware: Middleware) ->
     }
 }
 
+pub fn logger_line(req: Request<string>, response: Response<string>, duration_ms: number) -> string {
+    "{req.method} {req.path} -> {response.status} {duration_ms}ms"
+}
+
 pub fn apply_response_middleware(req: Request<string>, middleware: Middleware, response: Response<string>) -> Response<string> {
     if middleware.kind == "logger" {
-        println("{req.method} {req.path} -> {response.status}")
+        println(logger_line(req.clone(), response.clone(), 0))
         response
     } else {
         response

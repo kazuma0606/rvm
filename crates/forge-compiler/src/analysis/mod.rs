@@ -165,6 +165,7 @@ mod tests {
                 symbols: UseSymbols::All,
                 is_pub: false,
                 span: Span {
+                    file: "<analysis>".to_string(),
                     start: 0,
                     end: 0,
                     line: 1,
@@ -176,6 +177,7 @@ mod tests {
                 symbols: UseSymbols::All,
                 is_pub: false,
                 span: Span {
+                    file: "<analysis>".to_string(),
                     start: 0,
                     end: 0,
                     line: 2,

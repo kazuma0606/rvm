@@ -3,7 +3,7 @@
 // 仕様: forge/spec_v0.0.1.md §3〜§9
 
 use crate::ast::*;
-use crate::lexer::{lex, Span, StrPart, Token, TokenKind};
+use crate::lexer::{lex, lex_with_file, Span, StrPart, Token, TokenKind};
 
 // ── エラー ─────────────────────────────────────────────────────────────────
 
@@ -3791,6 +3791,13 @@ pub fn parse_source(source: &str) -> Result<Module, ParseError> {
     Parser::new(tokens).parse()
 }
 
+pub fn parse_source_with_file(source: &str, file: impl Into<String>) -> Result<Module, ParseError> {
+    let tokens = lex_with_file(source, file).map_err(|e| ParseError::UnexpectedEof {
+        expected: format!("lex error: {}", e),
+    })?;
+    Parser::new(tokens).parse()
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3810,6 +3817,7 @@ mod tests {
         let tokens = vec![Token {
             kind: TokenKind::Eof,
             span: Span {
+                file: "<test>".to_string(),
                 start: 0,
                 end: 0,
                 line: 1,

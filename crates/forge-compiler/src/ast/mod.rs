@@ -203,6 +203,33 @@ pub enum Stmt {
     Defer { body: DeferBody, span: Span },
 }
 
+impl Stmt {
+    pub fn span(&self) -> &Span {
+        match self {
+            Stmt::Let { span, .. }
+            | Stmt::State { span, .. }
+            | Stmt::Const { span, .. }
+            | Stmt::Fn { span, .. }
+            | Stmt::Yield { span, .. }
+            | Stmt::StructDef { span, .. }
+            | Stmt::ImplBlock { span, .. }
+            | Stmt::EnumDef { span, .. }
+            | Stmt::TraitDef { span, .. }
+            | Stmt::MixinDef { span, .. }
+            | Stmt::ImplTrait { span, .. }
+            | Stmt::DataDef { span, .. }
+            | Stmt::TypestateDef { span, .. }
+            | Stmt::UseDecl { span, .. }
+            | Stmt::UseRaw { span, .. }
+            | Stmt::When { span, .. }
+            | Stmt::TestBlock { span, .. }
+            | Stmt::Defer { span, .. } => span,
+            Stmt::Return(_, span) => span,
+            Stmt::Expr(expr) => expr.span(),
+        }
+    }
+}
+
 /// defer の本体種別（E-7）
 #[derive(Debug, Clone)]
 pub enum DeferBody {
@@ -436,6 +463,46 @@ pub enum Expr {
         steps: Vec<PipelineStep>,
         span: Span,
     },
+}
+
+impl Expr {
+    pub fn span(&self) -> &Span {
+        match self {
+            Expr::Literal(_, span)
+            | Expr::Ident(_, span)
+            | Expr::Loop { span, .. }
+            | Expr::Break { span }
+            | Expr::List(_, span)
+            | Expr::Question(_, span)
+            | Expr::Await { span, .. }
+            | Expr::SetLiteral { span, .. }
+            | Expr::Interpolation { span, .. }
+            | Expr::BinOp { span, .. }
+            | Expr::UnaryOp { span, .. }
+            | Expr::If { span, .. }
+            | Expr::While { span, .. }
+            | Expr::For { span, .. }
+            | Expr::Match { span, .. }
+            | Expr::Block { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::MethodCall { span, .. }
+            | Expr::Field { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Closure { span, .. }
+            | Expr::Range { span, .. }
+            | Expr::MapLiteral { span, .. }
+            | Expr::Assign { span, .. }
+            | Expr::IndexAssign { span, .. }
+            | Expr::StructInit { span, .. }
+            | Expr::AnonStruct { span, .. }
+            | Expr::EnumInit { span, .. }
+            | Expr::FieldAssign { span, .. }
+            | Expr::OptionalChain { span, .. }
+            | Expr::NullCoalesce { span, .. }
+            | Expr::Spawn { span, .. }
+            | Expr::Pipeline { span, .. } => span,
+        }
+    }
 }
 
 /// pipeline ステップ（S-5-B）

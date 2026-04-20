@@ -7,6 +7,30 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+// ── DBG-4-A: デバッグフック ──────────────────────────────────────────────────
+
+/// インタープリタの実行イベントを受け取るデバッグフックトレイト（DBG-4-A）
+/// Value は Rc を含むため Send ではない。フックはインタープリタと同じスレッドで呼ばれる。
+pub trait DebugHook {
+    /// 文を実行する直前に呼ばれる
+    fn on_statement(
+        &mut self,
+        span: &forge_compiler::lexer::Span,
+        scopes: &[HashMap<String, (crate::value::Value, bool)>],
+    );
+    /// 関数に入る直前に呼ばれる
+    fn on_enter_fn(&mut self, name: &str, args: &[(String, crate::value::Value)]);
+    /// 関数から出る直前に呼ばれる
+    fn on_exit_fn(&mut self, name: &str, ret: &crate::value::Value);
+    /// 変数に代入される直前に呼ばれる
+    fn on_assign(
+        &mut self,
+        name: &str,
+        value: &crate::value::Value,
+        span: &forge_compiler::lexer::Span,
+    );
+}
+
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
 use forge_compiler::ast::*;
 use forge_compiler::deps::DepsManager;
@@ -165,6 +189,12 @@ impl std::fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallFrame {
+    pub fn_name: String,
+    pub span: Span,
+}
+
 // ── スコープ ────────────────────────────────────────────────────────────────
 
 /// バインディング: (値, 可変かどうか)
@@ -290,10 +320,16 @@ pub struct Interpreter {
     output_listener: Option<Arc<dyn Fn(String) + Send + Sync>>,
     display_listener: Option<Arc<dyn Fn(DisplayOutput) + Send + Sync>>,
     trace_mode: bool,
+    verbose_mode: bool,
+    call_stack: Vec<CallFrame>,
+    last_error_span: Option<Span>,
+    last_error_stack: Vec<CallFrame>,
     /// Goblet 用のパイプライントレース設定
     pipeline_trace_nodes: Vec<PipelineTraceNodeRef>,
     /// Goblet 用の実行時トレースイベント
     pub pipeline_trace_events: Vec<PipelineTraceEvent>,
+    /// DBG-4-A: デバッグフック（DAP アダプタなどが設定）
+    pub debug_hook: Option<Box<dyn DebugHook>>,
 }
 
 impl Interpreter {
@@ -313,11 +349,21 @@ impl Interpreter {
             output_listener: None,
             display_listener: None,
             trace_mode: false,
+            verbose_mode: false,
+            call_stack: Vec::new(),
+            last_error_span: None,
+            last_error_stack: Vec::new(),
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
+            debug_hook: None,
         };
         interp.register_builtins();
         interp
+    }
+
+    /// デバッグフックを設定する（DBG-4-A）
+    pub fn set_debug_hook(&mut self, hook: Box<dyn DebugHook>) {
+        self.debug_hook = Some(hook);
     }
 
     /// 出力バッファ付きインタープリタを生成する（MCP などでの stdout キャプチャ用）
@@ -588,8 +634,13 @@ impl Interpreter {
             output_listener: None,
             display_listener: None,
             trace_mode: false,
+            verbose_mode: false,
+            call_stack: Vec::new(),
+            last_error_span: None,
+            last_error_stack: Vec::new(),
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
+            debug_hook: None,
         };
         interp.register_builtins();
         interp
@@ -612,8 +663,13 @@ impl Interpreter {
             output_listener: None,
             display_listener: None,
             trace_mode: false,
+            verbose_mode: false,
+            call_stack: Vec::new(),
+            last_error_span: None,
+            last_error_stack: Vec::new(),
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
+            debug_hook: None,
         };
         interp.register_builtins();
         interp
@@ -643,8 +699,13 @@ impl Interpreter {
             output_listener: None,
             display_listener: None,
             trace_mode: false,
+            verbose_mode: false,
+            call_stack: Vec::new(),
+            last_error_span: None,
+            last_error_stack: Vec::new(),
             pipeline_trace_nodes: Vec::new(),
             pipeline_trace_events: Vec::new(),
+            debug_hook: None,
         };
         interp.register_builtins();
         interp
@@ -664,6 +725,77 @@ impl Interpreter {
         if !enabled {
             self.pipeline_trace_events.clear();
         }
+    }
+
+    pub fn set_verbose_mode(&mut self, enabled: bool) {
+        self.verbose_mode = enabled;
+    }
+
+    pub fn last_error_span(&self) -> Option<&Span> {
+        self.last_error_span.as_ref()
+    }
+
+    pub fn last_error_stack(&self) -> &[CallFrame] {
+        &self.last_error_stack
+    }
+
+    pub fn format_runtime_error(&self, error: &RuntimeError) -> String {
+        let mut out = format!("Error: {}", error);
+        if let Some(span) = &self.last_error_span {
+            out.push_str(&format!("\n  --> {}:{}:{}", span.file, span.line, span.col));
+            if let Some(line) = source_line(span) {
+                out.push_str(&format!("\n   |\n{:>3} | {}", span.line, line));
+                out.push_str(&format!(
+                    "\n   | {}^",
+                    " ".repeat(span.col.saturating_sub(1))
+                ));
+            }
+        }
+        if let RuntimeError::UndefinedVariable(name) = error {
+            if let Some(suggestion) = self.suggest_variable(name) {
+                out.push_str(&format!("\nhint: did you mean `{}`?", suggestion));
+            } else {
+                out.push_str("\nhint: declare the variable with `let` or `state` before using it");
+            }
+        }
+        if !self.last_error_stack.is_empty() {
+            out.push_str("\n\nStack trace:");
+            for (idx, frame) in self.last_error_stack.iter().rev().enumerate() {
+                out.push_str(&format!(
+                    "\n  {}: {}  {}:{}",
+                    idx, frame.fn_name, frame.span.file, frame.span.line
+                ));
+            }
+        }
+        out
+    }
+
+    fn record_error_context(&mut self, error: &RuntimeError, span: &Span) {
+        if is_control_flow_error(error) {
+            return;
+        }
+        if self.last_error_span.is_none() {
+            self.last_error_span = Some(span.clone());
+            self.last_error_stack = self.call_stack.clone();
+        }
+    }
+
+    fn clear_error_context(&mut self) {
+        self.last_error_span = None;
+        self.last_error_stack.clear();
+    }
+
+    fn suggest_variable(&self, name: &str) -> Option<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.keys())
+            .filter_map(|candidate| {
+                let distance = levenshtein(name, candidate);
+                (distance <= 2).then(|| (distance, candidate.clone()))
+            })
+            .min_by_key(|(distance, candidate)| (*distance, candidate.clone()))
+            .map(|(_, candidate)| candidate)
     }
 
     pub fn take_pipeline_trace_events(&mut self) -> Vec<PipelineTraceEvent> {
@@ -833,6 +965,9 @@ impl Interpreter {
 
     fn define(&mut self, name: &str, value: Value, mutable: bool) {
         if let Some(scope) = self.scopes.last_mut() {
+            if self.verbose_mode {
+                eprintln!("[TRACE] define {} = {}", name, value);
+            }
             scope.insert(name.to_string(), (value, mutable));
         }
     }
@@ -852,11 +987,29 @@ impl Interpreter {
                 if !binding.1 {
                     return Err(RuntimeError::Immutable(name.to_string()));
                 }
-                binding.0 = value;
+                if self.verbose_mode {
+                    eprintln!("[TRACE] assign {}: {} -> {}", name, binding.0, value);
+                }
+                binding.0 = value.clone();
                 return Ok(Value::Unit);
             }
         }
         Err(RuntimeError::UndefinedVariable(name.to_string()))
+    }
+
+    fn assign_with_span(
+        &mut self,
+        name: &str,
+        value: Value,
+        span: &Span,
+    ) -> Result<Value, RuntimeError> {
+        // DBG-4-A: on_assign フック
+        if self.debug_hook.is_some() {
+            if let Some(hook) = self.debug_hook.as_mut() {
+                hook.on_assign(name, &value, span);
+            }
+        }
+        self.assign(name, value)
     }
 
     /// 現在の全スコープをフラットに Rc<RefCell<Map>> へスナップショット
@@ -905,9 +1058,8 @@ impl Interpreter {
                     let template_html = match args.get(1) {
                         Some(Value::String(s)) => s.clone(),
                         _ => {
-                            return Err(
-                                "__bloom_render_wasm: arg2 must be string (template_html)".to_string()
-                            )
+                            return Err("__bloom_render_wasm: arg2 must be string (template_html)"
+                                .to_string())
                         }
                     };
                     let full_path = if std::path::Path::new(&rel_path).is_absolute() {
@@ -918,7 +1070,12 @@ impl Interpreter {
                     let wasm_path_str = full_path.to_string_lossy().to_string();
                     match vm_bloom_render_wasm(&wasm_path_str, &template_html) {
                         Ok(html) => Ok(Value::Result(Ok(Box::new(Value::String(html))))),
-                        Err(e) => Ok(Value::Result(Err(e))),
+                        Err(e) => {
+                            if bloom_wasm_trace_enabled() {
+                                eprintln!("[WASM TRACE] SSR error: {}", e);
+                            }
+                            Ok(Value::Result(Err(e)))
+                        }
                     }
                 }
             }),
@@ -1250,6 +1407,7 @@ impl Interpreter {
     // ── パブリック評価 ────────────────────────────────────────────────────
 
     pub fn eval(&mut self, module: &Module) -> Result<Value, RuntimeError> {
+        self.clear_error_context();
         let mut result = Value::Unit;
         for stmt in &module.stmts {
             result = self.eval_stmt(stmt)?;
@@ -1257,10 +1415,61 @@ impl Interpreter {
         Ok(result)
     }
 
+    /// ソースコード文字列を解析して実行する（DBG-4 / 評価ヘルパー）
+    pub fn run(&mut self, source: &str) -> Result<Value, RuntimeError> {
+        use forge_compiler::lexer::Lexer;
+        use forge_compiler::parser::Parser;
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .map_err(|e| RuntimeError::Custom(format!("lex error: {}", e)))?;
+        let module = Parser::new(tokens)
+            .parse()
+            .map_err(|e| RuntimeError::Custom(format!("parse error: {}", e)))?;
+        self.eval(&module)
+    }
+
+    /// 任意の式文字列を評価して値を返す（evaluate リクエスト用, DBG-4-E）
+    pub fn eval_expr_str(&mut self, expression: &str) -> Result<Value, RuntimeError> {
+        use forge_compiler::lexer::Lexer;
+        use forge_compiler::parser::Parser;
+        let tokens = Lexer::new(expression)
+            .tokenize()
+            .map_err(|e| RuntimeError::Custom(format!("lex error: {}", e)))?;
+        let module = Parser::new(tokens)
+            .parse()
+            .map_err(|e| RuntimeError::Custom(format!("parse error: {}", e)))?;
+        self.eval(&module)
+    }
+
+    /// 可変変数を定義するヘルパー（evaluate 用スコープ構築に使用, DBG-4-E）
+    pub fn define_state(&mut self, name: &str, value: Value) {
+        self.define(name, value, true);
+    }
+
+    /// 不変変数を定義するヘルパー（evaluate 用スコープ構築に使用, DBG-4-E）
+    pub fn define_const(&mut self, name: &str, value: Value) {
+        self.define(name, value, false);
+    }
+
     // ── 文の評価 ──────────────────────────────────────────────────────────
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Value, RuntimeError> {
-        match stmt {
+        let stmt_span = stmt.span().clone();
+        if self.verbose_mode {
+            eprintln!(
+                "[TRACE] statement {}:{}:{}",
+                stmt_span.file, stmt_span.line, stmt_span.col
+            );
+        }
+        // DBG-4-A: デバッグフック on_statement
+        if self.debug_hook.is_some() {
+            let scopes_snapshot: Vec<HashMap<String, (crate::value::Value, bool)>> =
+                self.scopes.clone();
+            if let Some(hook) = self.debug_hook.as_mut() {
+                hook.on_statement(&stmt_span, &scopes_snapshot);
+            }
+        }
+        let result = match stmt {
             Stmt::Let { pat, value, .. } => {
                 let v = self.eval_expr(value)?;
                 self.bind_pat(pat, v)?;
@@ -1389,7 +1598,11 @@ impl Interpreter {
                 self.push_defer(body.clone());
                 Ok(Value::Unit)
             }
+        };
+        if let Err(error) = &result {
+            self.record_error_context(error, stmt.span());
         }
+        result
     }
 
     // ── When の評価（M-5-C）──────────────────────────────────────────────
@@ -2189,7 +2402,7 @@ impl Interpreter {
     // ── 式の評価 ──────────────────────────────────────────────────────────
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
-        match expr {
+        let result = match expr {
             Expr::Literal(lit, _) => Ok(eval_literal(lit)),
             Expr::Ident(name, _) => self.eval_ident(name),
             Expr::BinOp {
@@ -2236,9 +2449,9 @@ impl Interpreter {
             Expr::List(items, _) => self.eval_list(items),
             Expr::MapLiteral { pairs, .. } => self.eval_map_literal(pairs),
             Expr::SetLiteral { items, .. } => self.eval_set_literal(items),
-            Expr::Assign { name, value, .. } => {
+            Expr::Assign { name, value, span } => {
                 let v = self.eval_expr(value)?;
-                self.assign(name, v)
+                self.assign_with_span(name, v, span)
             }
             Expr::IndexAssign {
                 object,
@@ -2265,7 +2478,11 @@ impl Interpreter {
                 ..
             } => self.eval_enum_init(enum_name, variant, data),
             Expr::Pipeline { steps, .. } => self.eval_pipeline(steps),
+        };
+        if let Err(error) = &result {
+            self.record_error_context(error, expr.span());
         }
+        result
     }
 
     // ── 各評価メソッド ────────────────────────────────────────────────────
@@ -2673,6 +2890,13 @@ impl Interpreter {
             .map(|a| self.eval_expr(a))
             .collect::<Result<_, _>>()?;
 
+        let callee_name = match callee {
+            Expr::Ident(name, _) => Some(name.as_str()),
+            Expr::Field { field, .. } => Some(field.as_str()),
+            Expr::MethodCall { method, .. } => Some(method.as_str()),
+            _ => None,
+        };
+
         match callee_val {
             Value::Closure {
                 params,
@@ -2680,7 +2904,14 @@ impl Interpreter {
                 env,
                 return_type,
                 ..
-            } => self.call_closure(&params, &body, &env, return_type.clone(), arg_vals),
+            } => self.call_closure(
+                callee_name,
+                &params,
+                &body,
+                &env,
+                return_type.clone(),
+                arg_vals,
+            ),
             Value::NativeFunction(NativeFn(f)) => f(arg_vals).map_err(|msg| {
                 if let Some(rest) = msg.strip_prefix("__tf__:") {
                     RuntimeError::TestFailure(rest.to_string())
@@ -2694,6 +2925,7 @@ impl Interpreter {
 
     fn call_closure(
         &mut self,
+        name: Option<&str>,
         params: &[String],
         body: &Expr,
         captured: &CapturedEnv,
@@ -2718,7 +2950,60 @@ impl Interpreter {
             self.generator_stack.push(Vec::new());
         }
 
+        let frame_name = name.unwrap_or("<closure>").to_string();
+        if self.verbose_mode {
+            let span = body.span();
+            eprintln!(
+                "[TRACE] entering fn {}  {}:{}",
+                frame_name, span.file, span.line
+            );
+        }
+        // DBG-4-A: on_enter_fn フック
+        if self.debug_hook.is_some() {
+            let fn_args: Vec<(String, Value)> = params
+                .iter()
+                .zip(
+                    self.scopes
+                        .first()
+                        .map(|s| {
+                            s.iter()
+                                .filter(|(k, _)| params.contains(k))
+                                .map(|(k, (v, _))| (k.clone(), v.clone()))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(_, v)| v),
+                )
+                .map(|(p, v)| (p.clone(), v))
+                .collect();
+            if let Some(hook) = self.debug_hook.as_mut() {
+                hook.on_enter_fn(&frame_name, &fn_args);
+            }
+        }
+        self.call_stack.push(CallFrame {
+            fn_name: frame_name.clone(),
+            span: body.span().clone(),
+        });
         let result = self.eval_expr(body);
+        self.call_stack.pop();
+        // DBG-4-A: on_exit_fn フック
+        if self.debug_hook.is_some() {
+            let ret_val = match &result {
+                Ok(v) => v.clone(),
+                Err(RuntimeError::Return(v)) => v.clone(),
+                Err(_) => Value::Unit,
+            };
+            if let Some(hook) = self.debug_hook.as_mut() {
+                hook.on_exit_fn(&frame_name, &ret_val);
+            }
+        }
+        if self.verbose_mode {
+            match &result {
+                Ok(value) => eprintln!("[TRACE] exiting fn {} -> {}", frame_name, value),
+                Err(error) => eprintln!("[TRACE] exiting fn {} with error: {}", frame_name, error),
+            }
+        }
         if let Some(scope) = self.scopes.first() {
             let mut captured_mut = captured.borrow_mut();
             for (name, (value, mutable)) in scope {
@@ -3786,7 +4071,7 @@ impl Interpreter {
                 env,
                 return_type,
                 ..
-            } => self.call_closure(&params, &body, &env, return_type.clone(), args),
+            } => self.call_closure(None, &params, &body, &env, return_type.clone(), args),
             Value::NativeFunction(NativeFn(func)) => func(args).map_err(RuntimeError::Custom),
             v => Err(type_err("function", v.type_name())),
         }
@@ -6067,6 +6352,45 @@ fn type_err(expected: &str, found: &str) -> RuntimeError {
     }
 }
 
+fn is_control_flow_error(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Return(_)
+            | RuntimeError::PropagateErr(_)
+            | RuntimeError::LoopBreak
+            | RuntimeError::TestFailure(_)
+    )
+}
+
+fn source_line(span: &Span) -> Option<String> {
+    if span.file == "<source>" || span.file.starts_with('<') {
+        return None;
+    }
+    std::fs::read_to_string(&span.file).ok().and_then(|src| {
+        src.lines()
+            .nth(span.line.saturating_sub(1))
+            .map(str::to_string)
+    })
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let mut costs: Vec<usize> = (0..=b.chars().count()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut last = i;
+        costs[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let old = costs[j + 1];
+            costs[j + 1] = if ca == cb {
+                last
+            } else {
+                1 + last.min(costs[j]).min(old)
+            };
+            last = old;
+        }
+    }
+    costs[b.chars().count()]
+}
+
 fn int_float_op(
     l: Value,
     r: Value,
@@ -6280,6 +6604,13 @@ fn zero_value_for_type(ann: &TypeAnn) -> Value {
 ///
 /// tokio 不要のシンプルな std::net::TcpListener ベースの実装。
 /// 1 接続ずつ同期処理する（開発・テスト用）。
+fn forge_serve_port_override() -> Option<u16> {
+    std::env::var("FORGE_SERVE_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port > 0)
+}
+
 impl Interpreter {
     fn eval_tcp_listen(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         use std::collections::HashMap as StdMap;
@@ -6290,7 +6621,7 @@ impl Interpreter {
                 "tcp_listen takes 2 arguments: (port, handler)".to_string(),
             ));
         }
-        let port = match &args[0] {
+        let mut port = match &args[0] {
             Value::Int(n) => *n as u16,
             Value::Float(n) => *n as u16,
             v => {
@@ -6300,6 +6631,9 @@ impl Interpreter {
                 )))
             }
         };
+        if let Some(serve_port) = forge_serve_port_override() {
+            port = serve_port;
+        }
         let handler = args[1].clone();
 
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -6384,8 +6718,12 @@ impl Interpreter {
                 }
             } else {
                 let _ = match body {
-                    RawResponseBody::Text(ref s) => write_http_response(&stream, status, &headers, s),
-                    RawResponseBody::Bytes(ref b) => write_http_response_bytes(&stream, status, &headers, b),
+                    RawResponseBody::Text(ref s) => {
+                        write_http_response(&stream, status, &headers, s)
+                    }
+                    RawResponseBody::Bytes(ref b) => {
+                        write_http_response_bytes(&stream, status, &headers, b)
+                    }
                 };
             }
         }
@@ -6659,9 +6997,12 @@ impl Interpreter {
                     move |args: Vec<Value>| {
                         let rel = match args.first() {
                             Some(Value::String(s)) => s.clone(),
-                            Some(v) => return Err(format!(
-                                "read_file_bytes() expects string, got {}", v.type_name()
-                            )),
+                            Some(v) => {
+                                return Err(format!(
+                                    "read_file_bytes() expects string, got {}",
+                                    v.type_name()
+                                ))
+                            }
                             None => return Err("read_file_bytes() requires 1 argument".to_string()),
                         };
                         let path = if std::path::Path::new(&rel).is_absolute() {
@@ -6675,9 +7016,9 @@ impl Interpreter {
                                     .iter()
                                     .map(|b| Value::Int(*b as i64))
                                     .collect::<Vec<_>>();
-                                Ok(Value::Result(Ok(Box::new(Value::List(
-                                    std::rc::Rc::new(std::cell::RefCell::new(list)),
-                                )))))
+                                Ok(Value::Result(Ok(Box::new(Value::List(std::rc::Rc::new(
+                                    std::cell::RefCell::new(list),
+                                ))))))
                             }
                             Err(e) => Ok(Value::Result(Err(format!(
                                 "failed to read '{}': {}",
@@ -7243,13 +7584,22 @@ fn vm_wasm_call_from_file(
 ///
 /// `template_html` は `render(<Component />)` が生成した SSR HTML 骨格を想定。
 pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<String, String> {
+    let trace = bloom_wasm_trace_enabled();
+    if trace {
+        let size = std::fs::metadata(wasm_path).map(|m| m.len()).unwrap_or(0);
+        eprintln!("[WASM TRACE] load {} ({} bytes)", wasm_path, size);
+    }
     let engine = Engine::default();
     let module = WasmModule::from_file(&engine, wasm_path)
         .map_err(|e| format!("BloomWasmLoad: {}: {}", wasm_path, e))?;
     let mut store: Store<()> = Store::new(&engine, ());
     let mut linker = Linker::new(&engine);
     linker
-        .func_wrap("env", "forge_log", |_caller: wasmtime::Caller<'_, ()>, _ptr: i32, _len: i32| {})
+        .func_wrap(
+            "env",
+            "forge_log",
+            |_caller: wasmtime::Caller<'_, ()>, _ptr: i32, _len: i32| {},
+        )
         .map_err(|e| format!("BloomWasmLink forge_log: {}", e))?;
     let instance = linker
         .instantiate(&mut store, &module)
@@ -7261,6 +7611,9 @@ pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<Stri
 
     // __forge_init() — 状態初期化 + コマンドバッファへの書き込み
     if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&mut store, "__forge_init") {
+        if trace {
+            eprintln!("[WASM TRACE] call __forge_init");
+        }
         init_fn
             .call(&mut store, ())
             .map_err(|e| format!("BloomWasmSSR __forge_init: {}", e))?;
@@ -7282,6 +7635,12 @@ pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<Stri
     let cmd_len = len_fn
         .call(&mut store, ())
         .map_err(|e| format!("BloomWasmSSR len call: {}", e))? as usize;
+    if trace {
+        eprintln!(
+            "[WASM TRACE] command buffer ptr={} len={}",
+            cmd_ptr, cmd_len
+        );
+    }
 
     // WASM メモリ全体をコピー
     let mem_size = memory.data_size(&store);
@@ -7305,12 +7664,22 @@ pub fn vm_bloom_render_wasm(wasm_path: &str, template_html: &str) -> Result<Stri
         ]);
         commands.push(word);
     }
+    if trace {
+        eprintln!("[WASM TRACE] commands {:?}", commands);
+    }
 
     Ok(bloom_apply_commands_to_html(
         template_html,
         &commands,
         &mem_bytes,
     ))
+}
+
+fn bloom_wasm_trace_enabled() -> bool {
+    matches!(
+        std::env::var("FORGE_WASM_TRACE").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("on")
+    )
 }
 
 const BLOOM_OP_SET_TEXT: i32 = 1;
@@ -7455,7 +7824,10 @@ fn bloom_inject_attr(html: &str, id: &str, attr_name: &str, attr_val: &str) -> S
     let Some(tag_start) = html.find(&id_attr) else {
         return html.to_string();
     };
-    let tag_end = html[tag_start..].find('>').map(|p| tag_start + p).unwrap_or(html.len());
+    let tag_end = html[tag_start..]
+        .find('>')
+        .map(|p| tag_start + p)
+        .unwrap_or(html.len());
     if html[tag_start..tag_end].contains(attr_name) {
         return html.to_string(); // 既にある場合はスキップ
     }
@@ -7711,7 +8083,13 @@ enum RawResponseBody {
     Bytes(Vec<u8>),
 }
 
-fn extract_raw_response(val: Value) -> (i64, std::collections::HashMap<String, String>, RawResponseBody) {
+fn extract_raw_response(
+    val: Value,
+) -> (
+    i64,
+    std::collections::HashMap<String, String>,
+    RawResponseBody,
+) {
     let fields = match val {
         Value::Struct { fields, .. } => fields,
         _ => {
@@ -8591,6 +8969,66 @@ mod tests {
 
     fn run(src: &str) -> Result<Value, RuntimeError> {
         eval_source(src)
+    }
+
+    #[test]
+    fn test_error_span() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = dir.path().join("error_messages.forge");
+        let source = "let count = 1\nprintln(cout)\n";
+        std::fs::write(&file, source).expect("write");
+        let module = forge_compiler::parser::parse_source_with_file(
+            source,
+            file.to_string_lossy().to_string(),
+        )
+        .expect("parse");
+        let mut interp = Interpreter::with_file_path(&file);
+        let err = interp
+            .eval(&module)
+            .expect_err("expected undefined variable");
+        let rendered = interp.format_runtime_error(&err);
+        assert!(
+            rendered.contains("error_messages.forge:2:9"),
+            "{}",
+            rendered
+        );
+        assert!(rendered.contains("println(cout)"), "{}", rendered);
+        assert!(
+            rendered.contains("hint: did you mean `count`?"),
+            "{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_stack_trace() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = dir.path().join("stack_trace.forge");
+        let source = r#"
+fn inner() {
+    missing
+}
+
+fn outer() {
+    inner()
+}
+
+outer()
+"#;
+        std::fs::write(&file, source).expect("write");
+        let module = forge_compiler::parser::parse_source_with_file(
+            source,
+            file.to_string_lossy().to_string(),
+        )
+        .expect("parse");
+        let mut interp = Interpreter::with_file_path(&file);
+        let err = interp
+            .eval(&module)
+            .expect_err("expected undefined variable");
+        let rendered = interp.format_runtime_error(&err);
+        assert!(rendered.contains("Stack trace:"), "{}", rendered);
+        assert!(rendered.contains("inner"), "{}", rendered);
+        assert!(rendered.contains("outer"), "{}", rendered);
     }
 
     fn run_with_output(src: &str) -> Result<String, RuntimeError> {

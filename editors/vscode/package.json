@@ -25,7 +25,10 @@
   ],
   "activationEvents": [
     "onLanguage:forge",
-    "onNotebook:fnb"
+    "onNotebook:fnb",
+    "onDebug",
+    "onDebugResolve:forge",
+    "onDebugDynamicConfigurations:forge"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -72,6 +75,82 @@
         ]
       }
     ],
+    "breakpoints": [
+      { "language": "forge" },
+      { "language": "bloom" }
+    ],
+    "debuggers": [
+      {
+        "type": "forge",
+        "label": "ForgeScript Debug",
+        "languages": ["forge"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the ForgeScript entry point (.forge file)",
+                "default": "${workspaceFolder}/src/main.forge"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["run", "serve"],
+                "default": "run",
+                "description": "Execution mode: 'run' for scripts, 'serve' for Anvil HTTP server"
+              },
+              "port": {
+                "type": "number",
+                "default": 8080,
+                "description": "Port number when mode is 'serve'"
+              },
+              "dapPath": {
+                "type": "string",
+                "default": "forge-dap",
+                "description": "Path to the forge-dap binary. Defaults to 'forge-dap' (must be in PATH)."
+              },
+              "noDebug": {
+                "type": "boolean",
+                "default": false,
+                "description": "Run without debug adapter (no breakpoints)"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "forge",
+            "request": "launch",
+            "name": "Run ForgeScript",
+            "program": "${workspaceFolder}/src/main.forge"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "ForgeScript: Run",
+            "description": "Run a ForgeScript file",
+            "body": {
+              "type": "forge",
+              "request": "launch",
+              "name": "Run ForgeScript",
+              "program": "^\"\\${workspaceFolder}/src/main.forge\""
+            }
+          },
+          {
+            "label": "ForgeScript: Serve (Anvil debug)",
+            "description": "Start Anvil HTTP server with debugging",
+            "body": {
+              "type": "forge",
+              "request": "launch",
+              "name": "Serve Anvil (debug)",
+              "program": "^\"\\${workspaceFolder}/src/main.forge\"",
+              "mode": "serve",
+              "port": 8080
+            }
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "ForgeScript",
       "properties": {
@@ -84,6 +163,11 @@
           "type": "string",
           "default": "",
           "description": "Command or executable path for notebook execution. The extension runs `<path> notebook --kernel`."
+        },
+        "forge.dap.path": {
+          "type": "string",
+          "default": "forge-dap",
+          "description": "Path to the forge-dap binary for DAP debugging. Defaults to 'forge-dap' (must be in PATH)."
         }
       }
     }

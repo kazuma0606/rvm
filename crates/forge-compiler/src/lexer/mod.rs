@@ -31,6 +31,7 @@ impl std::error::Error for LexError {}
 /// Lexer 本体
 pub struct Lexer {
     source: Vec<char>,
+    file: String,
     pos: usize,
     line: usize,
     col: usize,
@@ -38,8 +39,13 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
+        Self::with_file(source, "<source>")
+    }
+
+    pub fn with_file(source: &str, file: impl Into<String>) -> Self {
         Self {
             source: source.chars().collect(),
+            file: file.into(),
             pos: 0,
             line: 1,
             col: 1,
@@ -70,6 +76,7 @@ impl Lexer {
 
     fn make_span(&self, start: usize, start_line: usize, start_col: usize) -> Span {
         Span {
+            file: self.file.clone(),
             start,
             end: self.pos,
             line: start_line,
@@ -637,6 +644,10 @@ impl Lexer {
 /// 便利関数: ソース文字列からトークン列（Eof 含む）を返す
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     Lexer::new(source).tokenize()
+}
+
+pub fn lex_with_file(source: &str, file: impl Into<String>) -> Result<Vec<Token>, LexError> {
+    Lexer::with_file(source, file).tokenize()
 }
 
 /// テスト用ヘルパー: トークン種別のみ抽出

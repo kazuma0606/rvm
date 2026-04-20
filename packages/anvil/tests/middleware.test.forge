@@ -75,6 +75,12 @@ test "middleware: logger" {
     assert_eq(response.body, "ok")
 }
 
+test "middleware: logger line format" {
+    let req = new_request("POST", "/items", "")
+    let response = Response::text("created").status(201)
+    assert_eq(logger_line(req, response, 12), "POST /items -> 201 12ms")
+}
+
 test "middleware: function shape" {
     let middleware = logger()
     let run = middleware.run

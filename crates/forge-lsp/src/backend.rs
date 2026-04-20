@@ -1163,6 +1163,7 @@ mod tests {
     #[test]
     fn test_span_to_range() {
         let range = span_to_range(&Span {
+            file: String::new(),
             start: 10,
             end: 14,
             line: 2,
@@ -1215,6 +1216,7 @@ mod tests {
             expected: "Ident".to_string(),
             found: forge_compiler::lexer::tokens::TokenKind::Let,
             span: Span {
+                file: String::new(),
                 start: 0,
                 end: 3,
                 line: 1,
@@ -1229,6 +1231,7 @@ mod tests {
         let diagnostic = type_error_to_diagnostic(TypeError {
             message: "型不一致".to_string(),
             span: Some(Span {
+                file: String::new(),
                 start: 4,
                 end: 5,
                 line: 1,
@@ -1354,6 +1357,7 @@ mod tests {
                 kind: SymbolKind::Var,
                 type_display: "list<number>".to_string(),
                 span: Span {
+                    file: String::new(),
                     start: 0,
                     end: 2,
                     line: 1,

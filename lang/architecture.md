@@ -1,6 +1,8 @@
 # ForgeScript アーキテクチャ設計方針
 
 > 作成: 2026-04-08
+> **統合先**: 本ファイルの内容は `lang/di/spec.md` に整理・統合された。
+> 新規参照は `lang/di/spec.md` を使うこと。
 > 関連: `lang/extend_idea.md`（デコレータ拡張 §8）、`lang/extends/spec.md`（E-3 operator / E-5 const fn）
 > 前提: `extend_idea.md` §9（`forge build` 時の Rust コード保存）の実装後に効果を検証できる
 

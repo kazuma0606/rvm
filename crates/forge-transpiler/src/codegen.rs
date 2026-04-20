@@ -853,6 +853,7 @@ impl CodeGenerator {
                 .collect(),
             tail: None,
             span: forge_compiler::lexer::Span {
+                file: "<transpiler>".to_string(),
                 start: 0,
                 end: 0,
                 line: 1,

@@ -5,6 +5,7 @@
 /// ソース上の位置情報
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
+    pub file: String,
     pub start: usize,
     pub end: usize,
     pub line: usize,

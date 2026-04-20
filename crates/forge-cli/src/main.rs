@@ -1,7 +1,8 @@
 // forge-cli: ForgeScript CLI
-// Phase 2-D 実装
+// Phase 2-D / DBG-5 実装
 
 mod forge_toml;
+mod hot_reload;
 mod new;
 mod templates;
 
@@ -13,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rustyline::DefaultEditor;
+
 use crate::forge_toml::{DependencyValue, ForgeToml};
 use bloom_compiler::{
     collect_bloom_files, compile_bloom_direct, compile_bloom_to_wasm,
@@ -22,7 +25,7 @@ use bloom_compiler::{
 };
 use forge_compiler::ast::{Stmt, UsePath};
 use forge_compiler::deps::DepsManager;
-use forge_compiler::parser::parse_source;
+use forge_compiler::parser::{parse_source, parse_source_with_file};
 use forge_compiler::typechecker::type_check_source;
 use forge_goblet::{
     analyze_source as goblet_analyze_source,
@@ -79,7 +82,38 @@ fn main() {
             }
         }
         Some("run") => {
-            run_entry(args.get(2).map(|s| s.as_str()));
+            let verbose = args
+                .iter()
+                .skip(2)
+                .any(|arg| matches!(arg.as_str(), "--verbose" | "-v"));
+            let path = args
+                .iter()
+                .skip(2)
+                .find(|arg| !arg.starts_with('-'))
+                .map(|s| s.as_str());
+            run_entry(path, verbose);
+        }
+        Some("serve") => {
+            if args
+                .iter()
+                .skip(2)
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                print_serve_help();
+                return;
+            }
+            let opts = parse_serve_options(&args);
+            std::env::set_var("FORGE_SERVE_PORT", opts.port.to_string());
+            std::env::set_var("PORT", opts.port.to_string());
+            if opts.wasm_trace {
+                std::env::set_var("FORGE_WASM_TRACE", "1");
+            }
+            if opts.watch {
+                // DBG-5-A: ホットリロードモードでサーバーを起動
+                start_serve_with_watch(&opts);
+            } else {
+                run_entry(opts.path.as_deref(), false);
+            }
         }
         Some("check") => {
             if let Some(path) = args.get(2) {
@@ -109,9 +143,18 @@ fn main() {
                 .position(|s| s == "-o")
                 .and_then(|i| args.get(i + 1));
             let web = args.iter().any(|arg| arg == "--web");
+            let dump_ast = args.iter().any(|arg| arg == "--dump-ast");
+            let dump_forge = args.iter().any(|arg| arg == "--dump-forge");
             let path = build_path_arg(&args);
             if web {
-                build_web_entry(path, output.map(|s| s.as_str()));
+                build_web_entry(
+                    path,
+                    output.map(|s| s.as_str()),
+                    BloomDumpOptions {
+                        dump_ast,
+                        dump_forge,
+                    },
+                );
             } else {
                 build_entry(path, output.map(|s| s.as_str()));
             }
@@ -251,7 +294,71 @@ fn build_path_arg(args: &[String]) -> Option<&str> {
     None
 }
 
-fn run_file(path: &str) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeOptions {
+    path: Option<String>,
+    port: u16,
+    wasm_trace: bool,
+    /// --watch フラグ: ファイル変更を監視してホットリロードを行う
+    watch: bool,
+}
+
+fn parse_serve_options(args: &[String]) -> ServeOptions {
+    let mut path = None;
+    let mut port = 8080u16;
+    let mut wasm_trace = false;
+    let mut watch = false;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" | "-p" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("エラー: --port にはポート番号が必要です");
+                    std::process::exit(1);
+                };
+                port = parse_serve_port(value);
+                i += 2;
+            }
+            "--wasm-trace" => {
+                wasm_trace = true;
+                i += 1;
+            }
+            "--watch" | "-w" => {
+                watch = true;
+                i += 1;
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("エラー: 不明な serve オプション '{}'", arg);
+                eprintln!("ヒント: `forge serve --help` で使用方法を確認できます");
+                std::process::exit(1);
+            }
+            arg => {
+                if path.is_none() {
+                    path = Some(arg.to_string());
+                }
+                i += 1;
+            }
+        }
+    }
+    ServeOptions {
+        path,
+        port,
+        wasm_trace,
+        watch,
+    }
+}
+
+fn parse_serve_port(value: &str) -> u16 {
+    match value.parse::<u16>() {
+        Ok(port) if port > 0 => port,
+        _ => {
+            eprintln!("エラー: 無効なポート番号 '{}'", value);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_file(path: &str, verbose: bool) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -260,7 +367,7 @@ fn run_file(path: &str) {
         }
     };
 
-    let module = match parse_source(&source) {
+    let module = match parse_source_with_file(&source, path.to_string()) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("構文エラー: {}", e);
@@ -270,15 +377,16 @@ fn run_file(path: &str) {
 
     let file_path = std::path::Path::new(path);
     let mut interp = Interpreter::with_file_path(file_path);
+    interp.set_verbose_mode(verbose);
     if let Err(e) = interp.eval(&module) {
-        eprintln!("実行エラー: {}", e);
+        eprintln!("{}", interp.format_runtime_error(&e));
         std::process::exit(1);
     }
 }
 
-fn run_entry(path: Option<&str>) {
+fn run_entry(path: Option<&str>, verbose: bool) {
     match resolve_project_request(path) {
-        Ok(ProjectRequest::File(file_path)) => run_file(&file_path.to_string_lossy()),
+        Ok(ProjectRequest::File(file_path)) => run_file(&file_path.to_string_lossy(), verbose),
         Ok(ProjectRequest::Project {
             project_dir,
             forge_toml,
@@ -287,9 +395,9 @@ fn run_entry(path: Option<&str>) {
             let entry = project_dir.join(&forge_toml.package.entry);
             let dep_paths = forge_toml.local_dep_paths(&project_dir);
             if dep_paths.is_empty() {
-                run_file_with_overrides(&entry.to_string_lossy(), overrides);
+                run_file_with_overrides(&entry.to_string_lossy(), overrides, verbose);
             } else {
-                run_file_with_deps_and_overrides(&entry, dep_paths, overrides);
+                run_file_with_deps_and_overrides(&entry, dep_paths, overrides, verbose);
             }
         }
         Err(e) => {
@@ -312,7 +420,7 @@ fn run_file_with_deps(entry: &Path, dep_paths: Vec<(String, PathBuf)>) {
         }
     };
 
-    let module = match parse_source(&source) {
+    let module = match parse_source_with_file(&source, entry.to_string_lossy().to_string()) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("構文エラー: {}", e);
@@ -333,20 +441,22 @@ fn run_file_with_deps(entry: &Path, dep_paths: Vec<(String, PathBuf)>) {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let mut interp = Interpreter::with_project_root_and_deps(project_root, dep_paths);
+    interp.set_verbose_mode(false);
     if let Err(e) = interp.eval(&module) {
-        eprintln!("実行エラー: {}", e);
+        eprintln!("{}", interp.format_runtime_error(&e));
         std::process::exit(1);
     }
 }
 
-fn run_file_with_overrides(path: &str, overrides: HashMap<PathBuf, String>) {
-    run_file_with_deps_and_overrides(Path::new(path), vec![], overrides);
+fn run_file_with_overrides(path: &str, overrides: HashMap<PathBuf, String>, verbose: bool) {
+    run_file_with_deps_and_overrides(Path::new(path), vec![], overrides, verbose);
 }
 
 fn run_file_with_deps_and_overrides(
     entry: &Path,
     dep_paths: Vec<(String, PathBuf)>,
     overrides: HashMap<PathBuf, String>,
+    verbose: bool,
 ) {
     let source = match fs::read_to_string(entry) {
         Ok(s) => s,
@@ -360,7 +470,7 @@ fn run_file_with_deps_and_overrides(
         }
     };
 
-    let module = match parse_source(&source) {
+    let module = match parse_source_with_file(&source, entry.to_string_lossy().to_string()) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("構文エラー: {}", e);
@@ -381,13 +491,14 @@ fn run_file_with_deps_and_overrides(
         .unwrap_or_else(|| PathBuf::from("."));
 
     let mut interp = Interpreter::with_project_root_and_deps(project_root, dep_paths);
+    interp.set_verbose_mode(verbose);
     if let Some(loader) = interp.module_loader_mut() {
         for (path, source) in overrides {
             loader.add_source_override(path, source);
         }
     }
     if let Err(e) = interp.eval(&module) {
-        eprintln!("実行エラー: {}", e);
+        eprintln!("{}", interp.format_runtime_error(&e));
         std::process::exit(1);
     }
 }
@@ -472,26 +583,230 @@ fn test_file_with_overrides(
     }
 }
 
+/// ブレース（`{` / `}`）の深さを数えてソースが「完結しているか」を返す
+/// 完結している（深さ 0）なら true
+pub(crate) fn is_complete_input(source: &str) -> bool {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if escape_next {
+            escape_next = false;
+            i += 1;
+            continue;
+        }
+        if in_string {
+            if c == '\\' {
+                escape_next = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        // 行コメント
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            // 行末まで読み飛ばす
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth <= 0
+}
+
+/// REPL 上で入力ソースを評価し結果を表示する（use 文のシンボル追跡も行う）
+fn repl_eval_and_print(source: &str, interp: &mut Interpreter) {
+    match parse_source(source) {
+        Ok(module) => {
+            let before_keys: std::collections::HashSet<String> =
+                interp.imported_symbols.keys().cloned().collect();
+
+            match interp.eval(&module) {
+                Ok(Value::Unit) => {
+                    // use 文で新たに追加されたシンボルを loaded_modules に記録する
+                    let has_use_decl = module
+                        .stmts
+                        .iter()
+                        .any(|s| matches!(s, forge_compiler::ast::Stmt::UseDecl { .. }));
+                    if has_use_decl {
+                        let after_keys: std::collections::HashSet<String> =
+                            interp.imported_symbols.keys().cloned().collect();
+                        let new_syms: Vec<String> =
+                            after_keys.difference(&before_keys).cloned().collect();
+
+                        if !new_syms.is_empty() {
+                            for stmt in &module.stmts {
+                                if let forge_compiler::ast::Stmt::UseDecl { path, .. } = stmt {
+                                    let mod_path = match path {
+                                        forge_compiler::ast::UsePath::Local(p) => p.clone(),
+                                        forge_compiler::ast::UsePath::External(p) => p.clone(),
+                                        forge_compiler::ast::UsePath::Stdlib(p) => p.clone(),
+                                    };
+                                    let entry = interp
+                                        .loaded_modules
+                                        .entry(mod_path.clone())
+                                        .or_insert_with(Vec::new);
+                                    for sym in &new_syms {
+                                        if !entry.contains(sym) {
+                                            entry.push(sym.clone());
+                                        }
+                                    }
+                                    println!("✔ {} をロード済み", mod_path);
+                                }
+                            }
+                        }
+                    }
+                    // Unit は何も表示しない（println などの副作用は既に出力済み）
+                }
+                Ok(val) => println!("{}", val),
+                Err(e) => eprintln!("エラー: {}", interp.format_runtime_error(&e)),
+            }
+        }
+        Err(e) => eprintln!("構文エラー: {}", e),
+    }
+}
+
 fn run_repl() {
-    println!("ForgeScript REPL v0.0.1");
-    println!("終了: exit と入力するか Ctrl+C を押してください");
-    println!("モジュールコマンド: :modules, :reload <path>, :unload <path>");
+    println!("ForgeScript REPL v{}", env!("CARGO_PKG_VERSION"));
+    println!(":help でコマンド一覧を表示します。Ctrl+D または :quit で終了します。");
 
     let mut interp = Interpreter::new();
     // REPL ではカレントディレクトリをプロジェクトルートとしてモジュールローダーを初期化する（M-7-A）
     interp.init_module_loader_from_cwd();
 
-    let stdin = io::stdin();
+    // rustyline で行編集・履歴を有効化（DBG-3-A）
+    let mut rl = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            eprintln!(
+                "警告: 行編集を初期化できませんでした（{}）。フォールバックモードで継続します。",
+                e
+            );
+            // フォールバック: rustyline が使えない場合は stdin で代替
+            run_repl_fallback(&mut interp);
+            return;
+        }
+    };
+
+    let mut buffer = String::new(); // 複数行バッファ（DBG-3-B）
 
     loop {
-        print!("> ");
+        let prompt = if buffer.is_empty() {
+            "forge> ".to_string()
+        } else {
+            "....> ".to_string()
+        };
+
+        let readline = rl.readline(&prompt);
+        match readline {
+            Ok(line) => {
+                // 履歴に追加（空行は除く）
+                if !line.trim().is_empty() {
+                    let _ = rl.add_history_entry(line.as_str());
+                }
+
+                let trimmed = line.trim();
+
+                // `:quit` / `:q` は複数行バッファ中でも即終了（DBG-3-C）
+                if trimmed == ":quit" || trimmed == ":q" || trimmed == "exit" || trimmed == "quit" {
+                    println!("Bye!");
+                    break;
+                }
+
+                // 複数行バッファが空でコマンド入力の場合は即処理（DBG-3-C）
+                if buffer.is_empty() && trimmed.starts_with(':') {
+                    match handle_repl_command(trimmed, &mut interp) {
+                        Some(Ok(msg)) => {
+                            if !msg.is_empty() {
+                                println!("{}", msg);
+                            }
+                        }
+                        Some(Err(e)) => eprintln!("エラー: {}", e),
+                        None => {
+                            // ':' で始まるが known コマンドでなかった場合は式として評価
+                            repl_eval_and_print(trimmed, &mut interp);
+                        }
+                    }
+                    continue;
+                }
+
+                // 複数行バッファに追記（DBG-3-B）
+                if !buffer.is_empty() {
+                    buffer.push('\n');
+                }
+                buffer.push_str(&line);
+
+                // 入力が完結しているか判定
+                if is_complete_input(&buffer) {
+                    let source = buffer.trim().to_string();
+                    buffer.clear();
+                    if source.is_empty() {
+                        continue;
+                    }
+                    repl_eval_and_print(&source, &mut interp);
+                }
+                // 完結していなければ次のプロンプトへ（`....> `）
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                // Ctrl+C: バッファをクリアして続行
+                buffer.clear();
+                println!("（入力をキャンセルしました。Ctrl+D で終了）");
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                // Ctrl+D: 終了（DBG-3-C）
+                if !buffer.is_empty() {
+                    // バッファに残りがあれば評価を試みる
+                    let source = buffer.trim().to_string();
+                    buffer.clear();
+                    if !source.is_empty() {
+                        repl_eval_and_print(&source, &mut interp);
+                    }
+                }
+                println!("Bye!");
+                break;
+            }
+            Err(e) => {
+                eprintln!("入力エラー: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// rustyline が利用できない環境向けのフォールバック REPL
+fn run_repl_fallback(interp: &mut Interpreter) {
+    let stdin = io::stdin();
+    let mut buffer = String::new();
+
+    loop {
+        if buffer.is_empty() {
+            print!("forge> ");
+        } else {
+            print!("....> ");
+        }
         if io::stdout().flush().is_err() {
             break;
         }
 
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => {
+                // EOF (Ctrl+D)
+                println!("\nBye!");
+                break;
+            }
             Ok(_) => {}
             Err(e) => {
                 eprintln!("入力エラー: {}", e);
@@ -500,84 +815,128 @@ fn run_repl() {
         }
 
         let trimmed = line.trim();
-        if trimmed == "exit" || trimmed == "quit" {
+
+        if trimmed == ":quit" || trimmed == ":q" || trimmed == "exit" || trimmed == "quit" {
+            println!("Bye!");
             break;
         }
-        if trimmed.is_empty() {
-            continue;
-        }
 
-        // REPL 専用コマンド（M-7-A）
-        if let Some(cmd_result) = handle_repl_command(trimmed, &mut interp) {
-            match cmd_result {
-                Ok(msg) => {
+        if buffer.is_empty() && trimmed.starts_with(':') {
+            match handle_repl_command(trimmed, interp) {
+                Some(Ok(msg)) => {
                     if !msg.is_empty() {
                         println!("{}", msg);
                     }
                 }
-                Err(e) => eprintln!("エラー: {}", e),
+                Some(Err(e)) => eprintln!("エラー: {}", e),
+                None => repl_eval_and_print(trimmed, interp),
             }
             continue;
         }
 
-        // `use ...` 文の場合はモジュールロードとして処理してシンボルを記録する（M-7-A）
-        match parse_source(trimmed) {
-            Ok(module) => {
-                // use 文の実行前に imported_symbols のキーを記録する
-                let before_keys: std::collections::HashSet<String> =
-                    interp.imported_symbols.keys().cloned().collect();
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        buffer.push_str(&line);
 
-                match interp.eval(&module) {
-                    Ok(Value::Unit) => {
-                        // use 文で新たに追加されたシンボルを loaded_modules に記録する
-                        let has_use_decl = module
-                            .stmts
-                            .iter()
-                            .any(|s| matches!(s, forge_compiler::ast::Stmt::UseDecl { .. }));
-                        if has_use_decl {
-                            let after_keys: std::collections::HashSet<String> =
-                                interp.imported_symbols.keys().cloned().collect();
-                            let new_syms: Vec<String> =
-                                after_keys.difference(&before_keys).cloned().collect();
-
-                            if !new_syms.is_empty() {
-                                // use 文からモジュールパスを取得する
-                                for stmt in &module.stmts {
-                                    if let forge_compiler::ast::Stmt::UseDecl { path, .. } = stmt {
-                                        let mod_path = match path {
-                                            forge_compiler::ast::UsePath::Local(p) => p.clone(),
-                                            forge_compiler::ast::UsePath::External(p) => p.clone(),
-                                            forge_compiler::ast::UsePath::Stdlib(p) => p.clone(),
-                                        };
-                                        let entry = interp
-                                            .loaded_modules
-                                            .entry(mod_path.clone())
-                                            .or_insert_with(Vec::new);
-                                        for sym in &new_syms {
-                                            if !entry.contains(sym) {
-                                                entry.push(sym.clone());
-                                            }
-                                        }
-                                        println!("✔ {} をロード済み", mod_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(val) => println!("{}", val),
-                    Err(e) => eprintln!("エラー: {}", e),
-                }
+        if is_complete_input(&buffer) {
+            let source = buffer.trim().to_string();
+            buffer.clear();
+            if !source.is_empty() {
+                repl_eval_and_print(&source, interp);
             }
-            Err(e) => eprintln!("構文エラー: {}", e),
         }
     }
 }
 
-/// REPL 専用コマンドを処理する（M-7-A）
+/// REPL 専用コマンドを処理する（DBG-3-C, M-7-A）
 /// コマンドでない場合は None を返す
 fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<String, String>> {
-    if input == ":modules" {
-        // ロード済みモジュール一覧を表示
+    // ── DBG-3-C: 新コマンド ──────────────────────────────────────────────
+
+    // :help — コマンド一覧表示
+    if input == ":help" || input == ":h" {
+        return Some(Ok("利用可能なコマンド:\n\
+             \x20 :type <expr>     — 式の型を表示\n\
+             \x20 :trace on|off    — 実行トレースの切り替え\n\
+             \x20 :load <file>     — ファイルをスコープに読み込む\n\
+             \x20 :reset           — スコープをリセット\n\
+             \x20 :modules         — ロード済みモジュール一覧\n\
+             \x20 :reload <path>   — モジュールを再ロード\n\
+             \x20 :unload <path>   — モジュールをアンロード\n\
+             \x20 :help            — このヘルプを表示\n\
+             \x20 :quit / :q       — REPL を終了"
+            .to_string()));
+    }
+
+    // :type <expr> — 式の型を表示
+    if let Some(rest) = input.strip_prefix(":type ") {
+        let expr = rest.trim();
+        if expr.is_empty() {
+            return Some(Err(":type には式を指定してください".to_string()));
+        }
+        match parse_source(expr) {
+            Ok(module) => {
+                // 一時的な評価コンテキストをクローンして型を取得する
+                // インタープリタの状態を変えないよう、式だけ評価して Value の型名を返す
+                match interp.eval(&module) {
+                    Ok(val) => {
+                        let type_str = val.dynamic_type_name();
+                        Some(Ok(format!("{}", type_str)))
+                    }
+                    Err(e) => Some(Err(format!("評価エラー: {}", e))),
+                }
+            }
+            Err(e) => Some(Err(format!("構文エラー: {}", e))),
+        }
+    }
+    // :trace on|off — 実行トレースの切り替え
+    else if let Some(rest) = input.strip_prefix(":trace") {
+        let arg = rest.trim();
+        match arg {
+            "on" => {
+                interp.set_verbose_mode(true);
+                Some(Ok("トレース: ON".to_string()))
+            }
+            "off" => {
+                interp.set_verbose_mode(false);
+                Some(Ok("トレース: OFF".to_string()))
+            }
+            _ => Some(Err(
+                ":trace on または :trace off を指定してください".to_string()
+            )),
+        }
+    }
+    // :load <file> — ファイルをスコープに読み込む
+    else if let Some(rest) = input.strip_prefix(":load ") {
+        let file_path = rest.trim();
+        if file_path.is_empty() {
+            return Some(Err(":load にはファイルパスを指定してください".to_string()));
+        }
+        match fs::read_to_string(file_path) {
+            Ok(source) => match parse_source(&source) {
+                Ok(module) => match interp.eval(&module) {
+                    Ok(_) => Some(Ok(format!("✔ {} を読み込みました", file_path))),
+                    Err(e) => Some(Err(format!("実行エラー: {}", e))),
+                },
+                Err(e) => Some(Err(format!("構文エラー: {}", e))),
+            },
+            Err(e) => Some(Err(format!(
+                "ファイル '{}' を読み込めませんでした: {}",
+                file_path, e
+            ))),
+        }
+    }
+    // :reset — スコープをリセット
+    else if input == ":reset" {
+        *interp = Interpreter::new();
+        interp.init_module_loader_from_cwd();
+        Some(Ok("スコープをリセットしました".to_string()))
+    }
+    // ── M-7-A: モジュール管理コマンド ────────────────────────────────────
+
+    // :modules — ロード済みモジュール一覧
+    else if input == ":modules" {
         if interp.loaded_modules.is_empty() {
             return Some(Ok("ロード済みモジュール: なし".to_string()));
         }
@@ -587,21 +946,16 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
         for path in paths {
             output.push_str(&format!("\n  - {}", path));
         }
-        return Some(Ok(output));
-    }
-
-    if let Some(rest) = input.strip_prefix(":reload ") {
+        Some(Ok(output))
+    } else if let Some(rest) = input.strip_prefix(":reload ") {
         let path = rest.trim();
         if path.is_empty() {
             return Some(Err(
                 ":reload にはモジュールパスを指定してください".to_string()
             ));
         }
-        // キャッシュから削除してアンロード
         interp.unload_module(path);
-        // モジュールローダーのキャッシュもクリアする
         interp.clear_module_loader_cache(path);
-        // 再度ロードする: use パスとして再評価する
         let use_src = format!("use ./{}.{}", path, "*");
         match parse_source(&use_src) {
             Ok(module) => {
@@ -650,7 +1004,7 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
     } else if input.starts_with(':') {
         // 未知のコマンド
         Some(Err(format!(
-            "不明なコマンド '{}'\n利用可能: :modules, :reload <path>, :unload <path>",
+            "不明なコマンド '{}'\n:help でコマンド一覧を確認できます",
             input
         )))
     } else {
@@ -1518,10 +1872,18 @@ fn build_entry(path: Option<&str>, output: Option<&str>) {
     }
 }
 
-fn build_web_entry(path: Option<&str>, output: Option<&str>) {
+#[derive(Debug, Clone, Copy, Default)]
+struct BloomDumpOptions {
+    dump_ast: bool,
+    dump_forge: bool,
+}
+
+fn build_web_entry(path: Option<&str>, output: Option<&str>, dump: BloomDumpOptions) {
     match resolve_build_request(path) {
-        Ok(BuildRequest::File(file_path)) => build_web_file(&file_path, output),
-        Ok(BuildRequest::Project { project_dir, .. }) => build_web_project(&project_dir, output),
+        Ok(BuildRequest::File(file_path)) => build_web_file(&file_path, output, dump),
+        Ok(BuildRequest::Project { project_dir, .. }) => {
+            build_web_project(&project_dir, output, dump)
+        }
         Err(e) => {
             eprintln!("エラー: {}", e);
             std::process::exit(1);
@@ -1568,7 +1930,7 @@ fn test_entry(path: Option<&str>, filter: Option<&str>) {
     }
 }
 
-fn build_web_file(path: &Path, output: Option<&str>) {
+fn build_web_file(path: &Path, output: Option<&str>, dump: BloomDumpOptions) {
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let source_root = project_dir;
     let rel_path = path
@@ -1578,15 +1940,18 @@ fn build_web_file(path: &Path, output: Option<&str>) {
     let out_dir = output
         .map(PathBuf::from)
         .unwrap_or_else(|| project_dir.join("dist"));
-    if let Err(e) =
-        emit_bloom_web_artifacts(source_root, &[(path.to_path_buf(), rel_path)], &out_dir)
-    {
+    if let Err(e) = emit_bloom_web_artifacts(
+        source_root,
+        &[(path.to_path_buf(), rel_path)],
+        &out_dir,
+        dump,
+    ) {
         eprintln!("エラー: {}", e);
         std::process::exit(1);
     }
 }
 
-fn build_web_project(project_dir: &Path, output: Option<&str>) {
+fn build_web_project(project_dir: &Path, output: Option<&str>, dump: BloomDumpOptions) {
     let source_root = project_dir.join("src");
     let out_dir = output
         .map(PathBuf::from)
@@ -1600,7 +1965,7 @@ fn build_web_project(project_dir: &Path, output: Option<&str>) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir) {
+    if let Err(e) = emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir, dump) {
         eprintln!("エラー: {}", e);
         std::process::exit(1);
     }
@@ -1640,7 +2005,12 @@ fn emit_bloom_project_artifacts(project_dir: &Path, output: Option<&str>) -> Res
     let out_dir = output
         .map(PathBuf::from)
         .unwrap_or_else(|| project_dir.join("dist"));
-    emit_bloom_web_artifacts(&source_root, &file_pairs, &out_dir)
+    emit_bloom_web_artifacts(
+        &source_root,
+        &file_pairs,
+        &out_dir,
+        BloomDumpOptions::default(),
+    )
 }
 
 /// src/ 内の .forge ファイルをスキャンし render(<Component />) 構文を前処理する。
@@ -1678,15 +2048,35 @@ fn emit_bloom_web_artifacts(
     source_root: &Path,
     files: &[(PathBuf, PathBuf)],
     out_dir: &Path,
+    dump: BloomDumpOptions,
 ) -> Result<(), String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {}", out_dir.display(), e))?;
     for (abs_path, rel_path) in files {
         let bloom_source =
             fs::read_to_string(abs_path).map_err(|e| format!("{}: {}", abs_path.display(), e))?;
-        // 生成 Forge ファイルを出力（後方互換・テスト用）
-        let plan = plan_from_bloom_source(&bloom_source)?;
         let script = extract_script_section(&bloom_source).unwrap_or("");
+        // 生成 Forge ファイルを出力（後方互換・テスト用）
+        let plan = match plan_from_bloom_source(&bloom_source) {
+            Ok(plan) => plan,
+            Err(err) => {
+                if dump.dump_ast {
+                    println!("{}", bloom_compile_error_json(rel_path, "plan", &err));
+                }
+                if dump.dump_forge {
+                    println!("// {}", rel_path.display());
+                    println!("{}", script);
+                }
+                return Err(err);
+            }
+        };
+        if dump.dump_ast {
+            println!("{}", bloom_plan_json(rel_path, &plan));
+        }
         let generated = plan_to_generated_forge(&plan, script);
+        if dump.dump_forge {
+            println!("// {}", rel_path.display());
+            println!("{}", generated);
+        }
         let out_path = out_dir
             .join("generated")
             .join(generated_forge_path(rel_path));
@@ -1736,6 +2126,36 @@ fn emit_bloom_web_artifacts(
         .map_err(|e| format!("{}: {}", runtime_dst.display(), e))?;
 
     Ok(())
+}
+
+fn bloom_plan_json(rel_path: &Path, plan: &bloom_compiler::WasmRenderPlan) -> String {
+    serde_json::json!({
+        "file": rel_path.to_string_lossy(),
+        "state": {
+            "name": plan.state_name,
+            "initial": plan.initial_value,
+        },
+        "dynamic_text_target": plan.dynamic_text_target,
+        "static_texts": plan.static_texts,
+        "listeners": plan.listeners.iter().map(|(target, event, handler)| {
+            serde_json::json!({
+                "target": target,
+                "event": event,
+                "handler": handler,
+            })
+        }).collect::<Vec<_>>(),
+        "increment_handlers": plan.increment_handlers,
+    })
+    .to_string()
+}
+
+fn bloom_compile_error_json(rel_path: &Path, stage: &str, error: &str) -> String {
+    serde_json::json!({
+        "file": rel_path.to_string_lossy(),
+        "stage": stage,
+        "error": error,
+    })
+    .to_string()
 }
 
 fn build_file(path: &Path, output: Option<&str>) {
@@ -3132,6 +3552,7 @@ fn print_help() {
     println!("使用方法:");
     println!("  forge new [name] [--template <name>]  新しいプロジェクトを作成");
     println!("  forge run <file.forge>              ファイルを読み込んで実行");
+    println!("  forge serve [path] [--port <n>]     Anvil サーバーを起動");
     println!("  forge test <file.forge>             インラインテストを実行");
     println!("  forge test <file.forge> --filter <pattern>  テスト名で絞り込み");
     println!("  forge check <file.forge>            型チェックのみ（実行しない）");
@@ -3155,6 +3576,82 @@ fn print_help() {
     println!("  forge mcp logs [-f] [--errors]      MCP ログを表示");
     println!("  forge version                       バージョンを表示");
     println!("  forge help                          このヘルプを表示");
+}
+
+fn print_serve_help() {
+    println!("forge serve");
+    println!();
+    println!("使用方法:");
+    println!("  forge serve [path] [--port <n>] [--wasm-trace] [--watch]");
+    println!();
+    println!("説明:");
+    println!(
+        "  Anvil などのサーバーエントリポイントを実行します。内部実行経路は forge run と同じです。"
+    );
+    println!();
+    println!("オプション:");
+    println!("  --port, -p <n>     待受ポートを指定（デフォルト: 8080）");
+    println!("  --wasm-trace       Bloom WASM のロード・初期化・コマンドバッファをトレース");
+    println!("  --watch, -w        ファイル変更を監視してホットリロードを行う（DBG-5）");
+    println!("  -h, --help         このヘルプを表示");
+}
+
+// ── DBG-5-A: ホットリロード付きサーバー起動 ─────────────────────────────────
+
+/// `forge serve --watch` 時に呼ばれるエントリポイント。
+/// ファイル監視と WebSocket サーバーを起動してからメインのサーバーを実行する。
+fn start_serve_with_watch(opts: &ServeOptions) {
+    use hot_reload::{start_watch, WatchConfig, WsBroadcaster};
+
+    // WebSocket ポートはメインポート + 1（例: 8080 → 8081）
+    let ws_port = opts.port.saturating_add(1);
+
+    // 監視対象ディレクトリの解決
+    let watch_dir = if let Some(ref p) = opts.path {
+        let path = std::path::Path::new(p);
+        if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            // ファイルが指定された場合はその親ディレクトリを監視
+            path.parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        }
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+
+    // エントリポイントパスを解決
+    let entry_path = if let Some(ref p) = opts.path {
+        PathBuf::from(p)
+    } else {
+        watch_dir.join("main.forge")
+    };
+
+    // WebSocket ブロードキャスターを起動
+    let broadcaster = WsBroadcaster::new();
+    broadcaster.start_listener(ws_port);
+
+    // ファイル監視を起動（バックグラウンドスレッド）
+    let config = WatchConfig {
+        watch_dir,
+        ws_port,
+        entry_path,
+    };
+    start_watch(config, broadcaster);
+
+    eprintln!(
+        "[HotReload] ホットリロードモードで起動します (WebSocket: ws://127.0.0.1:{})",
+        ws_port
+    );
+    eprintln!("[HotReload] ブラウザにリロードスクリプトを自動注入します");
+
+    // ホットリロード環境変数をセット（Anvil のレスポンスフィルタで使用）
+    std::env::set_var("FORGE_HOT_RELOAD", "1");
+    std::env::set_var("FORGE_HOT_RELOAD_WS_PORT", ws_port.to_string());
+
+    // 通常通りサーバーを起動
+    run_entry(opts.path.as_deref(), false);
 }
 
 fn print_new_help() {
@@ -3236,6 +3733,28 @@ mod tests {
         let output = PathBuf::from("target/demo");
         let src = PathBuf::from("tmp/target/release/demo");
         assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
+    }
+
+    #[test]
+    fn parse_serve_options_accepts_path_port_and_wasm_trace() {
+        let args = vec![
+            "forge".to_string(),
+            "serve".to_string(),
+            "--wasm-trace".to_string(),
+            "--port".to_string(),
+            "8123".to_string(),
+            "examples/app".to_string(),
+        ];
+
+        assert_eq!(
+            parse_serve_options(&args),
+            ServeOptions {
+                path: Some("examples/app".to_string()),
+                port: 8123,
+                wasm_trace: true,
+                watch: false,
+            }
+        );
     }
 
     #[test]
@@ -3466,5 +3985,211 @@ mod bloom_scaffold_tests {
         );
 
         let _ = fs::remove_dir_all(&tmpdir);
+    }
+}
+
+// ── DBG-3-D: REPL テスト ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod repl_tests {
+    use super::*;
+    use forge_vm::interpreter::Interpreter;
+    use forge_vm::value::Value;
+
+    // ── test_repl_expression ──────────────────────────────────────────────
+    // 式評価の結果が正しいことを確認する
+    #[test]
+    fn test_repl_expression() {
+        let mut interp = Interpreter::new();
+
+        // 数値式: 1 + 2 → 3
+        let (buf, captured) = {
+            let b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            (b.clone(), b)
+        };
+        // output_buffer を設定して println 出力をキャプチャ
+        interp.output_buffer = Some(buf);
+
+        // 式だけのソースを eval
+        let module = forge_compiler::parser::parse_source("1 + 2").unwrap();
+        let result = interp.eval(&module).unwrap();
+        assert_eq!(result, Value::Int(3));
+
+        // 文字列式
+        let module2 = forge_compiler::parser::parse_source(r#""hello""#).unwrap();
+        let result2 = interp.eval(&module2).unwrap();
+        assert_eq!(result2, Value::String("hello".to_string()));
+
+        // bool 式
+        let module3 = forge_compiler::parser::parse_source("true || false").unwrap();
+        let result3 = interp.eval(&module3).unwrap();
+        assert_eq!(result3, Value::Bool(true));
+
+        // 変数定義後の評価
+        let module4 = forge_compiler::parser::parse_source("let x = 42").unwrap();
+        interp.eval(&module4).unwrap();
+        let module5 = forge_compiler::parser::parse_source("x").unwrap();
+        let result5 = interp.eval(&module5).unwrap();
+        assert_eq!(result5, Value::Int(42));
+
+        let _ = captured;
+    }
+
+    // ── test_repl_multiline ───────────────────────────────────────────────
+    // 複数行入力の継続検出が正しく動作することを確認する
+    #[test]
+    fn test_repl_multiline() {
+        // 完結していない入力（`{` が開いたまま）
+        assert!(
+            !is_complete_input("fn greet(name) {"),
+            "開いたブレース: 未完結のはず"
+        );
+        assert!(!is_complete_input("if true {"), "if 文: 未完結のはず");
+        assert!(
+            !is_complete_input("{\n  let x = 1"),
+            "マルチライン: 未完結のはず"
+        );
+
+        // 完結した入力
+        assert!(is_complete_input("let x = 1"), "変数宣言: 完結のはず");
+        assert!(
+            is_complete_input("fn greet(name) { return name }"),
+            "fn 定義: 完結のはず"
+        );
+        assert!(is_complete_input("1 + 2"), "算術式: 完結のはず");
+        assert!(
+            is_complete_input("if true { 1 } else { 2 }"),
+            "if-else: 完結のはず"
+        );
+
+        // 文字列内の `{` はブレース深さに影響しない
+        assert!(
+            is_complete_input(r#"let s = "hello {world}""#),
+            "文字列内の中括弧: 完結のはず"
+        );
+
+        // 複数行を結合すると完結する
+        let combined = "fn greet(name) {\n  return name\n}";
+        assert!(is_complete_input(combined), "結合後は完結のはず");
+
+        // インタープリタで複数行ソースを評価できることを確認
+        let mut interp = Interpreter::new();
+        let multiline_src = "fn add(a, b) {\n  return a + b\n}\nadd(3, 4)";
+        let module = forge_compiler::parser::parse_source(multiline_src).unwrap();
+        let result = interp.eval(&module).unwrap();
+        assert_eq!(result, Value::Int(7));
+    }
+
+    // ── test_repl_commands ────────────────────────────────────────────────
+    // `:type` / `:reset` / `:load` コマンドが正しく動作することを確認する
+    #[test]
+    fn test_repl_commands() {
+        let mut interp = Interpreter::new();
+
+        // :type <expr> — 数値の型
+        let result = handle_repl_command(":type 42", &mut interp);
+        assert!(result.is_some(), ":type はコマンドとして認識されるはず");
+        let msg = result.unwrap().expect(":type 42 は成功するはず");
+        assert_eq!(msg, "number", ":type 42 は 'number' を返すはず");
+
+        // :type <expr> — 文字列の型
+        let result2 = handle_repl_command(r#":type "hello""#, &mut interp);
+        let msg2 = result2.unwrap().expect(":type \"hello\" は成功するはず");
+        assert_eq!(msg2, "string", ":type \"hello\" は 'string' を返すはず");
+
+        // :type <expr> — bool の型
+        let result3 = handle_repl_command(":type true", &mut interp);
+        let msg3 = result3.unwrap().expect(":type true は成功するはず");
+        assert_eq!(msg3, "bool", ":type true は 'bool' を返すはず");
+
+        // :reset — スコープリセット
+        // まず変数を定義する
+        let module = forge_compiler::parser::parse_source("let y = 99").unwrap();
+        interp.eval(&module).unwrap();
+
+        let reset_result = handle_repl_command(":reset", &mut interp);
+        assert!(
+            reset_result.is_some(),
+            ":reset はコマンドとして認識されるはず"
+        );
+        let reset_msg = reset_result.unwrap().expect(":reset は成功するはず");
+        assert!(
+            reset_msg.contains("リセット"),
+            ":reset のメッセージに 'リセット' が含まれるはず: {}",
+            reset_msg
+        );
+
+        // リセット後は y が未定義になっているはず
+        let module2 = forge_compiler::parser::parse_source("y").unwrap();
+        let err = interp.eval(&module2);
+        assert!(err.is_err(), "リセット後は y が未定義のはず");
+
+        // :load <file> — 一時ファイルを作成してロードテスト
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("forge_repl_test_{}.forge", std::process::id()));
+        std::fs::write(&tmp, "let loaded_val = 123\n").expect("一時ファイル書き込み");
+
+        let load_cmd = format!(":load {}", tmp.to_str().unwrap());
+        let load_result = handle_repl_command(&load_cmd, &mut interp);
+        assert!(
+            load_result.is_some(),
+            ":load はコマンドとして認識されるはず"
+        );
+        let load_msg = load_result.unwrap().expect(":load は成功するはず");
+        assert!(
+            load_msg.contains("読み込み"),
+            ":load のメッセージに '読み込み' が含まれるはず: {}",
+            load_msg
+        );
+
+        // ロード後に定義された変数が使えること
+        let module3 = forge_compiler::parser::parse_source("loaded_val").unwrap();
+        let val = interp
+            .eval(&module3)
+            .expect("loaded_val が定義されているはず");
+        assert_eq!(val, Value::Int(123));
+
+        let _ = std::fs::remove_file(&tmp);
+
+        // :help — ヘルプ表示
+        let help_result = handle_repl_command(":help", &mut interp);
+        assert!(
+            help_result.is_some(),
+            ":help はコマンドとして認識されるはず"
+        );
+        let help_msg = help_result.unwrap().expect(":help は成功するはず");
+        assert!(
+            help_msg.contains(":type"),
+            ":help に ':type' が含まれるはず"
+        );
+        assert!(
+            help_msg.contains(":reset"),
+            ":help に ':reset' が含まれるはず"
+        );
+        assert!(
+            help_msg.contains(":load"),
+            ":help に ':load' が含まれるはず"
+        );
+        assert!(
+            help_msg.contains(":quit"),
+            ":help に ':quit' が含まれるはず"
+        );
+
+        // :trace on/off
+        let trace_on = handle_repl_command(":trace on", &mut interp);
+        assert!(
+            trace_on.unwrap().unwrap().contains("ON"),
+            ":trace on は ON を返すはず"
+        );
+        let trace_off = handle_repl_command(":trace off", &mut interp);
+        assert!(
+            trace_off.unwrap().unwrap().contains("OFF"),
+            ":trace off は OFF を返すはず"
+        );
+
+        // 未知のコマンド
+        let unknown = handle_repl_command(":unknown_cmd", &mut interp);
+        assert!(unknown.is_some(), "未知のコマンドも Some を返すはず");
+        assert!(unknown.unwrap().is_err(), "未知のコマンドは Err を返すはず");
     }
 }

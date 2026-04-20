@@ -370,11 +370,7 @@ fn collect_mutations_from_stmt(
     }
 }
 
-fn collect_logs_from_stmt(
-    stmt: &Stmt,
-    state_names: &[String],
-    out: &mut Vec<WasmLogExpr>,
-) {
+fn collect_logs_from_stmt(stmt: &Stmt, state_names: &[String], out: &mut Vec<WasmLogExpr>) {
     match stmt {
         Stmt::Expr(expr) => collect_logs(expr, state_names, out),
         Stmt::Let { value, .. } | Stmt::State { value, .. } => {

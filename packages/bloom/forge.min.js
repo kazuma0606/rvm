@@ -36,7 +36,34 @@
   const EVENT_SUBMIT = 4;
 
   const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
+  var encoder = null;
+
+  function textEncoder() {
+    if (!encoder) encoder = new TextEncoder();
+    return encoder;
+  }
+  var traceEnabled = false;
+
+  function setTrace(enabled) {
+    traceEnabled = !!enabled;
+  }
+
+  function trace() {
+    if (!traceEnabled) return;
+    var args = Array.prototype.slice.call(arguments);
+    args.unshift("[WASM TRACE]");
+    console.log.apply(console, args);
+  }
+
+  function shouldTrace(script) {
+    if (traceEnabled || global.ForgeBloomTrace === true) return true;
+    if (script && script.hasAttribute && script.hasAttribute("data-bloom-trace")) return true;
+    try {
+      if (global.location && global.location.search.indexOf("wasm-trace=1") >= 0) return true;
+      if (global.localStorage && global.localStorage.getItem("ForgeBloomTrace") === "1") return true;
+    } catch (_) {}
+    return false;
+  }
 
   // ─── メモリ読み書きヘルパー ──────────────────────────────────────────────
 
@@ -78,7 +105,7 @@
         el.addEventListener(event, function () {
           var wasmExports = memRef.exports;
           if (wasmExports && typeof wasmExports.__forge_receive_events === "function") {
-            var bytes = encoder.encode(id);
+            var bytes = textEncoder().encode(id);
             if (typeof wasmExports.alloc === "function") {
               var ptr = wasmExports.alloc(bytes.length);
               new Uint8Array(memRef.current.buffer, ptr, bytes.length).set(bytes);
@@ -121,10 +148,12 @@
     }
 
     function applyCommands(buf) {
+      trace("command buffer", Array.prototype.slice.call(buf));
       var touched = 0;
       var i = 0;
       while (i < buf.length) {
         var opcode = buf[i++];
+        trace("opcode", opcode, "index", i - 1);
 
         if (opcode === OP_SET_TEXT) {
           var tOff = buf[i++], tLen = buf[i++];
@@ -232,12 +261,12 @@
         if (ev.kind === "change") kind = EVENT_CHANGE;
         if (ev.kind === "submit") kind = EVENT_SUBMIT;
         if (typeof exports.alloc === "function") {
-          var bytes = encoder.encode(ev.targetId);
+          var bytes = textEncoder().encode(ev.targetId);
           var ptr   = exports.alloc(bytes.length);
           new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
           exports.__forge_receive_events(kind, ptr, bytes.length);
         } else {
-          exports.__forge_receive_events(kind, 0, 0);
+          exports.__forge_receive_events(kind, ev.targetId);
         }
         applyPendingCommands();
       }
@@ -290,6 +319,7 @@
 
   async function load(url) {
     var pendingEvents = [];
+    trace("load", url);
 
     // SSR 属性からの事前ハイドレーションを設定
     if (typeof document !== "undefined") {
@@ -303,7 +333,9 @@
 
     var response = await fetch(url);
     var bytes    = await response.arrayBuffer();
+    trace("fetched", url, bytes.byteLength + " bytes");
     var result   = await WebAssembly.instantiate(bytes, { env: envImports });
+    trace("instantiated", url);
     var inst     = result.instance;
     var memory   = inst.exports.memory;
 
@@ -317,11 +349,13 @@
     // SSR HTML にアタッチ（リスナー登録 + 状態反映）
     var attached = 0;
     if (typeof inst.exports.__forge_attach === "function") {
+      trace("call __forge_attach");
       inst.exports.__forge_attach();
       attached = runtime.applyPendingCommands();
     }
     // アタッチできなかった場合は初期化
     if (!attached && typeof inst.exports.__forge_init === "function") {
+      trace("call __forge_init");
       inst.exports.__forge_init();
       runtime.applyPendingCommands();
     }
@@ -335,7 +369,7 @@
         if (ev.kind === "change") kind = EVENT_CHANGE;
         if (ev.kind === "submit") kind = EVENT_SUBMIT;
         if (typeof inst.exports.alloc === "function") {
-          var bytes2 = encoder.encode(ev.targetId);
+          var bytes2 = textEncoder().encode(ev.targetId);
           var ptr2   = inst.exports.alloc(bytes2.length);
           new Uint8Array(memory.buffer, ptr2, bytes2.length).set(bytes2);
           inst.exports.__forge_receive_events(kind, ptr2, bytes2.length);
@@ -351,17 +385,26 @@
   // ─── data-bloom-wasm 属性による自動ロード ───────────────────────────────
 
   function autoLoad() {
+    if (typeof document === "undefined") return;
     var script = document.currentScript || (function () {
+      if (typeof document.querySelectorAll !== "function") return null;
       var scripts = document.querySelectorAll("script[data-bloom-wasm]");
       return scripts[scripts.length - 1] || null;
     })();
     if (!script) return;
     var wasmPath = script.getAttribute("data-bloom-wasm");
     if (!wasmPath) return;
+    setTrace(shouldTrace(script));
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", function () { load(wasmPath); });
+      document.addEventListener("DOMContentLoaded", function () {
+        load(wasmPath).catch(function (err) {
+          console.error("[WASM TRACE] load failed", err);
+        });
+      });
     } else {
-      load(wasmPath);
+      load(wasmPath).catch(function (err) {
+        console.error("[WASM TRACE] load failed", err);
+      });
     }
   }
 
@@ -369,6 +412,7 @@
 
   global.ForgeBloom = {
     load: load,
+    setTrace: setTrace,
     createRuntime: createRuntime,
     createEnvImports: createEnvImports,
     constants: {

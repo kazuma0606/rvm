@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Stmt, UsePath, UseSymbols};
-use crate::parser::parse_source;
+use crate::parser::parse_source_with_file;
 
 /// モジュール読み込みエラー
 #[derive(Debug, Clone, PartialEq)]
@@ -244,10 +244,11 @@ impl ModuleLoader {
             message: e.to_string(),
         })?;
 
-        let module = parse_source(&source).map_err(|e| LoadError::Parse {
-            path: mod_forge_path.to_path_buf(),
-            message: e.to_string(),
-        })?;
+        let module = parse_source_with_file(&source, mod_forge_path.to_string_lossy().to_string())
+            .map_err(|e| LoadError::Parse {
+                path: mod_forge_path.to_path_buf(),
+                message: e.to_string(),
+            })?;
 
         let mut export = ModForgeExport {
             symbols: HashMap::new(),
@@ -343,10 +344,12 @@ impl ModuleLoader {
                     path: file_path.clone(),
                     message: e.to_string(),
                 })?;
-                let module = parse_source(&source).map_err(|e| LoadError::Parse {
-                    path: file_path.clone(),
-                    message: e.to_string(),
-                })?;
+                let module =
+                    parse_source_with_file(&source, file_path.to_string_lossy().to_string())
+                        .map_err(|e| LoadError::Parse {
+                            path: file_path.clone(),
+                            message: e.to_string(),
+                        })?;
                 all_stmts.extend(module.stmts);
             }
         }
@@ -383,10 +386,11 @@ impl ModuleLoader {
             }
         };
 
-        let module = parse_source(&source).map_err(|e| LoadError::Parse {
-            path: file_path.clone(),
-            message: e.to_string(),
-        })?;
+        let module = parse_source_with_file(&source, file_path.to_string_lossy().to_string())
+            .map_err(|e| LoadError::Parse {
+                path: file_path.clone(),
+                message: e.to_string(),
+            })?;
 
         let stmts = module.stmts;
         self.cache.insert(use_path.to_string(), stmts.clone());
