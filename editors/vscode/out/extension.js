@@ -41,20 +41,21 @@ const serializer_1 = require("./notebook/serializer");
 const controller_1 = require("./notebook/controller");
 const hiddenCells_1 = require("./notebook/hiddenCells");
 class ForgeDebugAdapterDescriptorFactory {
+    constructor(context) {
+        this.context = context;
+    }
     createDebugAdapterDescriptor(session) {
-        // 設定 > forge.dap.path があればそれを使う。なければ PATH 上の forge-dap を使う。
-        const config = vscode.workspace.getConfiguration("forge");
-        let dapPath = config.get("dap.path") || "forge-dap";
-        // launch.json の dapPath フィールドで上書き可能
+        let dapPath = (0, client_1.resolveDapExecutable)(this.context);
         if (session.configuration.dapPath) {
             dapPath = session.configuration.dapPath;
         }
-        // program / mode / port は DAP launch リクエストのペイロードとして渡るため
-        // バイナリへの CLI 引数は不要
         return new vscode.DebugAdapterExecutable(dapPath, []);
     }
 }
 async function activate(context) {
+    // デバッガー登録
+    context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory("forge", new ForgeDebugAdapterDescriptorFactory(context)));
+    // ノートブック登録
     context.subscriptions.push(vscode.workspace.registerNotebookSerializer("fnb", new serializer_1.FnbSerializer(), {
         transientOutputs: false,
         transientCellMetadata: {
@@ -65,9 +66,8 @@ async function activate(context) {
     }));
     context.subscriptions.push(new controller_1.FnbKernelController(context));
     context.subscriptions.push(...(0, hiddenCells_1.registerHiddenCellSupport)(context));
-    // forge-dap バイナリを DAP アダプターとして登録
-    context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory("forge", new ForgeDebugAdapterDescriptorFactory()));
-    await (0, client_1.startClient)(context);
+    // LSP起動
+    (0, client_1.startClient)(context).catch(e => console.error("LSP Start Failed", e));
 }
 async function deactivate() {
     await (0, client_1.stopClient)();

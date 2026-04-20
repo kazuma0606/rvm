@@ -110,6 +110,26 @@ export function resolveNotebookCommand(
   return { command: "forge", args: ["notebook", "--kernel"] };
 }
 
+export function resolveDapExecutable(
+  context: vscode.ExtensionContext
+): string {
+  const configured = configuredValue("dap.path");
+  if (configured) {
+    return configured;
+  }
+
+  const localDap = firstExisting(
+    repoBinaryCandidates(context, "forge-dap.exe")
+  ) || firstExisting(
+    repoBinaryCandidates(context, "forge-dap")
+  );
+  if (localDap) {
+    return localDap;
+  }
+
+  return "forge-dap";
+}
+
 function resolveServerOptions(context: vscode.ExtensionContext): ServerOptions {
   const launch = resolveLanguageServerCommand(context);
   const cwd = workspaceRoot(context);

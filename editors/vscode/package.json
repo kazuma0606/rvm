@@ -24,11 +24,7 @@
     "Notebooks"
   ],
   "activationEvents": [
-    "onLanguage:forge",
-    "onNotebook:fnb",
-    "onDebug",
-    "onDebugResolve:forge",
-    "onDebugDynamicConfigurations:forge"
+    "*"
   ],
   "main": "./out/extension.js",
   "contributes": {

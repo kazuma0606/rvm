@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveLanguageServerCommand = resolveLanguageServerCommand;
 exports.resolveNotebookCommand = resolveNotebookCommand;
+exports.resolveDapExecutable = resolveDapExecutable;
 exports.startClient = startClient;
 exports.stopClient = stopClient;
 const fs = __importStar(require("fs"));
@@ -108,6 +109,17 @@ function resolveNotebookCommand(context) {
         return { command: configuredLsp, args: ["notebook", "--kernel"] };
     }
     return { command: "forge", args: ["notebook", "--kernel"] };
+}
+function resolveDapExecutable(context) {
+    const configured = configuredValue("dap.path");
+    if (configured) {
+        return configured;
+    }
+    const localDap = firstExisting(repoBinaryCandidates(context, "forge-dap.exe")) || firstExisting(repoBinaryCandidates(context, "forge-dap"));
+    if (localDap) {
+        return localDap;
+    }
+    return "forge-dap";
 }
 function resolveServerOptions(context) {
     const launch = resolveLanguageServerCommand(context);

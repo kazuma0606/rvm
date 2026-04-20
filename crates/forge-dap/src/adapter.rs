@@ -10,13 +10,14 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{json, Value as JsonValue};
 
 use forge_compiler::lexer::Span;
 use forge_vm::interpreter::{DebugHook, Interpreter};
-use forge_vm::value::Value;
+use forge_vm::value::{NativeFn, Value};
 
 use crate::protocol::{
     read_message, write_message, DapEvent, DapRequest, DapResponse, EvaluateArgs, LaunchArgs,
@@ -121,7 +122,7 @@ fn value_to_json_display(value: &Value) -> (String, String, bool) {
         Value::Int(n) => ("number".to_string(), n.to_string(), false),
         Value::Float(f) => ("number".to_string(), f.to_string(), false),
         Value::Bool(b) => ("bool".to_string(), b.to_string(), false),
-        Value::String(s) => ("string".to_string(), format!("\"{}\"", s), false),
+        Value::String(s) => ("number".to_string(), format!("\"{}\"", s), false),
         Value::Unit => ("unit".to_string(), "()".to_string(), false),
         Value::Option(None) => ("option".to_string(), "none".to_string(), false),
         Value::Option(Some(inner)) => {
@@ -197,6 +198,14 @@ fn scope_to_json_vars(scope: &HashMap<String, (Value, bool)>) -> Vec<(String, Js
     vars
 }
 
+/// パスを正規化してスラッシュ/バックスラッシュ・大文字小文字を吸収して比較
+fn paths_match(a: &str, b: &str) -> bool {
+    let normalize = |s: &str| s.replace('\\', "/").to_lowercase();
+    let na = normalize(a);
+    let nb = normalize(b);
+    na == nb || na.ends_with(&nb) || nb.ends_with(&na)
+}
+
 // ── DAP デバッグフック実装 ────────────────────────────────────────────────────
 
 /// インタープリタに差し込むデバッグフック実装
@@ -222,8 +231,7 @@ impl DebugHook for DapDebugHook {
                 StepMode::Continue => {
                     let bps = self.ctrl.breakpoints.lock().unwrap();
                     bps.iter().any(|bp| {
-                        bp.line == span.line as i64
-                            && (span.file.ends_with(&bp.file) || bp.file.ends_with(&span.file))
+                        bp.line == span.line as i64 && paths_match(&span.file, &bp.file)
                     })
                 }
                 StepMode::Next { depth } => call_depth <= depth,
@@ -299,6 +307,14 @@ impl DebugHook for DapDebugHook {
     fn on_assign(&mut self, _name: &str, _value: &Value, _span: &Span) {
         // ウォッチポイント用（将来実装）
     }
+
+    fn on_output(&mut self, text: &str) {
+        // インタープリタからの出力をメインスレッドに転送
+        let _ = self.sender.send(HookEvent::Output {
+            category: "stdout".to_string(),
+            text: text.to_string(),
+        });
+    }
 }
 
 // ── DAP サーバー ──────────────────────────────────────────────────────────────
@@ -325,6 +341,8 @@ pub struct DapServer {
     eval_request_tx: Option<
         std::sync::mpsc::SyncSender<(String, std::sync::mpsc::SyncSender<Result<String, String>>)>,
     >,
+    /// プログラムからの出力を蓄積するバッファ
+    output_buffer: Option<Arc<Mutex<String>>>,
     // ── DBG-5-B: ホットリロード統合 ──────────────────────────────
     /// リロード後にブレークポイントを再登録するための設定を保持する。
     /// `forge serve --watch` が起動している間、フラグファイルを定期的にポーリングして
@@ -352,6 +370,7 @@ impl DapServer {
             var_store_next: 1000,
             interp_thread: None,
             eval_request_tx: None,
+            output_buffer: None,
             hot_reload_flag_path: None,
             hot_reload_last_ts: 0,
             needs_bp_reregister: false,
@@ -477,6 +496,32 @@ impl DapServer {
 
     /// フックからのイベントを処理してクライアントに送信する
     fn drain_hook_events<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        // 出力バッファの内容をチェック
+        let output_text = if let Some(ref buf_arc) = self.output_buffer {
+            let mut buf = buf_arc.lock().unwrap();
+            if !buf.is_empty() {
+                let text = buf.clone();
+                buf.clear();
+                Some(text)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // バッファがあれば送信（不変借用が終わった後に行う）
+        if let Some(text) = output_text {
+            self.send_event(
+                writer,
+                "output",
+                Some(json!({
+                    "category": "stdout",
+                    "output": text,
+                })),
+            )?;
+        }
+
         // DBG-5-B: ホットリロードフラグを確認してブレークポイントを再登録する
         if self.check_hot_reload_flag() {
             self.on_hot_reload(writer)?;
@@ -530,19 +575,11 @@ impl DapServer {
         Ok(())
     }
 
-    pub fn handle_request<R: BufRead, W: Write>(
+    fn process_message<W: Write>(
         &mut self,
-        reader: &mut R,
         writer: &mut W,
+        msg: JsonValue,
     ) -> std::io::Result<bool> {
-        // フックイベントを先に処理
-        self.drain_hook_events(writer)?;
-
-        let msg = match read_message(reader)? {
-            Some(m) => m,
-            None => return Ok(false),
-        };
-
         let request: DapRequest = match serde_json::from_value(msg) {
             Ok(r) => r,
             Err(e) => {
@@ -581,6 +618,15 @@ impl DapServer {
                         Ok(args) => {
                             self.send_response(writer, req_seq, "launch", None)?;
                             self.launch_program(&args);
+                            // 開始通知をデバッグコンソールに表示
+                            let _ = self.send_event(
+                                writer,
+                                "output",
+                                Some(json!({
+                                    "category": "console",
+                                    "output": format!("-- Debugging started: {} --\n", args.program),
+                                })),
+                            );
                         }
                         Err(e) => {
                             self.send_error_response(
@@ -752,9 +798,6 @@ impl DapServer {
                 )?;
             }
         }
-
-        // コマンド処理後にもフックイベントをドレイン
-        self.drain_hook_events(writer)?;
         Ok(true)
     }
 
@@ -766,7 +809,7 @@ impl DapServer {
     fn handle_set_breakpoints(&mut self, args: SetBreakpointsArgs) -> Vec<JsonValue> {
         let source_path = args.source.path.unwrap_or_default();
         let mut bps = self.ctrl.breakpoints.lock().unwrap();
-        bps.retain(|bp| !(bp.file.ends_with(&source_path) || source_path.ends_with(&bp.file)));
+        bps.retain(|bp| !paths_match(&bp.file, &source_path));
 
         let mut result_bps = Vec::new();
         let new_bps = args.breakpoints.unwrap_or_default();
@@ -858,6 +901,11 @@ impl DapServer {
         let ctrl = Arc::clone(&self.ctrl);
         let sender = self.event_sender.clone();
 
+        // 出力バッファのセットアップ
+        let output_buffer = Arc::new(Mutex::new(String::new()));
+        let output_buffer_for_interp = output_buffer.clone();
+        self.output_buffer = Some(output_buffer);
+
         // Bloom ソースマップを読み込む（DBG-4-F）
         {
             let p = std::path::Path::new(&program_path);
@@ -873,6 +921,7 @@ impl DapServer {
 
         std::thread::spawn(move || {
             let path = std::path::Path::new(&program_path);
+
             let source = match std::fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -885,7 +934,12 @@ impl DapServer {
                 }
             };
 
+            let file_str = path.to_string_lossy().to_string();
+
             let mut interp = Interpreter::with_file_path(path);
+            // DAP は stdout を使うため print/println を output_buffer にリダイレクト必須
+            interp.output_buffer = Some(output_buffer_for_interp);
+            interp.register_print_builtins();
             let hook = Box::new(DapDebugHook {
                 ctrl: Arc::clone(&ctrl),
                 sender: eval_tx,
@@ -893,7 +947,14 @@ impl DapServer {
             });
             interp.set_debug_hook(hook);
 
-            if let Err(e) = interp.run(&source) {
+            // スパンに正しいファイルパスが埋め込まれるよう parse_source_with_file を使う
+            let run_result = forge_compiler::parser::parse_source_with_file(&source, file_str)
+                .map_err(|e| format!("parse error: {}", e))
+                .and_then(|module| {
+                    interp.eval(&module).map_err(|e| format!("{}", e))
+                });
+
+            if let Err(e) = run_result {
                 let _ = sender.send(HookEvent::Output {
                     category: "stderr".to_string(),
                     text: format!("runtime error: {}\n", e),
@@ -903,22 +964,55 @@ impl DapServer {
         });
     }
 
-    pub fn run<R: BufRead, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        loop {
-            match self.handle_request(reader, writer) {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(e) => {
-                    eprintln!("[forge-dap] IO error: {}", e);
-                    break;
+    /// 標準入出力を使用して DAP サーバーを起動する
+    pub fn run_stdio(&mut self) -> std::io::Result<()> {
+        use std::sync::mpsc::channel;
+        let (tx, rx) = channel();
+
+        // 1. リクエスト読み取りスレッド (stdin)
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut reader = std::io::BufReader::new(stdin.lock());
+            loop {
+                match read_message(&mut reader) {
+                    Ok(Some(msg)) => {
+                        if tx.send(msg).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break, // EOF
+                    Err(e) => {
+                        eprintln!("[forge-dap] read error: {}", e);
+                        break;
+                    }
                 }
             }
+        });
+
+        // 2. メインループ (stdout)
+        // stdout.lock() を永続保持すると interpreter thread の println! と
+        // デッドロックするため、Mutex<Vec<u8>> で書き込みをバッファリングし
+        // 各メッセージ送信時のみ stdout への書き込みを行う。
+        let stdout_mutex = Arc::new(Mutex::new(std::io::stdout()));
+
+        loop {
+            // フックイベントと出力を送信
+            {
+                let mut out = stdout_mutex.lock().unwrap();
+                self.drain_hook_events(&mut *out)?;
+            }
+
+            // リクエストの処理（溜まっているものをすべて処理）
+            while let Ok(msg) = rx.try_recv() {
+                let mut out = stdout_mutex.lock().unwrap();
+                if !self.process_message(&mut *out, msg)? {
+                    return Ok(());
+                }
+            }
+
+            // CPU 負荷を抑えるために待機（応答性を維持しつつ）
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        Ok(())
     }
 
     // ── テスト用アクセサ ──────────────────────────────────────────────────

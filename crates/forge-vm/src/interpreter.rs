@@ -29,6 +29,8 @@ pub trait DebugHook {
         value: &crate::value::Value,
         span: &forge_compiler::lexer::Span,
     );
+    /// print/println による出力が行われた時に呼ばれる
+    fn on_output(&mut self, text: &str);
 }
 
 use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
@@ -315,7 +317,7 @@ pub struct Interpreter {
     /// REPL でロード済みのモジュール情報（M-7-A）
     /// モジュールパス → そのモジュールからインポートしたシンボル名リスト
     pub loaded_modules: HashMap<String, Vec<String>>,
-    /// 出力バッファ: Some の場合 print/println はここに書き込む（MCP 等でのキャプチャ用）
+    /// 出力バッファ: print/println はここに書き込む
     pub output_buffer: Option<Arc<Mutex<String>>>,
     output_listener: Option<Arc<dyn Fn(String) + Send + Sync>>,
     display_listener: Option<Arc<dyn Fn(DisplayOutput) + Send + Sync>>,
@@ -418,8 +420,8 @@ impl Interpreter {
     }
 
     /// print / println を output_buffer に書き込むよう再登録する
-    fn register_print_builtins(&mut self) {
-        let buf1 = Arc::clone(self.output_buffer.as_ref().unwrap());
+    pub fn register_print_builtins(&mut self) {
+        let buf1 = Arc::clone(self.output_buffer.as_ref().expect("output_buffer must be set"));
         let listener1 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "print",
@@ -440,7 +442,7 @@ impl Interpreter {
             }))),
             false,
         );
-        let buf2 = Arc::clone(self.output_buffer.as_ref().unwrap());
+        let buf2 = Arc::clone(self.output_buffer.as_ref().expect("output_buffer must be set"));
         let listener2 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "println",
