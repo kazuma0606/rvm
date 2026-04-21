@@ -781,6 +781,88 @@ fn increment() { state.count += 2 }
         );
     }
 
+    // ── DBG-5-C E2E: WebSocket ブロードキャスト → ファイル変更 → reload 受信 ──
+
+    /// WsBroadcaster を起動し、WebSocket クライアントが接続後にファイル変更が
+    /// 発生したとき "reload" メッセージを受信できることを確認する E2E テスト。
+    /// ブラウザを使わず WebSocket プロトコルを直接検証する。
+    #[test]
+    fn test_e2e_watch_websocket_reload() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        // 空きポートを確保（別テストとの衝突を避けるためランダム範囲）
+        let ws_port: u16 = 19081;
+
+        // 一時ディレクトリと .forge ファイルを用意
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forge_file = dir.path().join("test.forge");
+        std::fs::write(&forge_file, "println(\"v1\")").expect("write");
+
+        // WsBroadcaster 起動
+        let broadcaster = WsBroadcaster::new();
+        broadcaster.start_listener(ws_port);
+
+        // ウォッチャー起動
+        let config = WatchConfig {
+            watch_dir: dir.path().to_path_buf(),
+            ws_port,
+            entry_path: forge_file.clone(),
+        };
+        start_watch(config, broadcaster.clone());
+
+        // WebSocket リスナーが起動するまで待機
+        thread::sleep(Duration::from_millis(200));
+
+        // TCP 接続してハンドシェイク
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", ws_port))
+            .expect("WebSocket サーバーに接続できませんでした");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // WebSocket Upgrade リクエスト送信
+        let key = "dGhlIHNhbXBsZSBub25jZQ=="; // RFC 6455 サンプルキー
+        let request = format!(
+            "GET / HTTP/1.1\r\n\
+             Host: 127.0.0.1:{}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n",
+            ws_port, key
+        );
+        stream.write_all(request.as_bytes()).expect("send WS request");
+
+        // HTTP 101 レスポンスを読み捨て
+        let mut buf = [0u8; 512];
+        let _ = stream.read(&mut buf);
+
+        // ファイルを変更して watch ループを起動させる（デバウンス後）
+        thread::sleep(Duration::from_millis(100));
+        std::fs::write(&forge_file, "println(\"v2\")").expect("update file");
+
+        // WebSocket フレームを受信（最大 5 秒待機）
+        let mut frame_buf = [0u8; 64];
+        let n = stream.read(&mut frame_buf).expect("WebSocket フレームの受信");
+        assert!(n >= 2, "WebSocket フレームが短すぎます");
+
+        // ペイロードを取り出す（マスクなし / サーバー → クライアント）
+        // フレーム: [opcode+FIN, len, payload...]
+        let payload_len = (frame_buf[1] & 0x7f) as usize;
+        assert!(payload_len > 0, "ペイロードが空です");
+        let payload = std::str::from_utf8(&frame_buf[2..2 + payload_len])
+            .expect("payload は UTF-8 のはずです");
+
+        assert_eq!(
+            payload, "reload",
+            "ファイル変更後に 'reload' メッセージが届くべきです（実際: '{}'）",
+            payload
+        );
+    }
+
     // ── base64 / SHA-1 ──────────────────────────────────────────
 
     #[test]
