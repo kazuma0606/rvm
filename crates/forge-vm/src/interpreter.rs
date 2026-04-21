@@ -69,6 +69,12 @@ impl std::fmt::Debug for MethodImpl {
 struct StructInfo {
     fields: Vec<(String, TypeAnn)>,
     derives: Vec<String>,
+    #[allow(dead_code)]
+    decorators: Vec<Decorator>,
+    #[allow(dead_code)]
+    is_service: bool,
+    #[allow(dead_code)]
+    is_repository: bool,
     methods: HashMap<String, MethodImpl>,
     operators: HashMap<OperatorKind, OperatorImpl>,
 }
@@ -304,6 +310,8 @@ pub struct Interpreter {
     module_loader: Option<ModuleLoader>,
     /// 外部クレート依存関係マネージャー（forge build 連携用）
     pub deps_manager: DepsManager,
+    /// container { bind Trait to Impl } の登録情報
+    container_bindings: HashMap<String, Expr>,
     /// インポートされたシンボルの追跡（未使用インポート検出用）（M-4-C）
     pub imported_symbols: HashMap<String, ImportInfo>,
     /// 現在ロード中のモジュールパスのスタック（循環参照検出用）（M-4-B）
@@ -341,6 +349,7 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: None,
             deps_manager: DepsManager::new(),
+            container_bindings: HashMap::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -605,6 +614,9 @@ impl Interpreter {
             StructInfo {
                 fields: vec![],
                 derives: vec![],
+                decorators: vec![],
+                is_service: false,
+                is_repository: false,
                 methods,
                 operators: HashMap::new(),
             },
@@ -626,6 +638,7 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::from_file_path(path)),
             deps_manager: DepsManager::new(),
+            container_bindings: HashMap::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -655,6 +668,7 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: Some(ModuleLoader::new(project_root)),
             deps_manager: DepsManager::new(),
+            container_bindings: HashMap::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -691,6 +705,7 @@ impl Interpreter {
             type_registry: TypeRegistry::default(),
             module_loader: Some(loader),
             deps_manager: DepsManager::new(),
+            container_bindings: HashMap::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -1534,8 +1549,14 @@ impl Interpreter {
                 name,
                 fields,
                 derives,
+                decorators,
                 ..
-            } => self.eval_struct_def(name.clone(), fields.clone(), derives.clone()),
+            } => self.eval_struct_def(
+                name.clone(),
+                fields.clone(),
+                derives.clone(),
+                decorators.clone(),
+            ),
             Stmt::ImplBlock {
                 target,
                 trait_name: _,
@@ -1598,6 +1619,13 @@ impl Interpreter {
             Stmt::Defer { body, .. } => {
                 // defer は defer_stack に積む（実際の実行は関数終了時）
                 self.push_defer(body.clone());
+                Ok(Value::Unit)
+            }
+            Stmt::ContainerDef { bindings, .. } => {
+                for binding in bindings {
+                    self.container_bindings
+                        .insert(binding.trait_name.clone(), binding.implementation.clone());
+                }
                 Ok(Value::Unit)
             }
         };
@@ -2426,6 +2454,7 @@ impl Interpreter {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.eval_match(scrutinee, arms),
+            Expr::ContainerLiteral { bindings, .. } => self.eval_container_literal(bindings),
             Expr::Block { stmts, tail, .. } => self.eval_block(stmts, tail.as_deref()),
             Expr::Call { callee, args, .. } => self.eval_call(callee, args),
             Expr::MethodCall {
@@ -4260,10 +4289,18 @@ impl Interpreter {
         name: String,
         fields: Vec<(String, TypeAnn)>,
         derives: Vec<String>,
+        decorators: Vec<Decorator>,
     ) -> Result<Value, RuntimeError> {
+        let is_service = decorators.iter().any(|d| matches!(d, Decorator::Service));
+        let is_repository = decorators
+            .iter()
+            .any(|d| matches!(d, Decorator::Repository));
         let info = StructInfo {
             fields: fields.clone(),
             derives: derives.clone(),
+            decorators: decorators.clone(),
+            is_service,
+            is_repository,
             methods: HashMap::new(),
             operators: HashMap::new(),
         };
@@ -4293,7 +4330,7 @@ impl Interpreter {
             "Hash".to_string(),
             "Accessor".to_string(),
         ];
-        self.eval_struct_def(name.clone(), fields.clone(), auto_derives)?;
+        self.eval_struct_def(name.clone(), fields.clone(), auto_derives, vec![])?;
 
         // validate ブロックがある場合、.validate() メソッドを自動生成
         if !validate_rules.is_empty() {
@@ -4758,6 +4795,9 @@ impl Interpreter {
                         StructInfo {
                             fields: vec![],
                             derives: vec![],
+                            decorators: vec![],
+                            is_service: false,
+                            is_repository: false,
                             methods: HashMap::new(),
                             operators: HashMap::new(),
                         },
@@ -4782,6 +4822,9 @@ impl Interpreter {
                         StructInfo {
                             fields: vec![],
                             derives: vec![],
+                            decorators: vec![],
+                            is_service: false,
+                            is_repository: false,
                             methods: HashMap::new(),
                             operators: HashMap::new(),
                         },
@@ -4806,6 +4849,9 @@ impl Interpreter {
                         StructInfo {
                             fields: vec![],
                             derives: vec![],
+                            decorators: vec![],
+                            is_service: false,
+                            is_repository: false,
                             methods: HashMap::new(),
                             operators: HashMap::new(),
                         },
@@ -4955,6 +5001,9 @@ impl Interpreter {
                 StructInfo {
                     fields: vec![],
                     derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
                     methods: HashMap::new(),
                     operators: HashMap::new(),
                 },
@@ -5067,6 +5116,9 @@ impl Interpreter {
                 StructInfo {
                     fields: vec![],
                     derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
                     methods: HashMap::new(),
                     operators: HashMap::new(),
                 },
@@ -5145,9 +5197,71 @@ impl Interpreter {
             let val = self.eval_expr(expr)?;
             field_map.insert(field_name.clone(), val);
         }
+        if let Some(info) = self.type_registry.structs.get(name).cloned() {
+            if info.is_service {
+                for (field_name, type_ann) in &info.fields {
+                    if field_map.contains_key(field_name) {
+                        continue;
+                    }
+                    let Some(trait_name) = container_trait_name(type_ann) else {
+                        continue;
+                    };
+                    let Some(implementation) = self.container_bindings.get(trait_name).cloned()
+                    else {
+                        continue;
+                    };
+                    let value = self.eval_container_binding_expr(&implementation)?;
+                    field_map.insert(field_name.clone(), value);
+                }
+            }
+        }
         Ok(Value::Struct {
             type_name: name.to_string(),
             fields: Rc::new(RefCell::new(field_map)),
+        })
+    }
+
+    fn eval_container_binding_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
+        match expr {
+            Expr::Ident(name, _) => Ok(Value::Struct {
+                type_name: name.clone(),
+                fields: Rc::new(RefCell::new(HashMap::new())),
+            }),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                let val = self.eval_expr(scrutinee)?;
+                for arm in arms {
+                    if let Some(bindings) = match_pattern(&arm.pattern, &val) {
+                        self.push_scope();
+                        for (name, v) in bindings {
+                            self.define(&name, v, false);
+                        }
+                        let result = self.eval_container_binding_expr(&arm.body);
+                        self.pop_scope();
+                        return result;
+                    }
+                }
+                Err(RuntimeError::Custom("match exhausted".to_string()))
+            }
+            other => self.eval_expr(other),
+        }
+    }
+
+    fn eval_container_literal(
+        &mut self,
+        bindings: &[forge_compiler::ast::Binding],
+    ) -> Result<Value, RuntimeError> {
+        let mut fields = HashMap::new();
+        for binding in bindings {
+            self.container_bindings
+                .insert(binding.trait_name.clone(), binding.implementation.clone());
+            let value = self.eval_container_binding_expr(&binding.implementation)?;
+            fields.insert(binding.trait_name.clone(), value);
+        }
+        Ok(Value::Struct {
+            type_name: "Container".to_string(),
+            fields: Rc::new(RefCell::new(fields)),
         })
     }
 
@@ -6588,6 +6702,14 @@ fn is_type_name_str(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn container_trait_name(type_ann: &TypeAnn) -> Option<&str> {
+    match type_ann {
+        TypeAnn::Named(name) => Some(name.as_str()),
+        TypeAnn::Generic { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// TypeAnn から型のゼロ値を生成する（@derive(Singleton) の初期化用）
 fn zero_value_for_type(ann: &TypeAnn) -> Value {
     match ann {
@@ -6805,6 +6927,9 @@ impl Interpreter {
             StructInfo {
                 fields: vec![],
                 derives: vec![],
+                decorators: vec![],
+                is_service: false,
+                is_repository: false,
                 methods: wasm_options_methods,
                 operators: HashMap::new(),
             },
@@ -6892,6 +7017,9 @@ impl Interpreter {
             StructInfo {
                 fields: vec![],
                 derives: vec![],
+                decorators: vec![],
+                is_service: false,
+                is_repository: false,
                 methods: wasm_methods,
                 operators: HashMap::new(),
             },
@@ -7331,6 +7459,9 @@ impl Interpreter {
             StructInfo {
                 fields: vec![],
                 derives: vec![],
+                decorators: vec![],
+                is_service: false,
+                is_repository: false,
                 methods: req_methods,
                 operators: HashMap::new(),
             },
@@ -7408,6 +7539,9 @@ impl Interpreter {
             StructInfo {
                 fields: vec![],
                 derives: vec![],
+                decorators: vec![],
+                is_service: false,
+                is_repository: false,
                 methods: resp_methods,
                 operators: HashMap::new(),
             },
@@ -8971,6 +9105,185 @@ mod tests {
 
     fn run(src: &str) -> Result<Value, RuntimeError> {
         eval_source(src)
+    }
+
+    #[test]
+    fn test_decorator_service_registers_metadata() {
+        let module = forge_compiler::parser::parse_source(
+            "@service\nstruct RegisterUserUseCase { name: string }",
+        )
+        .expect("parse service");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval service");
+        let info = interp
+            .type_registry
+            .structs
+            .get("RegisterUserUseCase")
+            .expect("struct info");
+        assert!(info.is_service);
+        assert!(!info.is_repository);
+        assert_eq!(info.decorators, vec![Decorator::Service]);
+    }
+
+    #[test]
+    fn test_decorator_repository_registers_metadata() {
+        let module = forge_compiler::parser::parse_source(
+            "@repository\nstruct PostgresUserRepository { url: string }",
+        )
+        .expect("parse repository");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval repository");
+        let info = interp
+            .type_registry
+            .structs
+            .get("PostgresUserRepository")
+            .expect("struct info");
+        assert!(!info.is_service);
+        assert!(info.is_repository);
+        assert_eq!(info.decorators, vec![Decorator::Repository]);
+    }
+
+    #[test]
+    fn test_decorator_multi_registers_metadata() {
+        let module = forge_compiler::parser::parse_source(
+            "@service @derive(Debug)\nstruct NotificationService { name: string }",
+        )
+        .expect("parse multi decorator");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval multi decorator");
+        let info = interp
+            .type_registry
+            .structs
+            .get("NotificationService")
+            .expect("struct info");
+        assert!(info.is_service);
+        assert_eq!(info.derives, vec!["Debug".to_string()]);
+        assert_eq!(
+            info.decorators,
+            vec![Decorator::Service, Decorator::Derive("Debug".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_container_basic_injects_service_field() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+trait UserRepository {
+    fn save() -> unit
+}
+
+@repository
+struct PostgresUserRepository { }
+
+@service
+struct RegisterUserUseCase {
+    repo: UserRepository
+}
+
+container {
+    bind UserRepository to PostgresUserRepository
+}
+
+let usecase = RegisterUserUseCase { }
+"#,
+        )
+        .expect("parse container");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval container");
+        let value = interp.eval_ident("usecase").expect("usecase");
+        match value {
+            Value::Struct { fields, .. } => {
+                let repo = fields.borrow().get("repo").cloned().expect("repo field");
+                match repo {
+                    Value::Struct { type_name, .. } => {
+                        assert_eq!(type_name, "PostgresUserRepository")
+                    }
+                    other => panic!("expected repository struct, got {:?}", other),
+                }
+            }
+            other => panic!("expected usecase struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_container_multi_injects_multiple_fields() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+trait UserRepository { fn save() -> unit }
+trait EmailService { fn send() -> unit }
+
+@repository
+struct PostgresUserRepository { }
+
+@service
+struct SmtpEmailService { }
+
+@service
+struct RegisterUserUseCase {
+    repo: UserRepository
+    email: EmailService
+}
+
+container {
+    bind UserRepository to PostgresUserRepository
+    bind EmailService to SmtpEmailService
+}
+
+let usecase = RegisterUserUseCase { }
+"#,
+        )
+        .expect("parse container");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval container");
+        let value = interp.eval_ident("usecase").expect("usecase");
+        match value {
+            Value::Struct { fields, .. } => {
+                assert!(fields.borrow().contains_key("repo"));
+                assert!(fields.borrow().contains_key("email"));
+            }
+            other => panic!("expected usecase struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_container_match_injects_selected_binding() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+struct Logger { }
+struct JsonLogger { }
+struct SilentLogger { }
+
+@service
+struct AppService {
+    logger: Logger
+}
+
+let env = "prod"
+
+container {
+    bind Logger to match env {
+        "prod" => JsonLogger
+        _ => SilentLogger
+    }
+}
+
+let service = AppService { }
+"#,
+        )
+        .expect("parse container match");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval container match");
+        let value = interp.eval_ident("service").expect("service");
+        match value {
+            Value::Struct { fields, .. } => {
+                let logger = fields.borrow().get("logger").cloned().expect("logger");
+                match logger {
+                    Value::Struct { type_name, .. } => assert_eq!(type_name, "JsonLogger"),
+                    other => panic!("expected logger struct, got {:?}", other),
+                }
+            }
+            other => panic!("expected service struct, got {:?}", other),
+        }
     }
 
     #[test]
@@ -10802,6 +11115,66 @@ conn2.query("SELECT 1")
         assert!(
             err_msg.contains("query"),
             "エラーメッセージに 'query' が含まれていません: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_typestate_container_integration() {
+        let src = r#"
+struct UserRepository { }
+struct PostgresUserRepository { }
+
+typestate App {
+    states: [Unconfigured, Configured, Running]
+
+    Unconfigured {
+        fn configure(c: container) -> Configured
+    }
+
+    Configured {
+        fn start() -> Running!
+    }
+}
+
+let app = App::new<Unconfigured>()
+let configured = app.configure(container {
+    bind UserRepository to PostgresUserRepository
+})
+let running = configured.start()?
+running
+"#;
+        let result = run(src);
+        match result {
+            Ok(Value::Typestate { current_state, .. }) => assert_eq!(current_state, "Running"),
+            other => panic!("expected Running typestate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_typestate_container_unconfigured() {
+        let src = r#"
+typestate App {
+    states: [Unconfigured, Configured, Running]
+
+    Unconfigured {
+        fn configure(c: container) -> Configured
+    }
+
+    Configured {
+        fn start() -> Running!
+    }
+}
+
+let app = App::new<Unconfigured>()
+app.start()
+"#;
+        let result = run(src);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("start"),
+            "error should mention start, got {}",
             err_msg
         );
     }

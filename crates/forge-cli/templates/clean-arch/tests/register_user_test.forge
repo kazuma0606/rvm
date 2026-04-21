@@ -1,0 +1,6 @@
+use ./interface/user_handler.*
+
+test "register user" {
+    let message = handle_register_user("Ada", "ada@example.com")
+    assert(message.contains("registered"))
+}

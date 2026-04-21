@@ -233,7 +233,7 @@ impl Parser {
             TokenKind::Fn => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Yield => self.parse_yield(),
-            TokenKind::Struct => self.parse_struct_def(vec![]),
+            TokenKind::Struct => self.parse_struct_def(vec![], vec![]),
             TokenKind::Impl => self.parse_impl_or_impl_trait(),
             TokenKind::Trait => self.parse_trait_def(),
             TokenKind::Mixin => self.parse_mixin_def(),
@@ -245,6 +245,7 @@ impl Parser {
             TokenKind::When => self.parse_when_stmt(),
             TokenKind::Test => self.parse_test_block(),
             TokenKind::Defer => self.parse_defer(),
+            TokenKind::Container => self.parse_container_def(),
             _ => {
                 // pipeline { ... } is parsed as an expression statement
                 let expr = self.parse_expr()?;
@@ -270,7 +271,7 @@ impl Parser {
                     self.parse_const_with_pub(true)
                 }
             }
-            TokenKind::Struct => self.parse_struct_def_with_pub(vec![], true),
+            TokenKind::Struct => self.parse_struct_def_with_pub(vec![], vec![], true),
             TokenKind::Trait => self.parse_trait_def_with_pub(true),
             TokenKind::Mixin => self.parse_mixin_def_with_pub(true),
             TokenKind::Data => self.parse_data_def_with_pub(true),
@@ -292,6 +293,7 @@ impl Parser {
 
     fn parse_annotated_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         let mut derives: Vec<String> = Vec::new();
+        let mut decorators: Vec<Decorator> = Vec::new();
         let mut defer_cleanup: Option<String> = None;
         let mut annotations: Vec<String> = Vec::new();
         while matches!(self.peek_kind(), TokenKind::At) {
@@ -311,7 +313,8 @@ impl Parser {
                     self.expect_token(&TokenKind::LParen)?;
                     while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
                         let (d, _) = self.expect_ident()?;
-                        derives.push(d);
+                        derives.push(d.clone());
+                        decorators.push(Decorator::Derive(d));
                         if matches!(self.peek_kind(), TokenKind::Comma) {
                             self.advance();
                         }
@@ -334,6 +337,22 @@ impl Parser {
                         }
                     }
                     self.expect_token(&TokenKind::RParen)?;
+                }
+                "service" => {
+                    decorators.push(Decorator::Service);
+                }
+                "repository" => {
+                    decorators.push(Decorator::Repository);
+                }
+                "on" => {
+                    let event_type = self.parse_decorator_single_arg("on")?;
+                    annotations.push(format!("@on({})", event_type));
+                    decorators.push(Decorator::On { event_type });
+                }
+                "timed" => {
+                    let metric = self.parse_timed_decorator_arg()?;
+                    annotations.push(format!("@timed(metric: \"{}\")", metric));
+                    decorators.push(Decorator::Timed { metric });
                 }
                 _ => {
                     let mut ann_text = format!("@{}", ann_name);
@@ -384,7 +403,7 @@ impl Parser {
                 }
                 Ok(stmt)
             }
-            TokenKind::Struct => self.parse_struct_def_with_pub(derives, is_pub),
+            TokenKind::Struct => self.parse_struct_def_with_pub(derives, decorators, is_pub),
             TokenKind::Ident(ref name) if name == "enum" => {
                 self.advance();
                 self.parse_enum_def_body_with_pub(derives, is_pub)
@@ -1094,6 +1113,10 @@ impl Parser {
                     return_type: Box::new(return_type),
                 }
             }
+            TokenKind::Container => {
+                self.advance();
+                TypeAnn::Named("Container".to_string())
+            }
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
@@ -1788,6 +1811,7 @@ impl Parser {
             TokenKind::Loop => self.parse_loop(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Match => self.parse_match(),
+            TokenKind::Container => self.parse_container_literal(),
 
             // ── [ ] リスト / 範囲 ──
             TokenKind::LBracket => self.parse_bracket_expr(),
@@ -1829,7 +1853,7 @@ impl Parser {
                 TokenKind::Const => stmts.push(self.parse_const()?),
                 TokenKind::Fn => stmts.push(self.parse_fn()?),
                 TokenKind::Return => stmts.push(self.parse_return()?),
-                TokenKind::Struct => stmts.push(self.parse_struct_def(vec![])?),
+                TokenKind::Struct => stmts.push(self.parse_struct_def(vec![], vec![])?),
                 TokenKind::Impl => stmts.push(self.parse_impl_or_impl_trait()?),
                 TokenKind::Trait => stmts.push(self.parse_trait_def()?),
                 TokenKind::Mixin => stmts.push(self.parse_mixin_def()?),
@@ -2225,6 +2249,7 @@ impl Parser {
         // @derive(...) などのアノテーションをパースし、直後の struct 定義に付与
         // @defer(cleanup: "method") fn ... → Stmt::Fn に defer_cleanup を付与
         let mut derives: Vec<String> = Vec::new();
+        let mut decorators: Vec<Decorator> = Vec::new();
         let mut defer_cleanup: Option<String> = None;
         let mut annotations: Vec<String> = Vec::new();
         while matches!(self.peek_kind(), TokenKind::At) {
@@ -2245,7 +2270,8 @@ impl Parser {
                     self.expect_token(&TokenKind::LParen)?;
                     while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
                         let (d, _) = self.expect_ident()?;
-                        derives.push(d);
+                        derives.push(d.clone());
+                        decorators.push(Decorator::Derive(d));
                         if matches!(self.peek_kind(), TokenKind::Comma) {
                             self.advance();
                         }
@@ -2270,6 +2296,22 @@ impl Parser {
                         }
                     }
                     self.expect_token(&TokenKind::RParen)?;
+                }
+                "service" => {
+                    decorators.push(Decorator::Service);
+                }
+                "repository" => {
+                    decorators.push(Decorator::Repository);
+                }
+                "on" => {
+                    let event_type = self.parse_decorator_single_arg("on")?;
+                    annotations.push(format!("@on({})", event_type));
+                    decorators.push(Decorator::On { event_type });
+                }
+                "timed" => {
+                    let metric = self.parse_timed_decorator_arg()?;
+                    annotations.push(format!("@timed(metric: \"{}\")", metric));
+                    decorators.push(Decorator::Timed { metric });
                 }
                 _ => {
                     // collect unknown annotation with optional argument list
@@ -2321,7 +2363,7 @@ impl Parser {
                 }
                 Ok(stmt)
             }
-            TokenKind::Struct => self.parse_struct_def(derives),
+            TokenKind::Struct => self.parse_struct_def(derives, decorators),
             TokenKind::Ident(ref name) if name == "enum" => {
                 self.advance(); // consume 'enum'
                 self.parse_enum_def_body(derives)
@@ -2338,13 +2380,92 @@ impl Parser {
         }
     }
 
-    fn parse_struct_def(&mut self, derives: Vec<String>) -> Result<Stmt, ParseError> {
-        self.parse_struct_def_with_pub(derives, false)
+    fn parse_decorator_single_arg(&mut self, name: &str) -> Result<String, ParseError> {
+        self.expect_token(&TokenKind::LParen)?;
+        let (value, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::RParen)?;
+        if value.is_empty() {
+            return Err(ParseError::UnexpectedEof {
+                expected: format!("@{} の引数", name),
+            });
+        }
+        Ok(value)
+    }
+
+    fn parse_timed_decorator_arg(&mut self) -> Result<String, ParseError> {
+        self.expect_token(&TokenKind::LParen)?;
+        let (key, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::Colon)?;
+        let tok = self.advance();
+        let metric = if key == "metric" {
+            if let TokenKind::Str(s) = tok.kind {
+                s
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "文字列リテラル".to_string(),
+                    found: tok.kind,
+                    span: tok.span,
+                });
+            }
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "metric".to_string(),
+                found: TokenKind::Ident(key),
+                span: tok.span,
+            });
+        };
+        self.expect_token(&TokenKind::RParen)?;
+        Ok(metric)
+    }
+
+    fn parse_container_def(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Container)?;
+        let bindings = self.parse_container_bindings()?;
+        Ok(Stmt::ContainerDef { bindings, span })
+    }
+
+    fn parse_container_literal(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Container)?;
+        let bindings = self.parse_container_bindings()?;
+        Ok(Expr::ContainerLiteral { bindings, span })
+    }
+
+    fn parse_container_bindings(&mut self) -> Result<Vec<Binding>, ParseError> {
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut bindings = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            self.expect_token(&TokenKind::Bind)?;
+            let (trait_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::To)?;
+            let implementation = self.parse_expr()?;
+            bindings.push(Binding {
+                trait_name,
+                implementation,
+            });
+            self.skip_sep();
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(bindings)
+    }
+
+    fn parse_struct_def(
+        &mut self,
+        derives: Vec<String>,
+        decorators: Vec<Decorator>,
+    ) -> Result<Stmt, ParseError> {
+        self.parse_struct_def_with_pub(derives, decorators, false)
     }
 
     fn parse_struct_def_with_pub(
         &mut self,
         derives: Vec<String>,
+        decorators: Vec<Decorator>,
         is_pub: bool,
     ) -> Result<Stmt, ParseError> {
         let span = self.current_span();
@@ -2375,6 +2496,7 @@ impl Parser {
             generic_params,
             fields,
             derives,
+            decorators,
             is_pub,
             span,
         })
@@ -4324,11 +4446,184 @@ mod tests {
     fn test_parse_struct_derive() {
         let src = "@derive(Debug, Clone)\nstruct Point { x: number }";
         match first_stmt(src) {
-            Stmt::StructDef { name, derives, .. } => {
+            Stmt::StructDef {
+                name,
+                derives,
+                decorators,
+                ..
+            } => {
                 assert_eq!(name, "Point");
                 assert_eq!(derives, vec!["Debug".to_string(), "Clone".to_string()]);
+                assert_eq!(
+                    decorators,
+                    vec![
+                        Decorator::Derive("Debug".to_string()),
+                        Decorator::Derive("Clone".to_string())
+                    ]
+                );
             }
             other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_decorator_service() {
+        let src = "@service\nstruct RegisterUserUseCase { name: string }";
+        match first_stmt(src) {
+            Stmt::StructDef {
+                name, decorators, ..
+            } => {
+                assert_eq!(name, "RegisterUserUseCase");
+                assert_eq!(decorators, vec![Decorator::Service]);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_decorator_repository() {
+        let src = "@repository\nstruct PostgresUserRepository { url: string }";
+        match first_stmt(src) {
+            Stmt::StructDef {
+                name, decorators, ..
+            } => {
+                assert_eq!(name, "PostgresUserRepository");
+                assert_eq!(decorators, vec![Decorator::Repository]);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_decorator_multi() {
+        let src = "@service @derive(Debug)\nstruct NotificationService { name: string }";
+        match first_stmt(src) {
+            Stmt::StructDef {
+                derives,
+                decorators,
+                ..
+            } => {
+                assert_eq!(derives, vec!["Debug".to_string()]);
+                assert_eq!(
+                    decorators,
+                    vec![Decorator::Service, Decorator::Derive("Debug".to_string())]
+                );
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_decorator_on_and_timed() {
+        match first_stmt("@on(UserCreated)\nstruct Handler { name: string }") {
+            Stmt::StructDef { decorators, .. } => {
+                assert_eq!(
+                    decorators,
+                    vec![Decorator::On {
+                        event_type: "UserCreated".to_string()
+                    }]
+                );
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+
+        match first_stmt(r#"@timed(metric: "request_ms") struct TimedHandler { name: string }"#) {
+            Stmt::StructDef { decorators, .. } => {
+                assert_eq!(
+                    decorators,
+                    vec![Decorator::Timed {
+                        metric: "request_ms".to_string()
+                    }]
+                );
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_container_basic() {
+        match first_stmt("container { bind UserRepository to PostgresUserRepository }") {
+            Stmt::ContainerDef { bindings, .. } => {
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].trait_name, "UserRepository");
+                match &bindings[0].implementation {
+                    Expr::Ident(name, _) => assert_eq!(name, "PostgresUserRepository"),
+                    other => panic!("expected Ident, got {:?}", other),
+                }
+            }
+            other => panic!("expected ContainerDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_container_multi() {
+        match first_stmt(
+            r#"
+container {
+    bind UserRepository to PostgresUserRepository
+    bind EmailService to SmtpEmailService
+}
+"#,
+        ) {
+            Stmt::ContainerDef { bindings, .. } => {
+                assert_eq!(bindings.len(), 2);
+                assert_eq!(bindings[0].trait_name, "UserRepository");
+                assert_eq!(bindings[1].trait_name, "EmailService");
+            }
+            other => panic!("expected ContainerDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_container_match() {
+        match first_stmt(
+            r#"
+container {
+    bind Logger to match env {
+        "prod" => JsonLogger
+        _ => SilentLogger
+    }
+}
+"#,
+        ) {
+            Stmt::ContainerDef { bindings, .. } => {
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(bindings[0].implementation, Expr::Match { .. }));
+            }
+            other => panic!("expected ContainerDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_container_literal() {
+        match first_stmt(
+            r#"
+let app = App::new<Unconfigured>().configure(container {
+    bind UserRepository to PostgresUserRepository
+})
+"#,
+        ) {
+            Stmt::Let {
+                value: Expr::MethodCall { args, .. },
+                ..
+            } => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0], Expr::ContainerLiteral { .. }));
+            }
+            other => panic!("expected let with container literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_container_type_ann() {
+        match first_stmt("fn configure(c: container) -> Configured {}") {
+            Stmt::Fn { params, .. } => {
+                assert_eq!(
+                    params[0].type_ann,
+                    Some(TypeAnn::Named("Container".to_string()))
+                );
+            }
+            other => panic!("expected function, got {:?}", other),
         }
     }
 

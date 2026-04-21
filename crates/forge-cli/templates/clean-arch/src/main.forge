@@ -1,0 +1,15 @@
+use ./interface/user_handler.*
+use ./infrastructure/postgres_user_repository.*
+use ./infrastructure/smtp_email_service.*
+
+fn main() {
+    let repo = new_postgres_user_repository("postgres://localhost/{{name}}")
+    let mailer = new_smtp_email_service("localhost", 1025)
+    let message = handle_register_user("Ada", "ada@example.com")
+
+    println(message)
+    println(repository_status(repo))
+    println(email_service_status(mailer))
+}
+
+main()

@@ -1,0 +1,16 @@
+use ./domain/user.*
+
+pub struct RegisterUserUseCase {
+    name: string
+}
+
+pub fn new_register_user_usecase() -> RegisterUserUseCase {
+    RegisterUserUseCase {
+        name: "register-user",
+    }
+}
+
+pub fn register_user(usecase: RegisterUserUseCase, name: string, email: string) -> User {
+    println(usecase.name)
+    new_user(name, email)
+}

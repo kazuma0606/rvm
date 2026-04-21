@@ -12,5 +12,7 @@ fn test_transpile_timed_decorator() {
     "#;
 
     let output = transpile(src).expect("transpile timed decorator");
-    assert!(output.contains("@timed"));
+    assert!(output.contains("std::time::Instant::now()"));
+    assert!(output.contains("__forge_timed_start.elapsed().as_secs_f64()"));
+    assert!(output.contains("metrics.histogram(\"response_time\""));
 }

@@ -1,0 +1,20 @@
+[package]
+name = "{{name}}"
+version = "{{version}}"
+forge = "{{forge_version}}"
+entry = "src/main.forge"
+
+[architecture]
+layers = [
+    "src/domain",
+    "src/usecase",
+    "src/interface",
+    "src/infrastructure",
+]
+naming_rules = "warn"
+
+[architecture.naming]
+"src/domain" = { suffix = [] }
+"src/usecase" = { suffix = ["UseCase", "Service"] }
+"src/interface" = { suffix = ["Controller", "Handler", "Presenter"] }
+"src/infrastructure" = { suffix = ["Repository", "Gateway", "Client", "Adapter", "Service"] }

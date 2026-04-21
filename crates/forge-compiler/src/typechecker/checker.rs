@@ -233,6 +233,8 @@ impl TypeChecker {
             Stmt::When { .. } => {}
             // FT-1: test ブロックは型チェッカーでは現在スキップ
             Stmt::TestBlock { .. } => {}
+            // DI-4: container 定義は型チェッカーでは現在スキップ
+            Stmt::ContainerDef { .. } => {}
         }
     }
 

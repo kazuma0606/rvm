@@ -1,0 +1,20 @@
+pub struct SmtpEmailService {
+    host: string
+    port: number
+}
+
+pub fn new_smtp_email_service(host: string, port: number) -> SmtpEmailService {
+    SmtpEmailService {
+        host: host,
+        port: port,
+    }
+}
+
+pub fn email_service_status(service: SmtpEmailService) -> string {
+    "email service ready: {service.host}:{service.port}"
+}
+
+pub fn send_email(service: SmtpEmailService, to: string, subject: string) -> unit! {
+    println("smtp {service.host}:{service.port} -> {to}: {subject}")
+    ok(unit)
+}

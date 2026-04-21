@@ -1,10 +1,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use forge_compiler::ast::{
-    BinOp, ChainKind, Constraint, DeferBody, EnumInitData, EnumVariant, Expr, FnDef, InterpPart,
-    Literal, MatchArm, Module, OperatorDef, OperatorKind, Param, Pat, Pattern, PipelineStep, Stmt,
-    TraitMethod, TypeAnn, TypestateMarker, UnaryOp, UsePath, UseSymbols, ValidateRule,
-    WhenCondition,
+    BinOp, Binding, ChainKind, Constraint, Decorator, DeferBody, EnumInitData, EnumVariant, Expr,
+    FnDef, InterpPart, Literal, MatchArm, Module, OperatorDef, OperatorKind, Param, Pat, Pattern,
+    PipelineStep, Stmt, TraitMethod, TypeAnn, TypestateMarker, UnaryOp, UsePath, UseSymbols,
+    ValidateRule, WhenCondition,
 };
 
 use crate::builtin::{try_builtin_call, try_constructor_call};
@@ -34,6 +34,9 @@ pub struct CodeGenerator {
     pipeline_counter: usize,
     named_struct_defs: HashMap<String, Vec<(String, TypeAnn)>>,
     anon_struct_defs: HashMap<String, Vec<(String, TypeAnn)>>,
+    service_struct_defs: Vec<ServiceStructDef>,
+    inline_container_bindings: Option<Vec<Binding>>,
+    event_handlers: Vec<EventHandlerDef>,
     /// `use forge/http` が宣言されているかどうか
     http_imported: bool,
 }
@@ -42,6 +45,18 @@ pub struct CodeGenerator {
 struct VarInfo {
     is_state: bool,
     type_ann: Option<TypeAnn>,
+}
+
+#[derive(Clone)]
+struct ServiceStructDef {
+    name: String,
+    fields: Vec<(String, TypeAnn)>,
+}
+
+#[derive(Clone)]
+struct EventHandlerDef {
+    fn_name: String,
+    event_type: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +92,9 @@ impl CodeGenerator {
             pipeline_counter: 0,
             named_struct_defs: HashMap::new(),
             anon_struct_defs: HashMap::new(),
+            service_struct_defs: Vec::new(),
+            inline_container_bindings: None,
+            event_handlers: Vec::new(),
             http_imported: false,
         }
     }
@@ -664,6 +682,9 @@ impl CodeGenerator {
         self.analyze_generic_types(module);
         self.analyze_collections_and_utility_types(module);
         self.named_struct_defs = collect_struct_defs(module);
+        self.service_struct_defs = collect_service_struct_defs(module);
+        self.inline_container_bindings = collect_inline_container_bindings(module);
+        self.event_handlers = collect_event_handlers(module);
         self.anon_struct_defs = collect_anon_structs(module, &self.named_struct_defs);
         self.rename_main = module
             .stmts
@@ -717,6 +738,17 @@ impl CodeGenerator {
         for stmt in top_level {
             out.push_str(&self.gen_stmt(stmt));
             out.push('\n');
+        }
+
+        if !module
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::ContainerDef { .. }))
+        {
+            if let Some(bindings) = self.inline_container_bindings.clone() {
+                out.push_str(&self.gen_container_def(&bindings));
+                out.push('\n');
+            }
         }
 
         if !main_body.is_empty() || self.rename_main {
@@ -1131,6 +1163,11 @@ impl CodeGenerator {
                     self.scan_stmt_codegen_requirements(inner);
                 }
             }
+            Stmt::ContainerDef { bindings, .. } => {
+                for binding in bindings {
+                    self.scan_expr_codegen_requirements(&binding.implementation);
+                }
+            }
             Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
         }
     }
@@ -1204,6 +1241,11 @@ impl CodeGenerator {
                 self.scan_expr_codegen_requirements(scrutinee);
                 for arm in arms {
                     self.scan_expr_codegen_requirements(&arm.body);
+                }
+            }
+            Expr::ContainerLiteral { bindings, .. } => {
+                for binding in bindings {
+                    self.scan_expr_codegen_requirements(&binding.implementation);
                 }
             }
             Expr::Block { stmts, tail, .. } => {
@@ -1421,6 +1463,12 @@ impl CodeGenerator {
                 }
                 Ok(())
             }
+            Stmt::ContainerDef { bindings, .. } => {
+                for binding in bindings {
+                    self.ensure_no_await_in_closure(&binding.implementation)?;
+                }
+                Ok(())
+            }
             Stmt::StructDef { .. }
             | Stmt::EnumDef { .. }
             | Stmt::DataDef { .. }
@@ -1590,6 +1638,12 @@ impl CodeGenerator {
                 self.ensure_no_await_in_closure(value)
             }
             Expr::Literal(_, _) | Expr::Ident(_, _) => Ok(()),
+            Expr::ContainerLiteral { bindings, .. } => {
+                for binding in bindings {
+                    self.ensure_no_await_in_closure(&binding.implementation)?;
+                }
+                Ok(())
+            }
             Expr::Pipeline { .. } => Ok(()),
             Expr::Loop { .. } | Expr::Break { .. } => Ok(()),
         }
@@ -1720,6 +1774,9 @@ impl CodeGenerator {
             Expr::NullCoalesce { value, default, .. } => {
                 self.expr_contains_await(value) || self.expr_contains_await(default)
             }
+            Expr::ContainerLiteral { bindings, .. } => bindings
+                .iter()
+                .any(|binding| self.expr_contains_await(&binding.implementation)),
             Expr::Literal(_, _) | Expr::Ident(_, _) => false,
             Expr::Pipeline { .. } => false,
             Expr::Loop { .. } | Expr::Break { .. } => false,
@@ -1759,6 +1816,9 @@ impl CodeGenerator {
             Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
                 body.iter().any(|stmt| self.stmt_contains_await(stmt))
             }
+            Stmt::ContainerDef { bindings, .. } => bindings
+                .iter()
+                .any(|binding| self.expr_contains_await(&binding.implementation)),
             Stmt::StructDef { .. }
             | Stmt::EnumDef { .. }
             | Stmt::DataDef { .. }
@@ -1945,6 +2005,11 @@ impl CodeGenerator {
                     self.collect_called_fns_stmt(inner, names);
                 }
             }
+            Stmt::ContainerDef { bindings, .. } => {
+                for binding in bindings {
+                    self.collect_called_fns_expr(&binding.implementation, names);
+                }
+            }
             Stmt::ImplBlock {
                 methods, operators, ..
             } => {
@@ -2087,6 +2152,9 @@ impl CodeGenerator {
                     || self.expr_calls_fn(index, fn_name)
                     || self.expr_calls_fn(value, fn_name)
             }
+            Expr::ContainerLiteral { bindings, .. } => bindings
+                .iter()
+                .any(|binding| self.expr_calls_fn(&binding.implementation, fn_name)),
             Expr::Pipeline { .. } => false,
             Expr::Loop { .. } | Expr::Break { .. } => false,
         }
@@ -2105,6 +2173,9 @@ impl CodeGenerator {
             Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
                 body.iter().any(|stmt| self.stmt_calls_fn(stmt, fn_name))
             }
+            Stmt::ContainerDef { bindings, .. } => bindings
+                .iter()
+                .any(|binding| self.expr_calls_fn(&binding.implementation, fn_name)),
             Stmt::ImplBlock {
                 methods, operators, ..
             } => {
@@ -2437,6 +2508,7 @@ impl CodeGenerator {
                     body,
                     *is_pub,
                     *is_const,
+                    annotations,
                 ));
                 out
             }
@@ -2487,8 +2559,19 @@ impl CodeGenerator {
                 fields,
                 derives,
                 is_pub,
+                decorators,
                 ..
-            } => self.gen_struct_def(name, generic_params, fields, derives, *is_pub),
+            } => self.gen_struct_def(
+                name,
+                generic_params,
+                fields,
+                derives,
+                *is_pub,
+                has_decorator(decorators, |decorator| {
+                    matches!(decorator, Decorator::Service)
+                }),
+            ),
+            Stmt::ContainerDef { bindings, .. } => self.gen_container_def(bindings),
             Stmt::ImplBlock {
                 target,
                 type_params,
@@ -2570,6 +2653,7 @@ impl CodeGenerator {
         body: &Expr,
         is_pub: bool,
         is_const: bool,
+        annotations: &[String],
     ) -> String {
         let fn_name = self.rust_fn_name(name);
         let params_str = params
@@ -2611,7 +2695,7 @@ impl CodeGenerator {
         if is_async || is_recursive_async {
             self.async_context_depth += 1;
         }
-        let body_str = if is_generator {
+        let mut body_str = if is_generator {
             let buf_name = self.next_generator_buf();
             let mut block = String::new();
             block.push_str(&format!(
@@ -2635,6 +2719,20 @@ impl CodeGenerator {
         } else {
             self.gen_block_body(body, false)
         };
+        if let Some(metric) = timed_metric(annotations) {
+            let mut timed = String::new();
+            timed.push_str(&format!(
+                "{}let __forge_timed_start = std::time::Instant::now();\n",
+                self.indent_str()
+            ));
+            timed.push_str(&body_str);
+            timed.push_str(&format!(
+                "{}metrics.histogram(\"{}\", __forge_timed_start.elapsed().as_secs_f64(), None);\n",
+                self.indent_str(),
+                metric
+            ));
+            body_str = timed;
+        }
         if is_async || is_recursive_async {
             self.async_context_depth -= 1;
         }
@@ -2823,6 +2921,7 @@ impl CodeGenerator {
         fields: &[(String, TypeAnn)],
         derives: &[String],
         is_pub: bool,
+        is_service: bool,
     ) -> String {
         let mut out = String::new();
         let derive_attr = self.derive_attr(derives);
@@ -2842,7 +2941,11 @@ impl CodeGenerator {
                 self.indent_str(),
                 Self::vis(is_pub),
                 field,
-                type_ann_to_rust(ty)
+                if is_service {
+                    service_field_type_to_rust(ty)
+                } else {
+                    type_ann_to_rust(ty)
+                }
             ));
         }
         if !generic_params.is_empty() {
@@ -2868,6 +2971,98 @@ impl CodeGenerator {
         }
 
         out
+    }
+
+    fn gen_container_def(&mut self, bindings: &[Binding]) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("{}pub struct Container {{\n", self.indent_str()));
+        self.indent += 1;
+        for binding in bindings {
+            out.push_str(&format!(
+                "{}pub {}: std::sync::Arc<dyn {}>,\n",
+                self.indent_str(),
+                snake_case(&binding.trait_name),
+                binding.trait_name
+            ));
+        }
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n\n", self.indent_str()));
+
+        out.push_str(&format!("{}impl Container {{\n", self.indent_str()));
+        self.indent += 1;
+        out.push_str(&format!("{}pub fn new() -> Self {{\n", self.indent_str()));
+        self.indent += 1;
+        out.push_str(&format!("{}Self {{\n", self.indent_str()));
+        self.indent += 1;
+        for binding in bindings {
+            out.push_str(&format!(
+                "{}{}: std::sync::Arc::new({}),\n",
+                self.indent_str(),
+                snake_case(&binding.trait_name),
+                self.container_impl_rust_expr(&binding.implementation)
+            ));
+        }
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+
+        for service in self.service_struct_defs.clone() {
+            out.push('\n');
+            out.push_str(&format!(
+                "{}pub fn register_{}(&self) -> {} {{\n",
+                self.indent_str(),
+                snake_case(&service.name),
+                service.name
+            ));
+            self.indent += 1;
+            out.push_str(&format!("{}{} {{\n", self.indent_str(), service.name));
+            self.indent += 1;
+            for (field, ty) in &service.fields {
+                if let Some(trait_name) = container_trait_name(ty) {
+                    out.push_str(&format!(
+                        "{}{}: std::sync::Arc::clone(&self.{}),\n",
+                        self.indent_str(),
+                        field,
+                        snake_case(trait_name)
+                    ));
+                }
+            }
+            self.indent -= 1;
+            out.push_str(&format!("{}}}\n", self.indent_str()));
+            self.indent -= 1;
+            out.push_str(&format!("{}}}\n", self.indent_str()));
+        }
+
+        if !self.event_handlers.is_empty() {
+            out.push('\n');
+            out.push_str(&format!(
+                "{}pub fn register_event_handlers(&self) {{\n",
+                self.indent_str()
+            ));
+            self.indent += 1;
+            for handler in &self.event_handlers {
+                out.push_str(&format!(
+                    "{}self.event_bus.on::<{}, _>({});\n",
+                    self.indent_str(),
+                    handler.event_type,
+                    self.rust_fn_name(&handler.fn_name)
+                ));
+            }
+            self.indent -= 1;
+            out.push_str(&format!("{}}}\n", self.indent_str()));
+        }
+
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        out
+    }
+
+    fn container_impl_rust_expr(&mut self, expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(name, _) => format!("{}::default()", name),
+            other => self.gen_expr(other, false),
+        }
     }
 
     fn gen_impl_block(
@@ -3054,7 +3249,7 @@ impl CodeGenerator {
         if generic_params.is_empty() {
             derives.push("Accessor".to_string());
         }
-        let mut out = self.gen_struct_def(name, generic_params, fields, &derives, is_pub);
+        let mut out = self.gen_struct_def(name, generic_params, fields, &derives, is_pub, false);
 
         let validate_impl = self.gen_validate_impl(name, generic_params, validate_rules);
         if !validate_impl.is_empty() {
@@ -3832,6 +4027,7 @@ impl CodeGenerator {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.gen_match(scrutinee, arms),
+            Expr::ContainerLiteral { .. } => "Container::new()".to_string(),
             Expr::Block { stmts, tail, .. } => self.gen_block(stmts, tail),
             Expr::Call { callee, args, .. } => self.gen_call(callee, args),
 
@@ -5187,6 +5383,19 @@ impl CodeGenerator {
                     );
                 }
             }
+            Stmt::ContainerDef { bindings, .. } => {
+                for binding in bindings {
+                    self.analyze_closure_expr(
+                        &binding.implementation,
+                        outer_names,
+                        local_scopes,
+                        captured,
+                        mutated,
+                        consumed,
+                        false,
+                    );
+                }
+            }
             Stmt::StructDef { .. }
             | Stmt::EnumDef { .. }
             | Stmt::DataDef { .. }
@@ -6140,6 +6349,21 @@ fn format_generic_params(params: &[String]) -> String {
     }
 }
 
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn generic_marker_type(params: &[String]) -> String {
     if params.len() == 1 {
         params[0].clone()
@@ -6187,6 +6411,279 @@ fn collect_struct_defs(module: &Module) -> HashMap<String, Vec<(String, TypeAnn)
         }
     }
     defs
+}
+
+fn collect_inline_container_bindings(module: &Module) -> Option<Vec<Binding>> {
+    module
+        .stmts
+        .iter()
+        .find_map(collect_inline_container_bindings_stmt)
+}
+
+fn collect_inline_container_bindings_stmt(stmt: &Stmt) -> Option<Vec<Binding>> {
+    match stmt {
+        Stmt::Let { value, .. }
+        | Stmt::State { value, .. }
+        | Stmt::Const { value, .. }
+        | Stmt::Expr(value)
+        | Stmt::Return(Some(value), _) => collect_inline_container_bindings_expr(value),
+        Stmt::Fn { body, .. } => collect_inline_container_bindings_expr(body),
+        Stmt::Return(None, _) => None,
+        Stmt::Yield { value, .. } => collect_inline_container_bindings_expr(value),
+        Stmt::Defer { body, .. } => match body {
+            DeferBody::Expr(expr) | DeferBody::Block(expr) => {
+                collect_inline_container_bindings_expr(expr)
+            }
+        },
+        Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
+            body.iter().find_map(collect_inline_container_bindings_stmt)
+        }
+        Stmt::ImplBlock {
+            methods, operators, ..
+        } => methods
+            .iter()
+            .find_map(|method| collect_inline_container_bindings_expr(&method.body))
+            .or_else(|| {
+                operators
+                    .iter()
+                    .find_map(|operator| collect_inline_container_bindings_expr(&operator.body))
+            }),
+        Stmt::MixinDef { methods, .. } | Stmt::ImplTrait { methods, .. } => methods
+            .iter()
+            .find_map(|method| collect_inline_container_bindings_expr(&method.body)),
+        Stmt::TraitDef { methods, .. } => methods.iter().find_map(|method| match method {
+            TraitMethod::Default { body, .. } => collect_inline_container_bindings_expr(body),
+            TraitMethod::Abstract { .. } => None,
+        }),
+        Stmt::TypestateDef {
+            any_methods,
+            state_methods,
+            ..
+        } => any_methods
+            .iter()
+            .find_map(|method| collect_inline_container_bindings_expr(&method.body))
+            .or_else(|| {
+                state_methods.iter().find_map(|state| {
+                    state
+                        .methods
+                        .iter()
+                        .find_map(|method| collect_inline_container_bindings_expr(&method.body))
+                })
+            }),
+        Stmt::StructDef { .. }
+        | Stmt::EnumDef { .. }
+        | Stmt::DataDef { .. }
+        | Stmt::UseDecl { .. }
+        | Stmt::UseRaw { .. }
+        | Stmt::ContainerDef { .. } => None,
+    }
+}
+
+fn collect_inline_container_bindings_expr(expr: &Expr) -> Option<Vec<Binding>> {
+    match expr {
+        Expr::ContainerLiteral { bindings, .. } => Some(bindings.clone()),
+        Expr::Block { stmts, tail, .. } => stmts
+            .iter()
+            .find_map(collect_inline_container_bindings_stmt)
+            .or_else(|| {
+                tail.as_ref()
+                    .and_then(|tail| collect_inline_container_bindings_expr(tail))
+            }),
+        Expr::Call { callee, args, .. } => collect_inline_container_bindings_expr(callee)
+            .or_else(|| args.iter().find_map(collect_inline_container_bindings_expr)),
+        Expr::MethodCall { object, args, .. } => collect_inline_container_bindings_expr(object)
+            .or_else(|| args.iter().find_map(collect_inline_container_bindings_expr)),
+        Expr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => collect_inline_container_bindings_expr(cond)
+            .or_else(|| collect_inline_container_bindings_expr(then_block))
+            .or_else(|| {
+                else_block
+                    .as_ref()
+                    .and_then(|expr| collect_inline_container_bindings_expr(expr))
+            }),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => collect_inline_container_bindings_expr(scrutinee).or_else(|| {
+            arms.iter()
+                .find_map(|arm| collect_inline_container_bindings_expr(&arm.body))
+        }),
+        Expr::BinOp { left, right, .. } => collect_inline_container_bindings_expr(left)
+            .or_else(|| collect_inline_container_bindings_expr(right)),
+        Expr::UnaryOp { operand, .. }
+        | Expr::Question(operand, _)
+        | Expr::Await { expr: operand, .. }
+        | Expr::Field {
+            object: operand, ..
+        }
+        | Expr::Spawn { body: operand, .. } => collect_inline_container_bindings_expr(operand),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, expr)| collect_inline_container_bindings_expr(expr)),
+        Expr::List(items, _) | Expr::SetLiteral { items, .. } => items
+            .iter()
+            .find_map(collect_inline_container_bindings_expr),
+        Expr::MapLiteral { pairs, .. } => pairs.iter().find_map(|(key, value)| {
+            collect_inline_container_bindings_expr(key)
+                .or_else(|| collect_inline_container_bindings_expr(value))
+        }),
+        Expr::OptionalChain { object, chain, .. } => collect_inline_container_bindings_expr(object)
+            .or_else(|| match chain {
+                ChainKind::Method { args, .. } => {
+                    args.iter().find_map(collect_inline_container_bindings_expr)
+                }
+                ChainKind::Field(_) => None,
+            }),
+        Expr::NullCoalesce { value, default, .. } => collect_inline_container_bindings_expr(value)
+            .or_else(|| collect_inline_container_bindings_expr(default)),
+        Expr::Index { object, index, .. } => collect_inline_container_bindings_expr(object)
+            .or_else(|| collect_inline_container_bindings_expr(index)),
+        Expr::Assign { value, .. } => collect_inline_container_bindings_expr(value),
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => collect_inline_container_bindings_expr(object)
+            .or_else(|| collect_inline_container_bindings_expr(index))
+            .or_else(|| collect_inline_container_bindings_expr(value)),
+        Expr::FieldAssign { object, value, .. } => collect_inline_container_bindings_expr(object)
+            .or_else(|| collect_inline_container_bindings_expr(value)),
+        Expr::For { iter, body, .. } => collect_inline_container_bindings_expr(iter)
+            .or_else(|| collect_inline_container_bindings_expr(body)),
+        Expr::While { cond, body, .. } => collect_inline_container_bindings_expr(cond)
+            .or_else(|| collect_inline_container_bindings_expr(body)),
+        Expr::Loop { body, .. } | Expr::Closure { body, .. } => {
+            collect_inline_container_bindings_expr(body)
+        }
+        Expr::EnumInit { data, .. } => match data {
+            EnumInitData::Tuple(items) => items
+                .iter()
+                .find_map(collect_inline_container_bindings_expr),
+            EnumInitData::Struct(fields) => fields
+                .iter()
+                .find_map(|(_, expr)| collect_inline_container_bindings_expr(expr)),
+            EnumInitData::None => None,
+        },
+        Expr::AnonStruct { fields, .. } => fields.iter().find_map(|(_, expr)| {
+            expr.as_ref()
+                .and_then(|expr| collect_inline_container_bindings_expr(expr))
+        }),
+        Expr::Interpolation { parts, .. } => parts.iter().find_map(|part| match part {
+            InterpPart::Expr(expr) => collect_inline_container_bindings_expr(expr),
+            InterpPart::Literal(_) => None,
+        }),
+        Expr::Pipeline { steps, .. } => steps.iter().find_map(|step| match step {
+            PipelineStep::Source(expr)
+            | PipelineStep::Filter(expr)
+            | PipelineStep::Map(expr)
+            | PipelineStep::FlatMap(expr)
+            | PipelineStep::Group(expr)
+            | PipelineStep::Take(expr)
+            | PipelineStep::Skip(expr)
+            | PipelineStep::Each(expr)
+            | PipelineStep::Sink(expr)
+            | PipelineStep::Parallel(expr) => collect_inline_container_bindings_expr(expr),
+            PipelineStep::Sort { key, .. } => collect_inline_container_bindings_expr(key),
+        }),
+        Expr::Literal(_, _) | Expr::Ident(_, _) | Expr::Range { .. } | Expr::Break { .. } => None,
+    }
+}
+
+fn collect_event_handlers(module: &Module) -> Vec<EventHandlerDef> {
+    let mut handlers = Vec::new();
+    for stmt in &module.stmts {
+        match stmt {
+            Stmt::Fn {
+                name, annotations, ..
+            } => {
+                for annotation in annotations {
+                    if let Some(event_type) = on_event_type(annotation) {
+                        handlers.push(EventHandlerDef {
+                            fn_name: name.clone(),
+                            event_type,
+                        });
+                    }
+                }
+            }
+            Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
+                handlers.extend(collect_event_handlers(&Module {
+                    stmts: body.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+    handlers
+}
+
+fn on_event_type(annotation: &str) -> Option<String> {
+    annotation
+        .strip_prefix("@on(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .map(str::to_string)
+}
+
+fn timed_metric(annotations: &[String]) -> Option<String> {
+    annotations.iter().find_map(|annotation| {
+        annotation
+            .strip_prefix("@timed(metric: \"")
+            .and_then(|rest| rest.strip_suffix("\")"))
+            .map(str::to_string)
+    })
+}
+
+fn collect_service_struct_defs(module: &Module) -> Vec<ServiceStructDef> {
+    let mut defs = Vec::new();
+    for stmt in &module.stmts {
+        match stmt {
+            Stmt::StructDef {
+                name,
+                fields,
+                decorators,
+                ..
+            } if has_decorator(decorators, |decorator| {
+                matches!(decorator, Decorator::Service)
+            }) =>
+            {
+                defs.push(ServiceStructDef {
+                    name: name.clone(),
+                    fields: fields.clone(),
+                });
+            }
+            Stmt::When { body, .. } | Stmt::TestBlock { body, .. } => {
+                defs.extend(collect_service_struct_defs(&Module {
+                    stmts: body.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+    defs
+}
+
+fn has_decorator<F>(decorators: &[Decorator], predicate: F) -> bool
+where
+    F: Fn(&Decorator) -> bool,
+{
+    decorators.iter().any(predicate)
+}
+
+fn container_trait_name(ann: &TypeAnn) -> Option<&str> {
+    match ann {
+        TypeAnn::Named(name) => Some(name.as_str()),
+        TypeAnn::Generic { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn service_field_type_to_rust(ann: &TypeAnn) -> String {
+    container_trait_name(ann)
+        .map(|name| format!("std::sync::Arc<dyn {}>", name))
+        .unwrap_or_else(|| type_ann_to_rust(ann))
 }
 
 fn anon_struct_name(fields: &[(String, TypeAnn)]) -> String {
@@ -6420,6 +6917,11 @@ fn collect_anon_structs_stmt(
             }
             scopes.pop();
         }
+        Stmt::ContainerDef { bindings, .. } => {
+            for binding in bindings {
+                collect_anon_structs_expr(&binding.implementation, named_struct_defs, scopes, out);
+            }
+        }
         Stmt::UseDecl { .. } | Stmt::UseRaw { .. } | Stmt::Yield { .. } | Stmt::Defer { .. } => {}
     }
 }
@@ -6576,6 +7078,11 @@ fn collect_anon_structs_expr(
                 }
             }
         },
+        Expr::ContainerLiteral { bindings, .. } => {
+            for binding in bindings {
+                collect_anon_structs_expr(&binding.implementation, named_struct_defs, scopes, out);
+            }
+        }
         Expr::Closure { body, .. } | Expr::Spawn { body, .. } => {
             collect_anon_structs_expr(body, named_struct_defs, scopes, out);
         }
@@ -6872,6 +7379,7 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
                 collect_utility_types_stmt(inner, out);
             }
         }
+        Stmt::ContainerDef { .. } => {}
         Stmt::Yield { .. } => {}
         Stmt::Return(_, _) | Stmt::Expr(_) | Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
         Stmt::Defer { .. } => {}

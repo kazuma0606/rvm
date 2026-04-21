@@ -1,0 +1,19 @@
+use ./domain/user.*
+use ./usecase/register_user_usecase.*
+
+pub struct UserHandler {
+    route: string
+}
+
+pub fn new_user_handler() -> UserHandler {
+    UserHandler {
+        route: "/users",
+    }
+}
+
+pub fn handle_register_user(name: string, email: string) -> string {
+    let handler = new_user_handler()
+    let usecase = new_register_user_usecase()
+    let user = register_user(usecase, name, email)
+    "{handler.route}: registered {user_label(user)}"
+}

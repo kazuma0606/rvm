@@ -1,0 +1,27 @@
+use ./usecase/register_user_usecase.*
+
+pub struct AnvilRouter {
+    routes: list<string>
+}
+
+pub struct UserHandler {
+    route: string
+}
+
+pub fn new_user_handler() -> UserHandler {
+    UserHandler {
+        route: "POST /users",
+    }
+}
+
+pub fn new_user_router() -> AnvilRouter {
+    let handler = new_user_handler()
+    let user = register_user(new_register_user_usecase(), "Ada", "ada@example.com")
+    AnvilRouter {
+        routes: [handler.route, "created {user.email}"],
+    }
+}
+
+pub fn router_status(router: AnvilRouter) -> string {
+    "AnvilRouter routes: {len(router.routes)}"
+}

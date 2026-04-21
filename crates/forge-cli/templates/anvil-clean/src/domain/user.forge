@@ -1,0 +1,11 @@
+pub data User {
+    name: string
+    email: string
+}
+
+pub fn new_user(name: string, email: string) -> User {
+    User {
+        name: name,
+        email: email,
+    }
+}

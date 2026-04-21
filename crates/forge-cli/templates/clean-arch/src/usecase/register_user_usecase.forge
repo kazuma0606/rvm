@@ -1,0 +1,18 @@
+use ./domain/user.*
+
+pub struct RegisterUserUseCase {
+    audit_label: string
+}
+
+pub fn new_register_user_usecase() -> RegisterUserUseCase {
+    RegisterUserUseCase {
+        audit_label: "user-registration",
+    }
+}
+
+pub fn register_user(usecase: RegisterUserUseCase, name: string, email: string) -> User {
+    let user = new_user(name, email)
+    let label = user_label(user)
+    println("{usecase.audit_label}: {label}")
+    user
+}

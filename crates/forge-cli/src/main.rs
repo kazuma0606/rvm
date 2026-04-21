@@ -1,6 +1,7 @@
 // forge-cli: ForgeScript CLI
 // Phase 2-D / DBG-5 実装
 
+mod arch_check;
 mod forge_toml;
 mod hot_reload;
 mod new;
@@ -17,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustyline::DefaultEditor;
 
 use crate::forge_toml::{DependencyValue, ForgeToml};
+use arch_check::check_project_architecture;
 use bloom_compiler::{
     collect_bloom_files, compile_bloom_direct, compile_bloom_to_wasm,
     compile_generated_forge_to_wasm, extract_script_section, generated_forge_path,
@@ -116,11 +118,10 @@ fn main() {
             }
         }
         Some("check") => {
-            if let Some(path) = args.get(2) {
-                check_file(path);
-            } else {
-                eprintln!("エラー: ファイルパスを指定してください");
-                eprintln!("使用方法: forge check <file.forge>");
+            let opts = parse_check_options(&args);
+            if let Err(e) = check_entry(opts) {
+                eprintln!("エラー: {}", e);
+                eprintln!("使用方法: forge check [--arch-only] <file.forge|dir>");
                 std::process::exit(1);
             }
         }
@@ -1012,24 +1013,131 @@ fn handle_repl_command(input: &str, interp: &mut Interpreter) -> Option<Result<S
     }
 }
 
-fn check_file(path: &str) {
+#[derive(Debug, Clone, Default)]
+struct CheckOptions {
+    path: Option<String>,
+    arch_only: bool,
+}
+
+fn parse_check_options(args: &[String]) -> CheckOptions {
+    let mut opts = CheckOptions::default();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--arch-only" => {
+                opts.arch_only = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_check_help();
+                std::process::exit(0);
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("エラー: 不明な check オプション '{}'", arg);
+                print_check_help();
+                std::process::exit(1);
+            }
+            arg => {
+                if opts.path.is_none() {
+                    opts.path = Some(arg.to_string());
+                    i += 1;
+                } else {
+                    eprintln!("エラー: check の入力パスは 1 つだけ指定できます");
+                    print_check_help();
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    opts
+}
+
+fn check_entry(opts: CheckOptions) -> Result<(), String> {
+    match resolve_project_request(opts.path.as_deref())? {
+        ProjectRequest::File(file_path) => check_file_path(&file_path, opts.arch_only),
+        ProjectRequest::Project {
+            project_dir,
+            forge_toml,
+        } => check_project(&project_dir, &forge_toml, opts.arch_only),
+    }
+}
+
+fn check_file_path(path: &Path, arch_only: bool) -> Result<(), String> {
+    if !arch_only {
+        type_check_file(path)?;
+    }
+
+    if let Some(forge_toml_path) = ForgeToml::find(path) {
+        let project_dir = forge_toml_path
+            .parent()
+            .ok_or_else(|| "forge.toml の親ディレクトリを解決できません".to_string())?
+            .to_path_buf();
+        let forge_toml = ForgeToml::load(&project_dir)?;
+        run_architecture_check(&project_dir, &forge_toml)?;
+    } else if arch_only {
+        return Err(format!(
+            "forge.toml が見つからないため --arch-only を実行できません: {}",
+            path.display()
+        ));
+    }
+
+    if !arch_only {
+        println!("型チェック: エラーなし");
+    }
+    Ok(())
+}
+
+fn check_project(
+    project_dir: &Path,
+    forge_toml: &ForgeToml,
+    arch_only: bool,
+) -> Result<(), String> {
+    if !arch_only {
+        let entry = project_dir.join(&forge_toml.package.entry);
+        type_check_file(&entry)?;
+        println!("型チェック: エラーなし");
+    }
+
+    run_architecture_check(project_dir, forge_toml)
+}
+
+fn type_check_file(path: &Path) -> Result<(), String> {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("エラー: ファイル '{}' を読み込めませんでした: {}", path, e);
-            std::process::exit(1);
+            return Err(format!(
+                "ファイル '{}' を読み込めませんでした: {}",
+                path.display(),
+                e
+            ));
         }
     };
 
     let errors = type_check_source(&source);
-    if errors.is_empty() {
-        println!("型チェック: エラーなし");
-    } else {
-        for err in &errors {
-            eprintln!("{}", err);
-        }
-        std::process::exit(1);
+    if !errors.is_empty() {
+        let message = errors
+            .iter()
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(message);
     }
+
+    Ok(())
+}
+
+fn run_architecture_check(project_dir: &Path, forge_toml: &ForgeToml) -> Result<(), String> {
+    let report = check_project_architecture(project_dir, forge_toml)?;
+    for warning in &report.warnings {
+        eprintln!("{}", warning);
+    }
+    if !report.errors.is_empty() {
+        return Err(report.errors.join("\n"));
+    }
+    if forge_toml.architecture.is_some() {
+        println!("アーキテクチャチェック: エラーなし");
+    }
+    Ok(())
 }
 
 fn goblet_entry(args: &[String]) {
@@ -3555,7 +3663,7 @@ fn print_help() {
     println!("  forge serve [path] [--port <n>]     Anvil サーバーを起動");
     println!("  forge test <file.forge>             インラインテストを実行");
     println!("  forge test <file.forge> --filter <pattern>  テスト名で絞り込み");
-    println!("  forge check <file.forge>            型チェックのみ（実行しない）");
+    println!("  forge check [--arch-only] <file.forge|dir>  型チェックとアーキテクチャチェック");
     println!("  forge transpile <file.forge>        Rust コードを stdout に出力");
     println!("  forge transpile <file.forge> -o out.rs  Rust コードをファイルに出力");
     println!("  forge goblet graph <file.forge>     パイプライン可視化を出力");
@@ -3576,6 +3684,18 @@ fn print_help() {
     println!("  forge mcp logs [-f] [--errors]      MCP ログを表示");
     println!("  forge version                       バージョンを表示");
     println!("  forge help                          このヘルプを表示");
+}
+
+fn print_check_help() {
+    println!("forge check");
+    println!();
+    println!("使用方法:");
+    println!("  forge check <file.forge>");
+    println!("  forge check <dir>");
+    println!("  forge check --arch-only <dir>");
+    println!();
+    println!("説明:");
+    println!("  forge.toml に [architecture] がある場合は依存方向と命名規則も確認します。");
 }
 
 fn print_serve_help() {

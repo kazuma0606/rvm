@@ -21,12 +21,20 @@ fn test_transpile_on_decorator() {
     let src = r#"
         use forge/std/event.{ EventBus }
 
+        struct UserCreated {
+            email: string
+        }
+
         @on(UserCreated)
-        fn handle(self, event: UserCreated) -> unit {
-            log(event.email)
+        fn handle(event: UserCreated) -> unit {
+        }
+
+        container {
+            bind EventBus to EventBus::new()
         }
     "#;
 
     let output = transpile(src).expect("transpile on decorator");
-    assert!(output.contains("@on"));
+    assert!(output.contains("pub fn register_event_handlers(&self)"));
+    assert!(output.contains("self.event_bus.on::<UserCreated, _>(handle);"));
 }

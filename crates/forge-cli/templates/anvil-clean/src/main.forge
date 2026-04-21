@@ -1,0 +1,8 @@
+use ./interface/user_handler.*
+
+fn main() {
+    let router = new_user_router()
+    println(router_status(router))
+}
+
+main()

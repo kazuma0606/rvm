@@ -47,6 +47,16 @@ pub enum UseSymbols {
     All,
 }
 
+/// 組み込みデコレータ
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decorator {
+    Derive(String),
+    Service,
+    Repository,
+    On { event_type: String },
+    Timed { metric: String },
+}
+
 /// 分割代入パターン (E2-1)
 #[derive(Debug, Clone)]
 pub enum Pat {
@@ -113,6 +123,7 @@ pub enum Stmt {
         generic_params: Vec<String>,
         fields: Vec<(String, TypeAnn)>,
         derives: Vec<String>,
+        decorators: Vec<Decorator>,
         is_pub: bool,
         span: Span,
     },
@@ -201,6 +212,8 @@ pub enum Stmt {
     },
     /// defer expr / defer { block } （E-7）
     Defer { body: DeferBody, span: Span },
+    /// container { bind Trait to Impl }
+    ContainerDef { bindings: Vec<Binding>, span: Span },
 }
 
 impl Stmt {
@@ -223,7 +236,8 @@ impl Stmt {
             | Stmt::UseRaw { span, .. }
             | Stmt::When { span, .. }
             | Stmt::TestBlock { span, .. }
-            | Stmt::Defer { span, .. } => span,
+            | Stmt::Defer { span, .. }
+            | Stmt::ContainerDef { span, .. } => span,
             Stmt::Return(_, span) => span,
             Stmt::Expr(expr) => expr.span(),
         }
@@ -269,6 +283,12 @@ impl TypestateMarker {
 pub struct ValidateRule {
     pub field: String,
     pub constraints: Vec<Constraint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub trait_name: String,
+    pub implementation: Expr,
 }
 
 /// バリデーション制約の種類
@@ -463,6 +483,8 @@ pub enum Expr {
         steps: Vec<PipelineStep>,
         span: Span,
     },
+    /// container { bind Trait to Impl }
+    ContainerLiteral { bindings: Vec<Binding>, span: Span },
 }
 
 impl Expr {
@@ -500,7 +522,8 @@ impl Expr {
             | Expr::OptionalChain { span, .. }
             | Expr::NullCoalesce { span, .. }
             | Expr::Spawn { span, .. }
-            | Expr::Pipeline { span, .. } => span,
+            | Expr::Pipeline { span, .. }
+            | Expr::ContainerLiteral { span, .. } => span,
         }
     }
 }

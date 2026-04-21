@@ -82,6 +82,108 @@ const ANVIL_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+const CLEAN_ARCH_FILES: &[(&str, &str)] = &[
+    (
+        ".gitignore",
+        include_str!("../templates/clean-arch/.gitignore"),
+    ),
+    (
+        "forge.toml",
+        include_str!("../templates/clean-arch/forge.toml"),
+    ),
+    (
+        "src/main.forge",
+        include_str!("../templates/clean-arch/src/main.forge"),
+    ),
+    (
+        "src/domain/mod.forge",
+        include_str!("../templates/clean-arch/src/domain/mod.forge"),
+    ),
+    (
+        "src/domain/user.forge",
+        include_str!("../templates/clean-arch/src/domain/user.forge"),
+    ),
+    (
+        "src/usecase/mod.forge",
+        include_str!("../templates/clean-arch/src/usecase/mod.forge"),
+    ),
+    (
+        "src/usecase/register_user_usecase.forge",
+        include_str!("../templates/clean-arch/src/usecase/register_user_usecase.forge"),
+    ),
+    (
+        "src/interface/mod.forge",
+        include_str!("../templates/clean-arch/src/interface/mod.forge"),
+    ),
+    (
+        "src/interface/user_handler.forge",
+        include_str!("../templates/clean-arch/src/interface/user_handler.forge"),
+    ),
+    (
+        "src/infrastructure/mod.forge",
+        include_str!("../templates/clean-arch/src/infrastructure/mod.forge"),
+    ),
+    (
+        "src/infrastructure/postgres_user_repository.forge",
+        include_str!("../templates/clean-arch/src/infrastructure/postgres_user_repository.forge"),
+    ),
+    (
+        "src/infrastructure/smtp_email_service.forge",
+        include_str!("../templates/clean-arch/src/infrastructure/smtp_email_service.forge"),
+    ),
+    (
+        "tests/register_user_test.forge",
+        include_str!("../templates/clean-arch/tests/register_user_test.forge"),
+    ),
+];
+
+const ANVIL_CLEAN_FILES: &[(&str, &str)] = &[
+    (
+        ".gitignore",
+        include_str!("../templates/anvil-clean/.gitignore"),
+    ),
+    (
+        "forge.toml",
+        include_str!("../templates/anvil-clean/forge.toml"),
+    ),
+    (
+        "src/main.forge",
+        include_str!("../templates/anvil-clean/src/main.forge"),
+    ),
+    (
+        "src/domain/mod.forge",
+        include_str!("../templates/anvil-clean/src/domain/mod.forge"),
+    ),
+    (
+        "src/domain/user.forge",
+        include_str!("../templates/anvil-clean/src/domain/user.forge"),
+    ),
+    (
+        "src/usecase/mod.forge",
+        include_str!("../templates/anvil-clean/src/usecase/mod.forge"),
+    ),
+    (
+        "src/usecase/register_user_usecase.forge",
+        include_str!("../templates/anvil-clean/src/usecase/register_user_usecase.forge"),
+    ),
+    (
+        "src/interface/mod.forge",
+        include_str!("../templates/anvil-clean/src/interface/mod.forge"),
+    ),
+    (
+        "src/interface/user_handler.forge",
+        include_str!("../templates/anvil-clean/src/interface/user_handler.forge"),
+    ),
+    (
+        "src/infrastructure/mod.forge",
+        include_str!("../templates/anvil-clean/src/infrastructure/mod.forge"),
+    ),
+    (
+        "src/infrastructure/postgres_user_repository.forge",
+        include_str!("../templates/anvil-clean/src/infrastructure/postgres_user_repository.forge"),
+    ),
+];
+
 const SCRIPT_TEMPLATE: Template = Template {
     name: "script",
     entry: "src/main.forge",
@@ -110,6 +212,18 @@ const ANVIL_TEMPLATE: Template = Template {
     name: "anvil",
     entry: "src/main.forge",
     files: ANVIL_FILES,
+};
+
+const CLEAN_ARCH_TEMPLATE: Template = Template {
+    name: "clean-arch",
+    entry: "src/main.forge",
+    files: CLEAN_ARCH_FILES,
+};
+
+const ANVIL_CLEAN_TEMPLATE: Template = Template {
+    name: "anvil-clean",
+    entry: "src/main.forge",
+    files: ANVIL_CLEAN_FILES,
 };
 
 const BLOOM_FILES: &[(&str, &str)] = &[
@@ -150,6 +264,8 @@ const TEMPLATES: &[&Template] = &[
     &LIB_TEMPLATE,
     &DATA_TEMPLATE,
     &ANVIL_TEMPLATE,
+    &CLEAN_ARCH_TEMPLATE,
+    &ANVIL_CLEAN_TEMPLATE,
     &BLOOM_TEMPLATE,
 ];
 

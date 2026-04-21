@@ -1,0 +1,9 @@
+pub struct PostgresUserRepository {
+    url: string
+}
+
+pub fn new_postgres_user_repository(url: string) -> PostgresUserRepository {
+    PostgresUserRepository {
+        url: url,
+    }
+}

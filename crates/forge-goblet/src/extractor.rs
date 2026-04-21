@@ -237,6 +237,11 @@ fn walk_expr(
                 push_graph_once(expr, graph, graphs, seen);
             }
         }
+        Expr::ContainerLiteral { bindings, .. } => {
+            for binding in bindings {
+                collect_expr(&binding.implementation, None, graphs, seen, current_fn);
+            }
+        }
         Expr::Literal(..) | Expr::Ident(..) | Expr::Interpolation { .. } | Expr::Break { .. } => {}
     }
 }
@@ -662,6 +667,7 @@ fn expr_label(expr: &Expr) -> String {
         Expr::OptionalChain { .. } => "optional_chain".to_string(),
         Expr::NullCoalesce { .. } => "??".to_string(),
         Expr::Spawn { .. } => "spawn { ... }".to_string(),
+        Expr::ContainerLiteral { .. } => "container { ... }".to_string(),
     }
 }
 
@@ -712,7 +718,8 @@ fn expr_span(expr: &Expr) -> Option<&forge_compiler::lexer::Span> {
         | Expr::OptionalChain { span, .. }
         | Expr::NullCoalesce { span, .. }
         | Expr::Spawn { span, .. }
-        | Expr::Pipeline { span, .. } => Some(span),
+        | Expr::Pipeline { span, .. }
+        | Expr::ContainerLiteral { span, .. } => Some(span),
     }
 }
 

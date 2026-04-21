@@ -1,0 +1,23 @@
+pub data User {
+    name: string
+    email: string
+}
+
+pub trait UserRepository {
+    fn save(user: User) -> User!
+}
+
+pub trait EmailService {
+    fn send(to: string, subject: string, body: string) -> unit!
+}
+
+pub fn new_user(name: string, email: string) -> User {
+    User {
+        name: name,
+        email: email,
+    }
+}
+
+pub fn user_label(user: User) -> string {
+    "{user.name} <{user.email}>"
+}

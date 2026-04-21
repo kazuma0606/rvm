@@ -7,6 +7,7 @@ pub struct ForgeToml {
     pub package: PackageSection,
     pub build: Option<BuildSection>,
     pub dependencies: BTreeMap<String, DependencyValue>,
+    pub architecture: Option<ArchitectureSection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,24 @@ pub struct PackageSection {
 pub struct BuildSection {
     pub output: Option<String>,
     pub edition: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureSection {
+    pub layers: Vec<String>,
+    pub naming_rules: NamingRulesMode,
+    pub naming: BTreeMap<String, NamingRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamingRulesMode {
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamingRule {
+    pub suffix: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,11 +107,13 @@ impl ForgeToml {
         let package = parse_package(root.get("package"))?;
         let build = parse_build(root.get("build"))?;
         let dependencies = parse_dependencies(root.get("dependencies"))?;
+        let architecture = parse_architecture(root.get("architecture"))?;
 
         Ok(Self {
             package,
             build,
             dependencies,
+            architecture,
         })
     }
 }
@@ -192,6 +213,91 @@ fn parse_dependencies(
     Ok(deps)
 }
 
+fn parse_architecture(value: Option<&toml::Value>) -> Result<Option<ArchitectureSection>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| "[architecture] セクションはテーブルである必要があります".to_string())?;
+
+    let layers_value = table
+        .get("layers")
+        .ok_or_else(|| "[architecture] に必須フィールド 'layers' がありません".to_string())?;
+    let layer_items = layers_value
+        .as_array()
+        .ok_or_else(|| "[architecture].layers は配列である必要があります".to_string())?;
+    let mut layers = Vec::with_capacity(layer_items.len());
+    for item in layer_items {
+        let layer = item.as_str().ok_or_else(|| {
+            "[architecture].layers の要素は文字列である必要があります".to_string()
+        })?;
+        layers.push(normalize_manifest_path(layer));
+    }
+
+    let naming_rules = match get_optional_string(table, "naming_rules")?.as_deref() {
+        None | Some("warn") => NamingRulesMode::Warn,
+        Some("error") => NamingRulesMode::Error,
+        Some(other) => {
+            return Err(format!(
+                "[architecture].naming_rules は 'warn' または 'error' である必要があります: {}",
+                other
+            ))
+        }
+    };
+
+    let mut naming = BTreeMap::new();
+    if let Some(naming_value) = table.get("naming") {
+        let naming_table = naming_value.as_table().ok_or_else(|| {
+            "[architecture.naming] セクションはテーブルである必要があります".to_string()
+        })?;
+        for (layer, rule_value) in naming_table {
+            let rule_table = rule_value.as_table().ok_or_else(|| {
+                format!(
+                    "[architecture.naming.{}] はテーブルである必要があります",
+                    layer
+                )
+            })?;
+            let suffix_value = rule_table.get("suffix").ok_or_else(|| {
+                format!(
+                    "[architecture.naming.{}] に必須フィールド 'suffix' がありません",
+                    layer
+                )
+            })?;
+            let suffix_items = suffix_value.as_array().ok_or_else(|| {
+                format!(
+                    "[architecture.naming.{}].suffix は配列である必要があります",
+                    layer
+                )
+            })?;
+            let mut suffix = Vec::with_capacity(suffix_items.len());
+            for item in suffix_items {
+                let value = item.as_str().ok_or_else(|| {
+                    format!(
+                        "[architecture.naming.{}].suffix の要素は文字列である必要があります",
+                        layer
+                    )
+                })?;
+                suffix.push(value.to_string());
+            }
+            naming.insert(normalize_manifest_path(layer), NamingRule { suffix });
+        }
+    }
+
+    Ok(Some(ArchitectureSection {
+        layers,
+        naming_rules,
+        naming,
+    }))
+}
+
+fn normalize_manifest_path(path: &str) -> String {
+    path.trim_matches('/')
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
+}
+
 fn get_required_string(
     table: &toml::map::Map<String, toml::Value>,
     key: &str,
@@ -249,6 +355,7 @@ version = "0.1.0"
         assert_eq!(parsed.package.version, "0.1.0");
         assert_eq!(parsed.package.entry, "src/main.forge");
         assert!(parsed.build.is_none());
+        assert!(parsed.architecture.is_none());
     }
 
     #[test]
@@ -381,5 +488,50 @@ version = "0.1.0"
 
         let found = ForgeToml::find(&nested).expect("find forge.toml");
         assert_eq!(found, dir.join("forge.toml"));
+    }
+
+    #[test]
+    fn test_parse_architecture_section() {
+        let dir = write_forge_toml(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[architecture]
+layers = ["src/domain", "src/usecase"]
+naming_rules = "error"
+
+[architecture.naming]
+"src/usecase" = { suffix = ["UseCase", "Service"] }
+"#,
+        );
+
+        let parsed = ForgeToml::load(&dir).expect("load forge.toml");
+        let arch = parsed.architecture.expect("architecture");
+        assert_eq!(arch.layers, vec!["src/domain", "src/usecase"]);
+        assert_eq!(arch.naming_rules, NamingRulesMode::Error);
+        assert_eq!(
+            arch.naming.get("src/usecase").expect("naming").suffix,
+            vec!["UseCase".to_string(), "Service".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_architecture_default_naming_rules_warn() {
+        let dir = write_forge_toml(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[architecture]
+layers = ["src/domain"]
+"#,
+        );
+
+        let parsed = ForgeToml::load(&dir).expect("load forge.toml");
+        let arch = parsed.architecture.expect("architecture");
+        assert_eq!(arch.naming_rules, NamingRulesMode::Warn);
     }
 }
