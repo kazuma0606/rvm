@@ -1,0 +1,49 @@
+use forge/validator.{ Validator, Rule }
+
+data Address {
+    zip: string
+    city: string
+}
+
+data RegistrationForm {
+    username: string
+    email: string
+    password: string
+    confirm_password: string
+    age: number
+    tags: list<string>
+    address: Address
+}
+
+let email_rule = Rule::new()
+    .required()
+    .matches("^[^@]+@[^@]+$")
+    .message("email invalid")
+
+let address_validator = Validator::new("Address")
+    .rule("zip", (r) => r.matches("^[0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]$"), "zip invalid")
+    .rule("city", (r) => r.required(), "city required")
+
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("username", (r) => r.required().min_length(3).max_length(20), "username invalid")
+    .rule("email", email_rule)
+    .rule("password", (r) => r.required().min_length(8), "password invalid")
+    .rule_cross((f) => f.password == f.confirm_password, ["password", "confirm_password"], "password mismatch")
+    .rule("age", (r) => r.min(18).max(120), "age invalid")
+    .rule_each("tags", (r) => r.max_length(20), "tag invalid")
+    .rule_nested("address", address_validator)
+
+let form = RegistrationForm {
+    username: "alice",
+    email: "alice@example.com",
+    password: "Password1",
+    confirm_password: "Password1",
+    age: 30,
+    tags: ["forge", "validator"],
+    address: Address { zip: "100-0001", city: "Tokyo" }
+}
+
+match registration_validator.validate_all(form) {
+    ok(_) => println("valid")
+    err(errors) => println(string(errors))
+}

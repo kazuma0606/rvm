@@ -28,6 +28,7 @@ pub enum TokenKind {
     State,
     Const,
     Fn,
+    System,
     Return,
     If,
     Else,
@@ -65,7 +66,8 @@ pub enum TokenKind {
     // ── テストキーワード (Phase FT-1) ─────
     Test, // test
     // ── アノテーション ────────────────────────
-    At, // @
+    At,   // @
+    Hash, // #
 
     // ── 識別子 ────────────────────────────────
     Ident(String),
@@ -86,6 +88,7 @@ pub enum TokenKind {
     GtEq,
 
     // ── 論理演算子 ────────────────────────────
+    Amp,       // &
     And,       // &&
     Or,        // ||
     Pipe,      // |  (Pick/Omit のキー区切り)

@@ -33,7 +33,7 @@ pub trait DebugHook {
     fn on_output(&mut self, text: &str);
 }
 
-use crate::value::{CapturedEnv, EnumData, NativeFn, Value};
+use crate::value::{CapturedEnv, EnumData, NativeFn, NativeObject, Value};
 use forge_compiler::ast::*;
 use forge_compiler::deps::DepsManager;
 use forge_compiler::lexer::Span;
@@ -137,6 +137,113 @@ struct TypeRegistry {
     singletons: HashMap<String, Value>,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum VmRuleCheck {
+    Required,
+    MinLength(usize),
+    MaxLength(usize),
+    Min(f64),
+    Max(f64),
+    Matches(String),
+    OneOf(Vec<Value>),
+    Custom(Value),
+    Ok,
+}
+
+#[derive(Debug, Clone)]
+struct VmRule {
+    checks: Vec<VmRuleCheck>,
+    default_message: Option<String>,
+}
+
+impl NativeObject for VmRule {
+    fn type_name(&self) -> &'static str {
+        "Rule"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VmRuleBuilder {
+    checks: Vec<VmRuleCheck>,
+}
+
+impl NativeObject for VmRuleBuilder {
+    fn type_name(&self) -> &'static str {
+        "RuleBuilder"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VmValidator {
+    type_name: String,
+    rules: Vec<VmValidatorRule>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum VmValidatorRule {
+    Field {
+        field: String,
+        checks: Vec<VmRuleCheck>,
+        message: String,
+    },
+    Cross {
+        fields: Vec<String>,
+        predicate: Value,
+        message: String,
+    },
+    When {
+        condition: Value,
+        field: String,
+        checks: Vec<VmRuleCheck>,
+        message: String,
+    },
+    Each {
+        field: String,
+        checks: Vec<VmRuleCheck>,
+        message: String,
+    },
+    Nested {
+        field: String,
+        validator: Rc<VmValidator>,
+    },
+}
+
+impl NativeObject for VmValidator {
+    fn type_name(&self) -> &'static str {
+        "Validator"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VmValidateMiddleware {
+    validator: Rc<VmValidator>,
+    handler: Value,
+}
+
+impl NativeObject for VmValidateMiddleware {
+    fn type_name(&self) -> &'static str {
+        "ValidateMiddleware"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 // ── RuntimeError ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,7 +269,7 @@ pub enum RuntimeError {
     /// return 文による早期脱出（関数呼び出しが補足）
     Return(Value),
     /// ? 演算子の Err 伝播（関数呼び出しが補足）
-    PropagateErr(String),
+    PropagateErr(Value),
     /// アサーション失敗（forge test でテストを失敗としてマーク）（FT-1-D）
     TestFailure(String),
     /// break 文による loop の脱出（eval_loop が補足）
@@ -368,6 +475,7 @@ impl Interpreter {
             pipeline_trace_events: Vec::new(),
             debug_hook: None,
         };
+        interp.setup_validator_types();
         interp.register_builtins();
         interp
     }
@@ -430,7 +538,11 @@ impl Interpreter {
 
     /// print / println を output_buffer に書き込むよう再登録する
     pub fn register_print_builtins(&mut self) {
-        let buf1 = Arc::clone(self.output_buffer.as_ref().expect("output_buffer must be set"));
+        let buf1 = Arc::clone(
+            self.output_buffer
+                .as_ref()
+                .expect("output_buffer must be set"),
+        );
         let listener1 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "print",
@@ -451,7 +563,11 @@ impl Interpreter {
             }))),
             false,
         );
-        let buf2 = Arc::clone(self.output_buffer.as_ref().expect("output_buffer must be set"));
+        let buf2 = Arc::clone(
+            self.output_buffer
+                .as_ref()
+                .expect("output_buffer must be set"),
+        );
         let listener2 = self.output_listener.as_ref().map(Arc::clone);
         self.define(
             "println",
@@ -1091,7 +1207,7 @@ impl Interpreter {
                             if bloom_wasm_trace_enabled() {
                                 eprintln!("[WASM TRACE] SSR error: {}", e);
                             }
-                            Ok(Value::Result(Err(e)))
+                            Ok(result_err_string(e))
                         }
                     }
                 }
@@ -1127,7 +1243,7 @@ impl Interpreter {
                 if args.len() != 1 {
                     return Err(format!("err() takes 1 arg"));
                 }
-                Ok(Value::Result(Err(args.remove(0).to_string())))
+                Ok(Value::Result(Err(Box::new(args.remove(0)))))
             }),
             false,
         );
@@ -1181,17 +1297,17 @@ impl Interpreter {
                 match args.remove(0) {
                     Value::String(s) => match s.trim().parse::<i64>() {
                         Ok(n) => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
-                        Err(_) => Ok(Value::Result(Err(format!(
+                        Err(_) => Ok(result_err_string(format!(
                             "\"{}\" を number に変換できません",
                             s
-                        )))),
+                        ))),
                     },
                     Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Int(f as i64))))),
                     Value::Int(n) => Ok(Value::Result(Ok(Box::new(Value::Int(n))))),
-                    v => Ok(Value::Result(Err(format!(
+                    v => Ok(result_err_string(format!(
                         "{} を number に変換できません",
                         v.type_name()
-                    )))),
+                    ))),
                 }
             }),
             false,
@@ -1261,17 +1377,17 @@ impl Interpreter {
                 match args.remove(0) {
                     Value::String(s) => match s.trim().parse::<f64>() {
                         Ok(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
-                        Err(_) => Ok(Value::Result(Err(format!(
+                        Err(_) => Ok(result_err_string(format!(
                             "\"{}\" を float に変換できません",
                             s
-                        )))),
+                        ))),
                     },
                     Value::Int(n) => Ok(Value::Result(Ok(Box::new(Value::Float(n as f64))))),
                     Value::Float(f) => Ok(Value::Result(Ok(Box::new(Value::Float(f))))),
-                    v => Ok(Value::Result(Err(format!(
+                    v => Ok(result_err_string(format!(
                         "{} を float に変換できません",
                         v.type_name()
-                    )))),
+                    ))),
                 }
             }),
             false,
@@ -1508,7 +1624,33 @@ impl Interpreter {
                 return_type,
                 body,
                 defer_cleanup,
+                decorators,
                 ..
+            } => {
+                let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                let captured = self.capture_env();
+                let mut closure = Value::Closure {
+                    params: param_names,
+                    body: body.clone(),
+                    env: Rc::clone(&captured),
+                    return_type: return_type.clone(),
+                    defer_cleanup: defer_cleanup.clone(),
+                };
+                for decorator in decorators {
+                    if let Decorator::Validate { using, .. } = decorator {
+                        let validator_value = self.eval_ident(using)?;
+                        closure = self.validator_middleware_value(validator_value, closure)?;
+                    }
+                }
+                // 再帰呼び出しのために自己参照を captured env に追加
+                captured
+                    .borrow_mut()
+                    .insert(name.clone(), (closure.clone(), false));
+                self.define(name, closure, false);
+                Ok(Value::Unit)
+            }
+            Stmt::System {
+                name, params, body, ..
             } => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 let captured = self.capture_env();
@@ -1516,10 +1658,9 @@ impl Interpreter {
                     params: param_names,
                     body: body.clone(),
                     env: Rc::clone(&captured),
-                    return_type: return_type.clone(),
-                    defer_cleanup: defer_cleanup.clone(),
+                    return_type: None,
+                    defer_cleanup: None,
                 };
-                // 再帰呼び出しのために自己参照を captured env に追加
                 captured
                     .borrow_mut()
                     .insert(name.clone(), (closure.clone(), false));
@@ -1842,6 +1983,14 @@ impl Interpreter {
                 } else if crate_name == "forge/http" {
                     // forge/http は組み込み HTTP モジュールとして処理する
                     self.register_http_module(symbols)
+                        .map_err(RuntimeError::Custom)?;
+                    Ok(Value::Unit)
+                } else if crate_name == "forge/validator" {
+                    self.register_validator_module(symbols)
+                        .map_err(RuntimeError::Custom)?;
+                    Ok(Value::Unit)
+                } else if matches!(crate_name.as_str(), "ember" | "ember/time" | "ember/input") {
+                    self.register_ember_module(crate_name, symbols)
                         .map_err(RuntimeError::Custom)?;
                     Ok(Value::Unit)
                 } else {
@@ -2950,6 +3099,13 @@ impl Interpreter {
                     RuntimeError::Custom(msg)
                 }
             }),
+            Value::NativeObject(obj) => {
+                if let Some(middleware) = obj.as_any().downcast_ref::<VmValidateMiddleware>() {
+                    self.call_validate_middleware(middleware.clone(), arg_vals)
+                } else {
+                    Err(type_err("function", obj.type_name()))
+                }
+            }
             v => Err(type_err("function", v.type_name())),
         }
     }
@@ -3065,7 +3221,7 @@ impl Interpreter {
         match result {
             Ok(v) => Ok(v),
             Err(RuntimeError::Return(v)) => Ok(v),
-            Err(RuntimeError::PropagateErr(e)) => Ok(Value::Result(Err(e))),
+            Err(RuntimeError::PropagateErr(e)) => Ok(result_err_value(e)),
             Err(e) => Err(e),
         }
     }
@@ -3242,6 +3398,10 @@ impl Interpreter {
                 let type_name_cloned = type_name.clone();
                 self.eval_struct_method(obj.clone(), &type_name_cloned, method, arg_vals)
             }
+            Value::NativeObject(ref native) => {
+                let type_name = native.type_name();
+                self.eval_struct_method(obj.clone(), type_name, method, arg_vals)
+            }
             Value::Enum { ref type_name, .. } => {
                 let type_name_cloned = type_name.clone();
                 self.eval_enum_method(obj.clone(), &type_name_cloned, method, arg_vals)
@@ -3283,6 +3443,19 @@ impl Interpreter {
         method: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        if type_name == "Validator" && method == "validate_middleware" {
+            let mut args = args;
+            if args.len() != 2 {
+                return Err(RuntimeError::Custom(
+                    "Validator::validate_middleware() requires validator and handler".to_string(),
+                ));
+            }
+            let handler = args.remove(1);
+            let validator = args.remove(0);
+            ensure_callable("validate_middleware", &handler)?;
+            return self.validator_middleware_value(validator, handler);
+        }
+
         if method == "instance" {
             let is_singleton = self
                 .type_registry
@@ -4104,6 +4277,12 @@ impl Interpreter {
                 ..
             } => self.call_closure(None, &params, &body, &env, return_type.clone(), args),
             Value::NativeFunction(NativeFn(func)) => func(args).map_err(RuntimeError::Custom),
+            Value::NativeObject(obj) => {
+                if let Some(middleware) = obj.as_any().downcast_ref::<VmValidateMiddleware>() {
+                    return self.call_validate_middleware(middleware.clone(), args);
+                }
+                Err(type_err("function", obj.type_name()))
+            }
             v => Err(type_err("function", v.type_name())),
         }
     }
@@ -4133,11 +4312,11 @@ impl Interpreter {
                         col: span.col,
                         item_count: Some(0),
                         outcome: PipelineTraceOutcome::ResultErr,
-                        message: Some(e.clone()),
+                        message: Some(e.to_string()),
                         corrupted: Vec::new(),
                     });
                 }
-                Err(RuntimeError::PropagateErr(e))
+                Err(RuntimeError::PropagateErr(*e))
             }
             v => Err(type_err("result", v.type_name())),
         }
@@ -4590,7 +4769,7 @@ impl Interpreter {
                     let violation = check_constraint(field_val, constraint);
                     if let Some(constraint_name) = violation {
                         let msg = format!("{}: {}", rule.field, constraint_name);
-                        return Ok(Value::Result(Err(msg)));
+                        return Ok(result_err_string(msg));
                     }
                 }
             }
@@ -5761,6 +5940,449 @@ impl Interpreter {
         }
     }
 
+    fn eval_validator_method(
+        &mut self,
+        self_val: Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let validator = native_ref::<VmValidator>(&self_val, "Validator")
+            .map_err(RuntimeError::Custom)?
+            .clone();
+        let mut rules = validator.rules.clone();
+
+        match method {
+            "rule" => {
+                let field = validator_string_arg(method, &args, 0)?;
+                let rule_source = args.get(1).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("rule() requires rule or function".to_string())
+                })?;
+                let checks = self.validator_checks_from_value(rule_source.clone())?;
+                let message = validator_optional_message(&args, 2)
+                    .or_else(|| validator_default_message(&rule_source))
+                    .unwrap_or_else(|| format!("{} is invalid", field));
+                rules.push(VmValidatorRule::Field {
+                    field,
+                    checks,
+                    message,
+                });
+            }
+            "rule_cross" => {
+                let predicate = args.get(0).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("rule_cross() requires predicate".to_string())
+                })?;
+                ensure_callable("rule_cross", &predicate)?;
+                let fields = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::Custom("rule_cross() requires fields".to_string()))
+                    .and_then(value_to_string_keys)?;
+                let message = validator_optional_message(&args, 2)
+                    .unwrap_or_else(|| "cross field validation failed".to_string());
+                rules.push(VmValidatorRule::Cross {
+                    fields,
+                    predicate,
+                    message,
+                });
+            }
+            "rule_when" => {
+                let condition = args.get(0).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("rule_when() requires condition".to_string())
+                })?;
+                ensure_callable("rule_when", &condition)?;
+                let field = validator_string_arg(method, &args, 1)?;
+                let rule_source = args.get(2).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("rule_when() requires rule function".to_string())
+                })?;
+                let checks = self.validator_checks_from_value(rule_source.clone())?;
+                let message = validator_optional_message(&args, 3)
+                    .or_else(|| validator_default_message(&rule_source))
+                    .unwrap_or_else(|| format!("{} is invalid", field));
+                rules.push(VmValidatorRule::When {
+                    condition,
+                    field,
+                    checks,
+                    message,
+                });
+            }
+            "rule_each" => {
+                let field = validator_string_arg(method, &args, 0)?;
+                let rule_source = args.get(1).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("rule_each() requires rule function".to_string())
+                })?;
+                let checks = self.validator_checks_from_value(rule_source.clone())?;
+                let message = validator_optional_message(&args, 2)
+                    .or_else(|| validator_default_message(&rule_source))
+                    .unwrap_or_else(|| format!("{} item is invalid", field));
+                rules.push(VmValidatorRule::Each {
+                    field,
+                    checks,
+                    message,
+                });
+            }
+            "rule_nested" => {
+                let field = validator_string_arg(method, &args, 0)?;
+                let nested_value = args.get(1).ok_or_else(|| {
+                    RuntimeError::Custom("rule_nested() requires validator".to_string())
+                })?;
+                let nested = native_ref::<VmValidator>(nested_value, "Validator")
+                    .map_err(RuntimeError::Custom)?
+                    .clone();
+                rules.push(VmValidatorRule::Nested {
+                    field,
+                    validator: Rc::new(nested),
+                });
+            }
+            "validate" => {
+                let form = args
+                    .get(0)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::Custom("validate() requires form".to_string()))?;
+                let errors = self.validator_validate_errors(&validator, &form, false)?;
+                return Ok(match errors.into_iter().next() {
+                    Some(error) => result_err_value(error),
+                    None => Value::Result(Ok(Box::new(Value::Unit))),
+                });
+            }
+            "validate_all" => {
+                let form = args.get(0).cloned().ok_or_else(|| {
+                    RuntimeError::Custom("validate_all() requires form".to_string())
+                })?;
+                let errors = self.validator_validate_errors(&validator, &form, true)?;
+                return Ok(if errors.is_empty() {
+                    Value::Result(Ok(Box::new(Value::Unit)))
+                } else {
+                    result_err_value(mk_list(errors))
+                });
+            }
+            _ => {
+                return Err(RuntimeError::Custom(format!(
+                    "Validator method '{}' is not implemented",
+                    method
+                )))
+            }
+        }
+
+        Ok(Value::NativeObject(Rc::new(VmValidator {
+            type_name: validator.type_name,
+            rules,
+        })))
+    }
+
+    fn validator_checks_from_value(
+        &mut self,
+        value: Value,
+    ) -> Result<Vec<VmRuleCheck>, RuntimeError> {
+        if let Ok(rule) = native_ref::<VmRule>(&value, "Rule") {
+            return Ok(rule.checks.clone());
+        }
+        if let Ok(builder) = native_ref::<VmRuleBuilder>(&value, "RuleBuilder") {
+            return Ok(builder.checks.clone());
+        }
+        match value {
+            Value::Closure { .. } | Value::NativeFunction(_) => {
+                let builder = Value::NativeObject(Rc::new(VmRuleBuilder { checks: Vec::new() }));
+                let result = self.call_value(value, vec![builder])?;
+                if let Ok(rule) = native_ref::<VmRule>(&result, "Rule") {
+                    return Ok(rule.checks.clone());
+                }
+                if let Ok(builder) = native_ref::<VmRuleBuilder>(&result, "RuleBuilder") {
+                    return Ok(builder.checks.clone());
+                }
+                Err(type_err("RuleBuilder", result.type_name()))
+            }
+            other => Err(type_err("Rule or function", other.type_name())),
+        }
+    }
+
+    fn validator_validate_errors(
+        &mut self,
+        validator: &VmValidator,
+        form: &Value,
+        collect_all: bool,
+    ) -> Result<Vec<Value>, RuntimeError> {
+        if let Some(data_errors) = self.validator_data_validate_errors(form, collect_all)? {
+            return Ok(data_errors);
+        }
+
+        let mut errors = Vec::new();
+        for stage in 0..5 {
+            for rule in &validator.rules {
+                match (stage, rule) {
+                    (
+                        0,
+                        VmValidatorRule::Field {
+                            field,
+                            checks,
+                            message,
+                        },
+                    ) => {
+                        let value = validator_field_value(form, field);
+                        if self.validator_check_failure(checks, &value)?.is_some() {
+                            errors.push(validation_error_value(
+                                vec![field.clone()],
+                                message.clone(),
+                                Some(value),
+                            ));
+                        }
+                    }
+                    (
+                        1,
+                        VmValidatorRule::Cross {
+                            fields,
+                            predicate,
+                            message,
+                        },
+                    ) => {
+                        if !validator_truthy(
+                            self.call_value(predicate.clone(), vec![form.clone()])?,
+                        )? {
+                            errors.push(validation_error_value(
+                                fields.clone(),
+                                message.clone(),
+                                Some(form.clone()),
+                            ));
+                        }
+                    }
+                    (
+                        2,
+                        VmValidatorRule::When {
+                            condition,
+                            field,
+                            checks,
+                            message,
+                        },
+                    ) => {
+                        if validator_truthy(
+                            self.call_value(condition.clone(), vec![form.clone()])?,
+                        )? {
+                            let value = validator_field_value(form, field);
+                            if self.validator_check_failure(checks, &value)?.is_some() {
+                                errors.push(validation_error_value(
+                                    vec![field.clone()],
+                                    message.clone(),
+                                    Some(value),
+                                ));
+                            }
+                        }
+                    }
+                    (
+                        3,
+                        VmValidatorRule::Each {
+                            field,
+                            checks,
+                            message,
+                        },
+                    ) => {
+                        let value = validator_field_value(form, field);
+                        match value {
+                            Value::List(items) => {
+                                for (index, item) in items.borrow().iter().enumerate() {
+                                    if self.validator_check_failure(checks, item)?.is_some() {
+                                        errors.push(validation_error_value(
+                                            vec![format!("{field}[{index}]")],
+                                            message.clone(),
+                                            Some(item.clone()),
+                                        ));
+                                        if !collect_all {
+                                            return Ok(errors);
+                                        }
+                                    }
+                                }
+                            }
+                            other => errors.push(validation_error_value(
+                                vec![field.clone()],
+                                message.clone(),
+                                Some(other),
+                            )),
+                        }
+                    }
+                    (4, VmValidatorRule::Nested { field, validator }) => {
+                        let value = validator_field_value(form, field);
+                        let nested_errors = self.validator_validate_errors(
+                            validator.as_ref(),
+                            &value,
+                            collect_all,
+                        )?;
+                        for error in nested_errors {
+                            errors.push(prefix_validation_error(error, field));
+                            if !collect_all {
+                                return Ok(errors);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if !collect_all && !errors.is_empty() {
+                    return Ok(errors);
+                }
+            }
+        }
+        Ok(errors)
+    }
+
+    fn validator_data_validate_errors(
+        &mut self,
+        form: &Value,
+        collect_all: bool,
+    ) -> Result<Option<Vec<Value>>, RuntimeError> {
+        let type_name = match form {
+            Value::Struct { type_name, .. } if type_name != "<anon>" => type_name.clone(),
+            _ => return Ok(None),
+        };
+        let has_validate = self
+            .type_registry
+            .structs
+            .get(&type_name)
+            .and_then(|info| info.methods.get("validate"))
+            .is_some();
+        if !has_validate {
+            return Ok(None);
+        }
+
+        match self.eval_struct_method(form.clone(), &type_name, "validate", vec![])? {
+            Value::Result(Ok(_)) | Value::Unit | Value::Bool(true) => Ok(None),
+            Value::Result(Err(error)) => {
+                let error =
+                    validation_error_value(Vec::new(), error.to_string(), Some(form.clone()));
+                let errors = if collect_all {
+                    vec![error]
+                } else {
+                    vec![error]
+                };
+                Ok(Some(errors))
+            }
+            Value::Bool(false) => Ok(Some(vec![validation_error_value(
+                Vec::new(),
+                "data validate failed".to_string(),
+                Some(form.clone()),
+            )])),
+            other => Err(RuntimeError::Custom(format!(
+                "data validate returned {}, expected result",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn validator_middleware_value(
+        &self,
+        validator: Value,
+        handler: Value,
+    ) -> Result<Value, RuntimeError> {
+        let validator = native_ref::<VmValidator>(&validator, "Validator")
+            .map_err(RuntimeError::Custom)?
+            .clone();
+        Ok(Value::NativeObject(Rc::new(VmValidateMiddleware {
+            validator: Rc::new(validator),
+            handler,
+        })))
+    }
+
+    fn call_validate_middleware(
+        &mut self,
+        middleware: VmValidateMiddleware,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let request = args.first().cloned().unwrap_or(Value::Unit);
+        let target = validator_request_body_value(&request)?;
+        let errors =
+            self.validator_validate_errors(middleware.validator.as_ref(), &target, true)?;
+        if errors.is_empty() {
+            return self.call_value(middleware.handler, args);
+        }
+
+        Ok(Value::Result(Ok(Box::new(
+            validation_error_response_value(errors),
+        ))))
+    }
+
+    fn validator_check_failure(
+        &mut self,
+        checks: &[VmRuleCheck],
+        value: &Value,
+    ) -> Result<Option<String>, RuntimeError> {
+        for check in checks {
+            let failure = match check {
+                VmRuleCheck::Required => match value {
+                    Value::Option(None) | Value::Unit => Some("required".to_string()),
+                    Value::String(text) if text.is_empty() => Some("required".to_string()),
+                    _ => None,
+                },
+                VmRuleCheck::MinLength(min) => match value {
+                    Value::String(text) if text.chars().count() < *min => {
+                        Some(format!("min_length({min})"))
+                    }
+                    Value::List(items) if items.borrow().len() < *min => {
+                        Some(format!("min_length({min})"))
+                    }
+                    Value::String(_) | Value::List(_) => None,
+                    other => Some(format!(
+                        "min_length expects string or list, got {}",
+                        other.type_name()
+                    )),
+                },
+                VmRuleCheck::MaxLength(max) => match value {
+                    Value::String(text) if text.chars().count() > *max => {
+                        Some(format!("max_length({max})"))
+                    }
+                    Value::List(items) if items.borrow().len() > *max => {
+                        Some(format!("max_length({max})"))
+                    }
+                    Value::String(_) | Value::List(_) => None,
+                    other => Some(format!(
+                        "max_length expects string or list, got {}",
+                        other.type_name()
+                    )),
+                },
+                VmRuleCheck::Min(min) => match validator_number(value) {
+                    Some(number) if number < *min => Some(format!("min({min})")),
+                    Some(_) => None,
+                    None => Some(format!("min expects number, got {}", value.type_name())),
+                },
+                VmRuleCheck::Max(max) => match validator_number(value) {
+                    Some(number) if number > *max => Some(format!("max({max})")),
+                    Some(_) => None,
+                    None => Some(format!("max expects number, got {}", value.type_name())),
+                },
+                VmRuleCheck::Matches(pattern) => match value {
+                    Value::String(text) => {
+                        let regex = regex::Regex::new(pattern).map_err(|e| {
+                            RuntimeError::Custom(format!("invalid regex '{}': {}", pattern, e))
+                        })?;
+                        if regex.is_match(text) {
+                            None
+                        } else {
+                            Some(format!("matches({pattern})"))
+                        }
+                    }
+                    other => Some(format!("matches expects string, got {}", other.type_name())),
+                },
+                VmRuleCheck::OneOf(allowed) => {
+                    if allowed.iter().any(|candidate| candidate == value) {
+                        None
+                    } else {
+                        Some("one_of".to_string())
+                    }
+                }
+                VmRuleCheck::Custom(func) => {
+                    match self.call_value(func.clone(), vec![value.clone()])? {
+                        Value::Bool(true) | Value::Unit => None,
+                        Value::Bool(false) => Some("custom".to_string()),
+                        Value::Result(Ok(_)) => None,
+                        Value::Result(Err(error)) => Some(error.to_string()),
+                        other => Some(format!("custom returned {}", other.type_name())),
+                    }
+                }
+                VmRuleCheck::Ok => None,
+            };
+            if failure.is_some() {
+                return Ok(failure);
+            }
+        }
+        Ok(None)
+    }
+
     fn eval_struct_method(
         &mut self,
         self_val: Value,
@@ -5768,6 +6390,10 @@ impl Interpreter {
         method: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        if type_name == "Validator" {
+            return self.eval_validator_method(self_val, method, args);
+        }
+
         // Singleton::instance() の特別処理
         if method == "instance" {
             let is_singleton = self
@@ -5992,6 +6618,154 @@ fn mk_list(items: Vec<Value>) -> Value {
     Value::List(Rc::new(RefCell::new(items)))
 }
 
+fn result_err_string(message: impl Into<String>) -> Value {
+    Value::Result(Err(Box::new(Value::String(message.into()))))
+}
+
+fn result_err_value(value: Value) -> Value {
+    Value::Result(Err(Box::new(value)))
+}
+
+fn validation_error_value(fields: Vec<String>, message: String, value: Option<Value>) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "fields".to_string(),
+        mk_list(fields.into_iter().map(Value::String).collect()),
+    );
+    map.insert("message".to_string(), Value::String(message));
+    map.insert(
+        "value".to_string(),
+        match value {
+            Some(value) => Value::Option(Some(Box::new(value))),
+            None => Value::Option(None),
+        },
+    );
+    Value::Struct {
+        type_name: "ValidationError".to_string(),
+        fields: Rc::new(RefCell::new(map)),
+    }
+}
+
+fn prefix_validation_error(error: Value, prefix: &str) -> Value {
+    match error {
+        Value::Struct { type_name, fields } if type_name == "ValidationError" => {
+            let mut map = fields.borrow().clone();
+            let prefixed = match map.get("fields") {
+                Some(Value::List(items)) => items
+                    .borrow()
+                    .iter()
+                    .filter_map(|field| match field {
+                        Value::String(name) if name.is_empty() => {
+                            Some(Value::String(prefix.to_string()))
+                        }
+                        Value::String(name) => Some(Value::String(format!("{prefix}.{name}"))),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![Value::String(prefix.to_string())],
+            };
+            map.insert("fields".to_string(), mk_list(prefixed));
+            Value::Struct {
+                type_name,
+                fields: Rc::new(RefCell::new(map)),
+            }
+        }
+        other => validation_error_value(vec![prefix.to_string()], other.to_string(), Some(other)),
+    }
+}
+
+fn validator_field_value(form: &Value, field: &str) -> Value {
+    match form {
+        Value::Struct { fields, .. } | Value::Typestate { fields, .. } => fields
+            .borrow()
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Option(None)),
+        Value::Map(entries) => entries
+            .iter()
+            .find_map(|(key, value)| match key {
+                Value::String(name) if name == field => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Option(None)),
+        _ => Value::Option(None),
+    }
+}
+
+fn validator_request_body_value(request: &Value) -> Result<Value, RuntimeError> {
+    let body = match request {
+        Value::Struct { fields, .. } | Value::Typestate { fields, .. } => {
+            fields.borrow().get("body").cloned()
+        }
+        Value::Map(entries) => entries.iter().find_map(|(key, value)| match key {
+            Value::String(name) if name == "body" => Some(value.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+    .unwrap_or_else(|| request.clone());
+
+    let body = match body {
+        Value::Option(Some(inner)) => *inner,
+        other => other,
+    };
+
+    match body {
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                Ok(Value::Option(None))
+            } else {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .map(json_to_value)
+                    .map_err(|e| {
+                        RuntimeError::Custom(format!("request body JSON parse error: {e}"))
+                    })
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+fn validation_error_response_value(errors: Vec<Value>) -> Value {
+    let errors_value = mk_list(errors);
+    let mut body = serde_json::Map::new();
+    body.insert("errors".to_string(), value_to_json(&errors_value));
+
+    let headers = Value::Map(vec![(
+        Value::String("content-type".to_string()),
+        Value::String("application/json".to_string()),
+    )]);
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), Value::Int(422));
+    fields.insert("headers".to_string(), headers);
+    fields.insert(
+        "body".to_string(),
+        Value::String(serde_json::Value::Object(body).to_string()),
+    );
+    Value::Struct {
+        type_name: "RawResponse".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+fn validator_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(number) => Some(*number as f64),
+        Value::Float(number) => Some(*number),
+        _ => None,
+    }
+}
+
+fn validator_truthy(value: Value) -> Result<bool, RuntimeError> {
+    match value {
+        Value::Bool(value) => Ok(value),
+        Value::Result(Ok(value)) => validator_truthy(*value),
+        Value::Result(Err(_)) => Ok(false),
+        other => Err(type_err("bool", other.type_name())),
+    }
+}
+
 fn pipeline_item_count(value: &Value) -> Option<usize> {
     match value {
         Value::List(items) => Some(items.borrow().len()),
@@ -6013,7 +6787,7 @@ fn pipeline_trace_outcome(method: &str, value: &Value) -> PipelineTraceOutcome {
 
 fn pipeline_trace_message(value: &Value) -> Option<String> {
     match value {
-        Value::Result(Err(message)) => Some(message.clone()),
+        Value::Result(Err(message)) => Some(message.to_string()),
         _ => None,
     }
 }
@@ -6254,6 +7028,315 @@ fn one_value_arg(method: &str, args: Vec<Value>) -> Result<Value, RuntimeError> 
     args.into_iter()
         .next()
         .ok_or_else(|| RuntimeError::Custom(format!("{}() は引数が1つ必要です", method)))
+}
+
+fn number_arg(name: &str, value: &Value) -> Result<f64, String> {
+    match value {
+        Value::Float(value) => Ok(*value),
+        Value::Int(value) => Ok(*value as f64),
+        other => Err(format!(
+            "{} must be number, got {}",
+            name,
+            other.type_name()
+        )),
+    }
+}
+
+fn ember_color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("r".to_string(), Value::Float(r));
+    fields.insert("g".to_string(), Value::Float(g));
+    fields.insert("b".to_string(), Value::Float(b));
+    fields.insert("a".to_string(), Value::Float(a));
+    Value::Struct {
+        type_name: "Color".to_string(),
+        fields: Rc::new(RefCell::new(fields)),
+    }
+}
+
+fn ember_color_arg(name: &str, value: &Value) -> Result<(f64, f64, f64, f64), String> {
+    match value {
+        Value::Struct { type_name, fields } if type_name == "Color" => {
+            let fields = fields.borrow();
+            let r = fields
+                .get("r")
+                .ok_or_else(|| format!("{} missing r", name))
+                .and_then(|value| number_arg("r", value))?;
+            let g = fields
+                .get("g")
+                .ok_or_else(|| format!("{} missing g", name))
+                .and_then(|value| number_arg("g", value))?;
+            let b = fields
+                .get("b")
+                .ok_or_else(|| format!("{} missing b", name))
+                .and_then(|value| number_arg("b", value))?;
+            let a = fields
+                .get("a")
+                .ok_or_else(|| format!("{} missing a", name))
+                .and_then(|value| number_arg("a", value))?;
+            Ok((r, g, b, a))
+        }
+        other => Err(format!("{} must be Color, got {}", name, other.type_name())),
+    }
+}
+
+fn ember_key_arg(name: &str, value: &Value) -> Result<String, String> {
+    match value {
+        Value::Enum {
+            type_name, variant, ..
+        } if type_name == "Key" => Ok(variant.clone()),
+        other => Err(format!("{} must be Key, got {}", name, other.type_name())),
+    }
+}
+
+fn native_ref<'a, T: 'static>(value: &'a Value, expected: &str) -> Result<&'a T, String> {
+    match value {
+        Value::NativeObject(obj) => obj
+            .as_any()
+            .downcast_ref::<T>()
+            .ok_or_else(|| format!("expected native {}, got {}", expected, obj.type_name())),
+        other => Err(format!(
+            "expected native {}, got {}",
+            expected,
+            other.type_name()
+        )),
+    }
+}
+
+fn validator_chain_with_check(self_value: &Value, check: VmRuleCheck) -> Result<Value, String> {
+    if let Ok(rule) = native_ref::<VmRule>(self_value, "Rule") {
+        let mut checks = rule.checks.clone();
+        checks.push(check);
+        return Ok(Value::NativeObject(Rc::new(VmRule {
+            checks,
+            default_message: rule.default_message.clone(),
+        })));
+    }
+    if let Ok(builder) = native_ref::<VmRuleBuilder>(self_value, "RuleBuilder") {
+        let mut checks = builder.checks.clone();
+        checks.push(check);
+        return Ok(Value::NativeObject(Rc::new(VmRuleBuilder { checks })));
+    }
+    Err(format!(
+        "validator rule method called on {}",
+        self_value.type_name()
+    ))
+}
+
+fn validator_chain_with_message(self_value: &Value, message: String) -> Result<Value, String> {
+    let rule = native_ref::<VmRule>(self_value, "Rule")?;
+    Ok(Value::NativeObject(Rc::new(VmRule {
+        checks: rule.checks.clone(),
+        default_message: Some(message),
+    })))
+}
+
+fn validator_default_message(value: &Value) -> Option<String> {
+    native_ref::<VmRule>(value, "Rule")
+        .ok()
+        .and_then(|rule| rule.default_message.clone())
+}
+
+fn validator_string_arg(
+    method: &str,
+    args: &[Value],
+    index: usize,
+) -> Result<String, RuntimeError> {
+    match args.get(index) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        Some(other) => Err(type_err("string", other.type_name())),
+        None => Err(RuntimeError::Custom(format!(
+            "{}() requires argument {}",
+            method,
+            index + 1
+        ))),
+    }
+}
+
+fn validator_optional_message(args: &[Value], index: usize) -> Option<String> {
+    match args.get(index) {
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn ensure_callable(method: &str, value: &Value) -> Result<(), RuntimeError> {
+    match value {
+        Value::Closure { .. } | Value::NativeFunction(_) => Ok(()),
+        other => Err(RuntimeError::Custom(format!(
+            "{}() expects function, got {}",
+            method,
+            other.type_name()
+        ))),
+    }
+}
+
+fn validator_usize_arg(method: &str, args: &[Value]) -> Result<usize, String> {
+    match args.get(1) {
+        Some(Value::Int(value)) if *value >= 0 => Ok(*value as usize),
+        Some(Value::Float(value)) if *value >= 0.0 => Ok(*value as usize),
+        Some(other) => Err(format!(
+            "{}() expects number, got {}",
+            method,
+            other.type_name()
+        )),
+        None => Err(format!("{}() requires a number", method)),
+    }
+}
+
+fn validator_f64_arg(method: &str, args: &[Value]) -> Result<f64, String> {
+    match args.get(1) {
+        Some(Value::Int(value)) => Ok(*value as f64),
+        Some(Value::Float(value)) => Ok(*value),
+        Some(other) => Err(format!(
+            "{}() expects number, got {}",
+            method,
+            other.type_name()
+        )),
+        None => Err(format!("{}() requires a number", method)),
+    }
+}
+
+fn validator_rule_methods(include_message: bool) -> HashMap<String, MethodImpl> {
+    let mut methods = HashMap::new();
+
+    methods.insert(
+        "required".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "required() requires self".to_string())?;
+            validator_chain_with_check(self_value, VmRuleCheck::Required)
+        }))),
+    );
+    methods.insert(
+        "min_length".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "min_length() requires self".to_string())?;
+            let min = validator_usize_arg("min_length", &args)?;
+            validator_chain_with_check(self_value, VmRuleCheck::MinLength(min))
+        }))),
+    );
+    methods.insert(
+        "max_length".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "max_length() requires self".to_string())?;
+            let max = validator_usize_arg("max_length", &args)?;
+            validator_chain_with_check(self_value, VmRuleCheck::MaxLength(max))
+        }))),
+    );
+    methods.insert(
+        "min".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "min() requires self".to_string())?;
+            let min = validator_f64_arg("min", &args)?;
+            validator_chain_with_check(self_value, VmRuleCheck::Min(min))
+        }))),
+    );
+    methods.insert(
+        "max".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "max() requires self".to_string())?;
+            let max = validator_f64_arg("max", &args)?;
+            validator_chain_with_check(self_value, VmRuleCheck::Max(max))
+        }))),
+    );
+    methods.insert(
+        "ok".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "ok() requires self".to_string())?;
+            validator_chain_with_check(self_value, VmRuleCheck::Ok)
+        }))),
+    );
+    methods.insert(
+        "matches".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "matches() requires self".to_string())?;
+            let pattern = match args.get(1) {
+                Some(Value::String(pattern)) => pattern.clone(),
+                Some(other) => {
+                    return Err(format!(
+                        "matches() expects string, got {}",
+                        other.type_name()
+                    ))
+                }
+                None => return Err("matches() requires a pattern".to_string()),
+            };
+            regex::Regex::new(&pattern).map_err(|e| format!("invalid regex: {}", e))?;
+            validator_chain_with_check(self_value, VmRuleCheck::Matches(pattern))
+        }))),
+    );
+    methods.insert(
+        "one_of".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "one_of() requires self".to_string())?;
+            let values = match args.get(1) {
+                Some(Value::List(values)) => values.borrow().clone(),
+                Some(other) => {
+                    return Err(format!("one_of() expects list, got {}", other.type_name()))
+                }
+                None => return Err("one_of() requires a list".to_string()),
+            };
+            validator_chain_with_check(self_value, VmRuleCheck::OneOf(values))
+        }))),
+    );
+    methods.insert(
+        "custom".to_string(),
+        MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+            let self_value = args
+                .first()
+                .ok_or_else(|| "custom() requires self".to_string())?;
+            let callback = match args.get(1) {
+                Some(value @ (Value::Closure { .. } | Value::NativeFunction(_))) => value.clone(),
+                Some(other) => {
+                    return Err(format!(
+                        "custom() expects function, got {}",
+                        other.type_name()
+                    ))
+                }
+                None => return Err("custom() requires a function".to_string()),
+            };
+            validator_chain_with_check(self_value, VmRuleCheck::Custom(callback))
+        }))),
+    );
+
+    if include_message {
+        methods.insert(
+            "message".to_string(),
+            MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                let self_value = args
+                    .first()
+                    .ok_or_else(|| "Rule.message() requires self".to_string())?;
+                let message = match args.get(1) {
+                    Some(Value::String(message)) => message.clone(),
+                    Some(other) => {
+                        return Err(format!(
+                            "Rule.message() expects string, got {}",
+                            other.type_name()
+                        ))
+                    }
+                    None => return Err("Rule.message() requires a message".to_string()),
+                };
+                validator_chain_with_message(self_value, message)
+            }))),
+        );
+    }
+
+    methods
 }
 
 fn two_value_args(method: &str, args: Vec<Value>) -> Result<(Value, Value), RuntimeError> {
@@ -6566,9 +7649,7 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
         (Pattern::None, Value::Option(None)) => Some(vec![]),
         (Pattern::Some(inner), Value::Option(Some(v))) => match_pattern(inner, v),
         (Pattern::Ok(inner), Value::Result(Ok(v))) => match_pattern(inner, v),
-        (Pattern::Err(inner), Value::Result(Err(e))) => {
-            match_pattern(inner, &Value::String(e.clone()))
-        }
+        (Pattern::Err(inner), Value::Result(Err(e))) => match_pattern(inner, e),
         (
             Pattern::Range {
                 start,
@@ -6817,7 +7898,7 @@ impl Interpreter {
             let resp_struct = match response {
                 Value::Result(Ok(v)) => *v,
                 Value::Result(Err(msg)) => {
-                    let _ = write_http_response(&stream, 500, &StdMap::new(), &msg);
+                    let _ = write_http_response(&stream, 500, &StdMap::new(), &msg.to_string());
                     continue;
                 }
                 other => other,
@@ -7064,11 +8145,11 @@ impl Interpreter {
                         };
                         match std::fs::read_to_string(&path) {
                             Ok(s) => Ok(Value::Result(Ok(Box::new(Value::String(s))))),
-                            Err(e) => Ok(Value::Result(Err(format!(
+                            Err(e) => Ok(result_err_string(format!(
                                 "failed to read '{}': {}",
                                 path.display(),
                                 e
-                            )))),
+                            ))),
                         }
                     }
                 }),
@@ -7093,11 +8174,11 @@ impl Interpreter {
                         };
                         match std::fs::write(&path, &content) {
                             Ok(_) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
-                            Err(e) => Ok(Value::Result(Err(format!(
+                            Err(e) => Ok(result_err_string(format!(
                                 "failed to write '{}': {}",
                                 path.display(),
                                 e
-                            )))),
+                            ))),
                         }
                     }
                 }),
@@ -7150,11 +8231,11 @@ impl Interpreter {
                                     std::cell::RefCell::new(list),
                                 ))))))
                             }
-                            Err(e) => Ok(Value::Result(Err(format!(
+                            Err(e) => Ok(result_err_string(format!(
                                 "failed to read '{}': {}",
                                 path.display(),
                                 e
-                            )))),
+                            ))),
                         }
                     }
                 }),
@@ -7240,6 +8321,410 @@ impl Interpreter {
             self.define(&bind_name, func, false);
         }
         Ok(())
+    }
+
+    fn register_validator_module(&mut self, symbols: &UseSymbols) -> Result<(), String> {
+        self.setup_validator_types();
+
+        let all: &[&str] = &["Validator", "Rule", "ValidationError"];
+        for name in all {
+            let should_bind = match symbols {
+                UseSymbols::All => true,
+                UseSymbols::Single(requested, _) => requested == name,
+                UseSymbols::Multiple(pairs) => pairs.iter().any(|(requested, _)| requested == name),
+            };
+            if !should_bind {
+                continue;
+            }
+
+            let bind_name = match symbols {
+                UseSymbols::Single(_, Some(alias)) => alias.clone(),
+                UseSymbols::Multiple(pairs) => pairs
+                    .iter()
+                    .find(|(requested, _)| requested == name)
+                    .and_then(|(_, alias)| alias.clone())
+                    .unwrap_or_else(|| name.to_string()),
+                _ => name.to_string(),
+            };
+
+            self.record_import(
+                name,
+                &bind_name,
+                "forge/validator",
+                Value::String(name.to_string()),
+                matches!(symbols, UseSymbols::All),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    fn register_ember_module(
+        &mut self,
+        source_path: &str,
+        symbols: &UseSymbols,
+    ) -> Result<(), String> {
+        self.setup_ember_types();
+
+        let all: &[&str] = &["Time", "Color", "Renderer", "Input", "Key"];
+        for name in all {
+            let should_bind = match symbols {
+                UseSymbols::All => true,
+                UseSymbols::Single(requested, _) => requested == name,
+                UseSymbols::Multiple(pairs) => pairs.iter().any(|(requested, _)| requested == name),
+            };
+            if !should_bind {
+                continue;
+            }
+
+            let bind_name = match symbols {
+                UseSymbols::Single(_, Some(alias)) => alias.clone(),
+                UseSymbols::Multiple(pairs) => pairs
+                    .iter()
+                    .find(|(requested, _)| requested == name)
+                    .and_then(|(_, alias)| alias.clone())
+                    .unwrap_or_else(|| name.to_string()),
+                _ => name.to_string(),
+            };
+
+            self.record_import(
+                name,
+                &bind_name,
+                source_path,
+                Value::String(name.to_string()),
+                matches!(symbols, UseSymbols::All),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    fn setup_ember_types(&mut self) {
+        if !self.type_registry.structs.contains_key("Time") {
+            let mut methods = HashMap::new();
+            methods.insert(
+                "delta".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if !args.is_empty() {
+                        return Err("Time.delta() takes no arguments".to_string());
+                    }
+                    Ok(Value::Float(1.0 / 60.0))
+                }))),
+            );
+            methods.insert(
+                "elapsed".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if !args.is_empty() {
+                        return Err("Time.elapsed() takes no arguments".to_string());
+                    }
+                    Ok(Value::Float(0.0))
+                }))),
+            );
+            methods.insert(
+                "fps".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if !args.is_empty() {
+                        return Err("Time.fps() takes no arguments".to_string());
+                    }
+                    Ok(Value::Float(60.0))
+                }))),
+            );
+
+            self.type_registry.structs.insert(
+                "Time".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("Color") {
+            let mut methods = HashMap::new();
+            methods.insert(
+                "rgba".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() != 4 {
+                        return Err("Color::rgba(r, g, b, a) requires 4 arguments".to_string());
+                    }
+                    Ok(ember_color_value(
+                        number_arg("r", &args[0])?,
+                        number_arg("g", &args[1])?,
+                        number_arg("b", &args[2])?,
+                        number_arg("a", &args[3])?,
+                    ))
+                }))),
+            );
+            methods.insert(
+                "rgb".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() != 3 {
+                        return Err("Color::rgb(r, g, b) requires 3 arguments".to_string());
+                    }
+                    Ok(ember_color_value(
+                        number_arg("r", &args[0])?,
+                        number_arg("g", &args[1])?,
+                        number_arg("b", &args[2])?,
+                        1.0,
+                    ))
+                }))),
+            );
+            for (name, rgba) in [
+                ("white", (1.0, 1.0, 1.0, 1.0)),
+                ("black", (0.0, 0.0, 0.0, 1.0)),
+                ("red", (1.0, 0.0, 0.0, 1.0)),
+                ("green", (0.0, 1.0, 0.0, 1.0)),
+                ("cyan", (0.0, 1.0, 1.0, 1.0)),
+                ("yellow", (1.0, 1.0, 0.0, 1.0)),
+            ] {
+                methods.insert(
+                    name.to_string(),
+                    MethodImpl::Native(NativeFn(Rc::new(move |args: Vec<Value>| {
+                        if !args.is_empty() {
+                            return Err(format!("Color::{name}() takes no arguments"));
+                        }
+                        Ok(ember_color_value(rgba.0, rgba.1, rgba.2, rgba.3))
+                    }))),
+                );
+            }
+
+            self.type_registry.structs.insert(
+                "Color".to_string(),
+                StructInfo {
+                    fields: vec![
+                        ("r".to_string(), TypeAnn::Float),
+                        ("g".to_string(), TypeAnn::Float),
+                        ("b".to_string(), TypeAnn::Float),
+                        ("a".to_string(), TypeAnn::Float),
+                    ],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("Renderer") {
+            let mut methods = HashMap::new();
+            methods.insert(
+                "draw_rect".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() != 5 {
+                        return Err(
+                            "Renderer::draw_rect(x, y, w, h, color) requires 5 arguments"
+                                .to_string(),
+                        );
+                    }
+                    let _x = number_arg("x", &args[0])?;
+                    let _y = number_arg("y", &args[1])?;
+                    let _w = number_arg("w", &args[2])?;
+                    let _h = number_arg("h", &args[3])?;
+                    let _color = ember_color_arg("color", &args[4])?;
+                    Ok(Value::Unit)
+                }))),
+            );
+            methods.insert(
+                "draw_circle".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if args.len() != 4 {
+                        return Err(
+                            "Renderer::draw_circle(x, y, radius, color) requires 4 arguments"
+                                .to_string(),
+                        );
+                    }
+                    let _x = number_arg("x", &args[0])?;
+                    let _y = number_arg("y", &args[1])?;
+                    let _radius = number_arg("radius", &args[2])?;
+                    let _color = ember_color_arg("color", &args[3])?;
+                    Ok(Value::Unit)
+                }))),
+            );
+
+            self.type_registry.structs.insert(
+                "Renderer".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("Input") {
+            let mut methods = HashMap::new();
+            for name in ["key_held", "key_pressed"] {
+                methods.insert(
+                    name.to_string(),
+                    MethodImpl::Native(NativeFn(Rc::new(move |args: Vec<Value>| {
+                        if args.len() != 1 {
+                            return Err(format!("Input::{name}(key) requires 1 argument"));
+                        }
+                        let _key = ember_key_arg("key", &args[0])?;
+                        Ok(Value::Bool(false))
+                    }))),
+                );
+            }
+
+            self.type_registry.structs.insert(
+                "Input".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.enums.contains_key("Key") {
+            self.type_registry.enums.insert(
+                "Key".to_string(),
+                EnumInfo {
+                    variants: [
+                        "Left", "Right", "Up", "Down", "Space", "Enter", "Escape", "A", "D", "W",
+                        "S",
+                    ]
+                    .into_iter()
+                    .map(|name| EnumVariant::Unit(name.to_string()))
+                    .collect(),
+                },
+            );
+        }
+    }
+
+    fn setup_validator_types(&mut self) {
+        if !self.type_registry.structs.contains_key("ValidationError") {
+            self.type_registry.structs.insert(
+                "ValidationError".to_string(),
+                StructInfo {
+                    fields: vec![
+                        (
+                            "fields".to_string(),
+                            TypeAnn::List(Box::new(TypeAnn::String)),
+                        ),
+                        ("message".to_string(), TypeAnn::String),
+                        (
+                            "value".to_string(),
+                            TypeAnn::Option(Box::new(TypeAnn::Named("any".to_string()))),
+                        ),
+                    ],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods: HashMap::new(),
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("Rule") {
+            let mut methods = validator_rule_methods(true);
+            methods.insert(
+                "new".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if !args.is_empty() {
+                        return Err("Rule::new() takes no arguments".to_string());
+                    }
+                    Ok(Value::NativeObject(Rc::new(VmRule {
+                        checks: Vec::new(),
+                        default_message: None,
+                    })))
+                }))),
+            );
+            self.type_registry.structs.insert(
+                "Rule".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("RuleBuilder") {
+            let mut methods = validator_rule_methods(false);
+            methods.insert(
+                "new".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    if !args.is_empty() {
+                        return Err("RuleBuilder::new() takes no arguments".to_string());
+                    }
+                    Ok(Value::NativeObject(Rc::new(VmRuleBuilder {
+                        checks: Vec::new(),
+                    })))
+                }))),
+            );
+            self.type_registry.structs.insert(
+                "RuleBuilder".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
+
+        if !self.type_registry.structs.contains_key("Validator") {
+            let mut methods = HashMap::new();
+            methods.insert(
+                "new".to_string(),
+                MethodImpl::Native(NativeFn(Rc::new(|args: Vec<Value>| {
+                    let type_name = match args.first() {
+                        Some(Value::String(type_name)) => type_name.clone(),
+                        Some(Value::Struct { type_name, .. }) => type_name.clone(),
+                        Some(other) => {
+                            return Err(format!(
+                                "Validator::new() expects type name, got {}",
+                                other.type_name()
+                            ))
+                        }
+                        None => return Err("Validator::new() requires a type name".to_string()),
+                    };
+                    Ok(Value::NativeObject(Rc::new(VmValidator {
+                        type_name,
+                        rules: Vec::new(),
+                    })))
+                }))),
+            );
+            self.type_registry.structs.insert(
+                "Validator".to_string(),
+                StructInfo {
+                    fields: vec![],
+                    derives: vec![],
+                    decorators: vec![],
+                    is_service: false,
+                    is_repository: false,
+                    methods,
+                    operators: HashMap::new(),
+                },
+            );
+        }
     }
 
     /// HttpRequest / HttpResponse の型レジストリ登録
@@ -8431,7 +9916,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Option(Some(value)) => value_to_json(value),
         Value::Option(None) => serde_json::Value::Null,
         Value::Result(Ok(value)) => value_to_json(value),
-        Value::Result(Err(error)) => serde_json::Value::String(error.clone()),
+        Value::Result(Err(error)) => value_to_json(error),
         Value::List(items) => {
             serde_json::Value::Array(items.borrow().iter().map(value_to_json).collect::<Vec<_>>())
         }
@@ -8505,7 +9990,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             }
             serde_json::Value::Object(object)
         }
-        Value::Closure { .. } | Value::NativeFunction(_) => {
+        Value::Closure { .. } | Value::NativeFunction(_) | Value::NativeObject(_) => {
             serde_json::Value::String(value.to_string())
         }
     }
@@ -9087,7 +10572,7 @@ fn eval_scram(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
             };
             match base64::engine::general_purpose::STANDARD.decode(&s) {
                 Ok(bytes) => Ok(Value::Result(Ok(Box::new(bytes_to_list(bytes))))),
-                Err(e) => Ok(Value::Result(Err(format!("scram_base64_decode: {}", e)))),
+                Err(e) => Ok(result_err_string(format!("scram_base64_decode: {}", e))),
             }
         }
         _ => Err(RuntimeError::Custom(format!(
@@ -9105,6 +10590,687 @@ mod tests {
 
     fn run(src: &str) -> Result<Value, RuntimeError> {
         eval_source(src)
+    }
+
+    fn validation_error_fields(error: &Value) -> Vec<String> {
+        match error {
+            Value::Struct { fields, .. } => match fields.borrow().get("fields") {
+                Some(Value::List(items)) => items
+                    .borrow()
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::String(field) => Some(field.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                other => panic!("expected ValidationError.fields list, got {:?}", other),
+            },
+            other => panic!("expected ValidationError, got {:?}", other),
+        }
+    }
+
+    fn validation_error_message(error: &Value) -> String {
+        match error {
+            Value::Struct { fields, .. } => match fields.borrow().get("message") {
+                Some(Value::String(message)) => message.clone(),
+                other => panic!("expected ValidationError.message string, got {:?}", other),
+            },
+            other => panic!("expected ValidationError, got {:?}", other),
+        }
+    }
+
+    fn validation_errors_from_result(result: Value) -> Vec<Value> {
+        match result {
+            Value::Result(Err(error)) => match *error {
+                Value::List(items) => items.borrow().clone(),
+                single => vec![single],
+            },
+            other => panic!("expected validation error result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validator_module_imports_core_symbols() {
+        let result = run(r#"
+use forge/validator.{ Validator, Rule, ValidationError }
+let rule = Rule::new().message("required")
+let validator = Validator::new("RegistrationForm")
+"#);
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_ember_time_module_imports_static_methods() {
+        let result = run(r#"
+use ember.*
+Time.delta() > 0.0 && Time.fps() > 0.0
+"#);
+        assert_eq!(result, Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_ember_time_submodule_imports_time() {
+        let result = run(r#"
+use ember/time.{ Time }
+Time.elapsed()
+"#);
+        assert_eq!(result, Ok(Value::Float(0.0)));
+    }
+
+    #[test]
+    fn test_ember_color_static_constructors() {
+        let result = run(r#"
+use ember.{ Color }
+let c = Color::rgba(0.1, 0.2, 0.3, 0.4)
+c.r + c.g + c.b + c.a
+"#);
+        assert_eq!(result, Ok(Value::Float(1.0)));
+    }
+
+    #[test]
+    fn test_ember_color_wildcard_shorthands() {
+        let result = run(r#"
+use ember.*
+let c = Color::cyan()
+c.g == 1.0 && c.b == 1.0 && c.a == 1.0
+"#);
+        assert_eq!(result, Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_ember_renderer_draw_functions_are_registered() {
+        let result = run(r#"
+use ember.*
+Renderer::draw_rect(10.0, 20.0, 30.0, 40.0, Color::red())
+Renderer::draw_circle(50.0, 60.0, 7.5, Color::white())
+"#);
+        assert_eq!(result, Ok(Value::Unit));
+    }
+
+    #[test]
+    fn test_ember_input_module_registers_key_queries() {
+        let result = run(r#"
+use ember/input.*
+Input::key_held(Key::Left) || Input::key_pressed(Key::Space)
+"#);
+        assert_eq!(result, Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_ember_system_decl_registers_callable() {
+        let result = run(r#"
+system score(value: number) { value + 1 }
+score(41)
+"#);
+        assert_eq!(result, Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn test_validator_module_registers_validation_error_type() {
+        let interp = Interpreter::new();
+        assert!(interp.type_registry.structs.contains_key("ValidationError"));
+    }
+
+    #[test]
+    fn test_validator_rule_builder_chain_methods() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+let rule = Rule::new()
+    .required()
+    .min_length(2)
+    .max_length(8)
+    .min(1)
+    .max(99)
+    .matches("^[a-z]+$")
+    .one_of(["alice", "bob"])
+    .custom((v) => true)
+    .ok()
+    .message("invalid value")
+"#,
+        )
+        .expect("parse rule chain");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval rule chain");
+        let value = interp.eval_ident("rule").expect("rule");
+        let rule = match value {
+            Value::NativeObject(obj) => obj
+                .as_any()
+                .downcast_ref::<VmRule>()
+                .expect("VmRule")
+                .clone(),
+            other => panic!("expected native Rule, got {:?}", other),
+        };
+        assert_eq!(rule.checks.len(), 9);
+        assert_eq!(rule.default_message.as_deref(), Some("invalid value"));
+        assert!(matches!(rule.checks[0], VmRuleCheck::Required));
+        assert!(matches!(rule.checks[1], VmRuleCheck::MinLength(2)));
+        assert!(matches!(rule.checks[2], VmRuleCheck::MaxLength(8)));
+        assert!(matches!(rule.checks[3], VmRuleCheck::Min(1.0)));
+        assert!(matches!(rule.checks[4], VmRuleCheck::Max(99.0)));
+        assert!(matches!(rule.checks[5], VmRuleCheck::Matches(_)));
+        assert!(matches!(rule.checks[6], VmRuleCheck::OneOf(_)));
+        assert!(matches!(rule.checks[7], VmRuleCheck::Custom(_)));
+        assert!(matches!(rule.checks[8], VmRuleCheck::Ok));
+    }
+
+    #[test]
+    fn test_validator_rule_builder_native_object_chain() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+let builder = RuleBuilder::new().required().max(5)
+"#,
+        )
+        .expect("parse builder chain");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval builder chain");
+        let value = interp.eval_ident("builder").expect("builder");
+        let builder = match value {
+            Value::NativeObject(obj) => obj
+                .as_any()
+                .downcast_ref::<VmRuleBuilder>()
+                .expect("VmRuleBuilder")
+                .clone(),
+            other => panic!("expected native RuleBuilder, got {:?}", other),
+        };
+        assert_eq!(builder.checks.len(), 2);
+        assert!(matches!(builder.checks[0], VmRuleCheck::Required));
+        assert!(matches!(builder.checks[1], VmRuleCheck::Max(5.0)));
+    }
+
+    #[test]
+    fn test_validator_builder_api_registers_rule_variants() {
+        let module = forge_compiler::parser::parse_source(
+            r#"
+let email_rule = Rule::new().required().message("email invalid")
+let address_validator = Validator::new("Address")
+    .rule("zip", (r) => r.required(), "zip required")
+let validator = Validator::new("RegistrationForm")
+    .rule("email", email_rule)
+    .rule("name", (r) => r.min_length(2), "name too short")
+    .rule_cross((f) => true, ["password", "confirm_password"], "password mismatch")
+    .rule_when((f) => true, "card_number", (r) => r.required(), "card required")
+    .rule_each("tags", (r) => r.max_length(20), "tag too long")
+    .rule_nested("address", address_validator)
+"#,
+        )
+        .expect("parse validator builder");
+        let mut interp = Interpreter::new();
+        interp.eval(&module).expect("eval validator builder");
+        let value = interp.eval_ident("validator").expect("validator");
+        let validator = match value {
+            Value::NativeObject(obj) => obj
+                .as_any()
+                .downcast_ref::<VmValidator>()
+                .expect("VmValidator")
+                .clone(),
+            other => panic!("expected native Validator, got {:?}", other),
+        };
+        assert_eq!(validator.type_name, "RegistrationForm");
+        assert_eq!(validator.rules.len(), 6);
+        match &validator.rules[0] {
+            VmValidatorRule::Field {
+                field,
+                checks,
+                message,
+            } => {
+                assert_eq!(field, "email");
+                assert_eq!(checks.len(), 1);
+                assert_eq!(message, "email invalid");
+            }
+            other => panic!("expected field rule, got {:?}", other),
+        }
+        assert!(matches!(validator.rules[2], VmValidatorRule::Cross { .. }));
+        assert!(matches!(validator.rules[3], VmValidatorRule::When { .. }));
+        assert!(matches!(validator.rules[4], VmValidatorRule::Each { .. }));
+        assert!(matches!(validator.rules[5], VmValidatorRule::Nested { .. }));
+    }
+
+    #[test]
+    fn test_validator_validate_single_field() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+let form = { email: "" }
+validator.validate(form)
+"#)
+        .expect("validate");
+        let error = match result {
+            Value::Result(Err(error)) => *error,
+            other => panic!("expected validation error, got {:?}", other),
+        };
+        assert_eq!(validation_error_fields(&error), vec!["email"]);
+        assert_eq!(validation_error_message(&error), "email required");
+    }
+
+    #[test]
+    fn test_validator_validate_all_collects_errors() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+    .rule("name", (r) => r.min_length(2), "name too short")
+let form = { email: "", name: "A" }
+validator.validate_all(form)
+"#)
+        .expect("validate_all");
+        let errors = match result {
+            Value::Result(Err(error)) => match *error {
+                Value::List(items) => items,
+                other => panic!("expected error list, got {:?}", other),
+            },
+            other => panic!("expected validation errors, got {:?}", other),
+        };
+        let errors = errors.borrow();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["email"]);
+        assert_eq!(validation_error_fields(&errors[1]), vec!["name"]);
+    }
+
+    #[test]
+    fn test_validator_validate_cross_when_each_nested() {
+        let result = run(
+            r#"
+use forge/validator.{ Validator }
+let address_validator = Validator::new("Address")
+    .rule("zip", (r) => r.required(), "zip required")
+let validator = Validator::new("RegistrationForm")
+    .rule_cross((f) => f.password == f.confirm_password, ["password", "confirm_password"], "password mismatch")
+    .rule_when((f) => true, "card_number", (r) => r.required(), "card required")
+    .rule_each("tags", (r) => r.min_length(2), "tag too short")
+    .rule_nested("address", address_validator)
+let form = {
+    password: "secret",
+    confirm_password: "different",
+    card_number: "",
+    tags: ["x", "ok"],
+    address: { zip: "" }
+}
+validator.validate_all(form)
+"#,
+        )
+        .expect("validate_all variants");
+        let errors = match result {
+            Value::Result(Err(error)) => match *error {
+                Value::List(items) => items,
+                other => panic!("expected error list, got {:?}", other),
+            },
+            other => panic!("expected validation errors, got {:?}", other),
+        };
+        let fields = errors
+            .borrow()
+            .iter()
+            .map(validation_error_fields)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![
+                vec!["password".to_string(), "confirm_password".to_string()],
+                vec!["card_number".to_string()],
+                vec!["tags[0]".to_string()],
+                vec!["address.zip".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validator_data_validate_runs_before_rules() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+data UserRegistration {
+    username: string
+    email: string
+} validate {
+    username: length(3..20)
+}
+let validator = Validator::new("UserRegistration")
+    .rule("email", (r) => r.required(), "email required")
+let form = UserRegistration { username: "a", email: "" }
+validator.validate_all(form)
+"#)
+        .expect("validate_all data validate");
+        let errors = match result {
+            Value::Result(Err(error)) => match *error {
+                Value::List(items) => items,
+                other => panic!("expected error list, got {:?}", other),
+            },
+            other => panic!("expected validation errors, got {:?}", other),
+        };
+        let errors = errors.borrow();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_message(&errors[0]), "username: length");
+    }
+
+    #[test]
+    fn test_validator_validate_middleware_returns_422() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+fn register_handler(req) {
+    ok("called")
+}
+let wrapped = Validator::validate_middleware(registration_validator, register_handler)
+let req = { body: { email: "" } }
+match wrapped(req) {
+    ok(resp) => resp.status
+    err(_) => 0
+}
+"#);
+        assert_eq!(result, Ok(Value::Int(422)));
+    }
+
+    #[test]
+    fn test_validator_required() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("RequiredForm")
+    .rule("missing", (r) => r.required(), "missing required")
+    .rule("empty", (r) => r.required(), "empty required")
+    .rule("present", (r) => r.required(), "present required")
+let form = { empty: "", present: "ok" }
+validator.validate_all(form)
+"#)
+        .expect("required validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["missing"]);
+        assert_eq!(validation_error_fields(&errors[1]), vec!["empty"]);
+    }
+
+    #[test]
+    fn test_validator_min_length() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("LengthForm")
+    .rule("too_short", (r) => r.min_length(3), "too short")
+    .rule("exact", (r) => r.min_length(3), "exact too short")
+    .rule("longer", (r) => r.min_length(3), "longer too short")
+let form = { too_short: "ab", exact: "abc", longer: "abcd" }
+validator.validate_all(form)
+"#)
+        .expect("min_length validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["too_short"]);
+    }
+
+    #[test]
+    fn test_validator_max_length() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("LengthForm")
+    .rule("shorter", (r) => r.max_length(3), "shorter too long")
+    .rule("exact", (r) => r.max_length(3), "exact too long")
+    .rule("too_long", (r) => r.max_length(3), "too long")
+let form = { shorter: "ab", exact: "abc", too_long: "abcd" }
+validator.validate_all(form)
+"#)
+        .expect("max_length validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["too_long"]);
+    }
+
+    #[test]
+    fn test_validator_min_max_number() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("NumberForm")
+    .rule("low", (r) => r.min(18).max(120), "low invalid")
+    .rule("min_edge", (r) => r.min(18).max(120), "min invalid")
+    .rule("max_edge", (r) => r.min(18).max(120), "max invalid")
+    .rule("high", (r) => r.min(18).max(120), "high invalid")
+let form = { low: 17, min_edge: 18, max_edge: 120, high: 121 }
+validator.validate_all(form)
+"#)
+        .expect("min max validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["low"]);
+        assert_eq!(validation_error_fields(&errors[1]), vec!["high"]);
+    }
+
+    #[test]
+    fn test_validator_matches() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("EmailForm")
+    .rule("valid", (r) => r.matches("^[^@]+@[^@]+$"), "valid email")
+    .rule("invalid", (r) => r.matches("^[^@]+@[^@]+$"), "invalid email")
+let form = { valid: "alice@example.com", invalid: "not-email" }
+validator.validate_all(form)
+"#)
+        .expect("matches validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["invalid"]);
+    }
+
+    #[test]
+    fn test_validator_one_of() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("EnumForm")
+    .rule("inside", (r) => r.one_of(["small", "medium", "large"]), "inside invalid")
+    .rule("outside", (r) => r.one_of(["small", "medium", "large"]), "outside invalid")
+let form = { inside: "medium", outside: "xlarge" }
+validator.validate_all(form)
+"#)
+        .expect("one_of validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["outside"]);
+    }
+
+    #[test]
+    fn test_validator_custom() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("CustomForm")
+    .rule("ok_value", (r) => r.custom((v) => ok(unit)), "ok invalid")
+    .rule("err_value", (r) => r.custom((v) => err("custom failed")), "err invalid")
+let form = { ok_value: "ok", err_value: "bad" }
+validator.validate_all(form)
+"#)
+        .expect("custom validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["err_value"]);
+    }
+
+    #[test]
+    fn test_validator_validate_cross_field() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("RegistrationForm")
+    .rule_cross((f) => f.password == f.confirm_password, ["password", "confirm_password"], "password mismatch")
+let form = { password: "secret", confirm_password: "different" }
+validator.validate(form)
+"#)
+        .expect("cross field validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            validation_error_fields(&errors[0]),
+            vec!["password", "confirm_password"]
+        );
+    }
+
+    #[test]
+    fn test_validator_validate_when() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("PaymentForm")
+    .rule_when((f) => f.payment_method == "card", "card_number", (r) => r.required(), "card required")
+    .rule_when((f) => f.payment_method == "bank", "bank_account", (r) => r.required(), "bank required")
+let form = { payment_method: "card", card_number: "", bank_account: "" }
+validator.validate_all(form)
+"#)
+        .expect("when validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["card_number"]);
+    }
+
+    #[test]
+    fn test_validator_validate_each() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("TagsForm")
+    .rule_each("tags", (r) => r.max_length(3), "tag too long")
+let form = { tags: ["ok", "toolong", "yes"] }
+validator.validate_all(form)
+"#)
+        .expect("each validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["tags[1]"]);
+    }
+
+    #[test]
+    fn test_validator_validate_nested() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let address_validator = Validator::new("Address")
+    .rule("zip", (r) => r.required(), "zip required")
+let validator = Validator::new("RegistrationForm")
+    .rule_nested("address", address_validator)
+let form = { address: { zip: "" } }
+validator.validate_all(form)
+"#)
+        .expect("nested validation");
+        let errors = validation_errors_from_result(result);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(validation_error_fields(&errors[0]), vec!["address.zip"]);
+    }
+
+    #[test]
+    fn test_validator_named_rule_reuse() {
+        let result = run(r#"
+use forge/validator.{ Validator, Rule }
+let email_rule = Rule::new().required().matches("^[^@]+@[^@]+$").message("email invalid")
+let signup_validator = Validator::new("Signup").rule("email", email_rule)
+let invite_validator = Validator::new("Invite").rule("email", email_rule)
+let signup_errors = match signup_validator.validate_all({ email: "" }) {
+    ok(_) => 0
+    err(errors) => len(errors)
+}
+let invite_errors = match invite_validator.validate_all({ email: "not-email" }) {
+    ok(_) => 0
+    err(errors) => len(errors)
+}
+signup_errors + invite_errors
+"#);
+        assert_eq!(result, Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn test_validator_e2e_registration_form_complete() {
+        let result = run(r#"
+use forge/validator.{ Validator, Rule }
+let email_rule = Rule::new()
+    .required()
+    .matches("^[^@]+@[^@]+$")
+    .message("email invalid")
+let address_validator = Validator::new("Address")
+    .rule("zip", (r) => r.matches("^[0-9]{3}-[0-9]{4}$"), "zip invalid")
+    .rule("city", (r) => r.required(), "city required")
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("username", (r) => r.required().min_length(3).max_length(20), "username invalid")
+    .rule("email", email_rule)
+    .rule("password", (r) => r.required().min_length(8), "password invalid")
+    .rule_cross((f) => f.password == f.confirm_password, ["password", "confirm_password"], "password mismatch")
+    .rule("age", (r) => r.min(18).max(120), "age invalid")
+    .rule_each("tags", (r) => r.max_length(20), "tag invalid")
+    .rule_nested("address", address_validator)
+let form = {
+    username: "al",
+    email: "not-email",
+    password: "short",
+    confirm_password: "different",
+    age: 17,
+    tags: ["valid", "this-tag-is-far-too-long"],
+    address: { zip: "bad", city: "" }
+}
+match registration_validator.validate_all(form) {
+    ok(_) => 0
+    err(errors) => len(errors)
+}
+"#);
+        assert_eq!(result, Ok(Value::Int(8)));
+    }
+
+    #[test]
+    fn test_validator_e2e_validate_all_manual_collects_errors() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+    .rule("password", (r) => r.min_length(8), "password too short")
+let form = { email: "", password: "short" }
+match validator.validate_all(form) {
+    ok(_) => "ok"
+    err(errors) => string(len(errors))
+}
+"#);
+        assert_eq!(result, Ok(Value::String("2".to_string())));
+    }
+
+    #[test]
+    fn test_validator_e2e_validate_decorator_http_422() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+@validate(RegistrationForm, using: registration_validator)
+fn register_handler(req) {
+    ok({ status: 201, body: "created" })
+}
+match register_handler({ body: { email: "" } }) {
+    ok(resp) => resp.status
+    err(_) => 0
+}
+"#);
+        assert_eq!(result, Ok(Value::Int(422)));
+    }
+
+    #[test]
+    fn test_validate_decorator_wraps_handler() {
+        let result = run(r#"
+use forge/validator.{ Validator }
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required(), "email required")
+
+@validate(RegistrationForm, using: registration_validator)
+fn register_handler(req) {
+    ok("called")
+}
+
+let bad_req = { body: { email: "" } }
+let good_req = { body: { email: "alice@example.com" } }
+let bad_status = match register_handler(bad_req) {
+    ok(resp) => resp.status
+    err(_) => 0
+}
+let good_result = match register_handler(good_req) {
+    ok(value) => value
+    err(_) => "err"
+}
+{ bad_status: bad_status, good_result: good_result }
+"#)
+        .expect("decorated validate handler");
+        match result {
+            Value::Struct { fields, .. } => {
+                let fields = fields.borrow();
+                assert_eq!(fields.get("bad_status"), Some(&Value::Int(422)));
+                assert_eq!(
+                    fields.get("good_result"),
+                    Some(&Value::String("called".to_string()))
+                );
+            }
+            other => panic!("expected anon struct, got {:?}", other),
+        }
     }
 
     #[test]
@@ -9569,7 +11735,7 @@ RESULT
     fn test_eval_question_err() {
         assert_eq!(
             run(r#"fn f() { err("oops")? }; f()"#),
-            Ok(Value::Result(Err("oops".to_string())))
+            Ok(result_err_string("oops"))
         );
     }
 

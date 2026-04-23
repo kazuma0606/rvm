@@ -318,6 +318,7 @@ impl Lexer {
                         "state" => TokenKind::State,
                         "const" => TokenKind::Const,
                         "fn" => TokenKind::Fn,
+                        "system" => TokenKind::System,
                         "return" => TokenKind::Return,
                         "if" => TokenKind::If,
                         "else" => TokenKind::Else,
@@ -478,10 +479,9 @@ impl Lexer {
                             span: self.make_span(start, start_line, start_col),
                         });
                     } else {
-                        return Err(LexError::UnexpectedChar {
-                            ch: '&',
-                            line: start_line,
-                            col: start_col,
+                        tokens.push(Token {
+                            kind: TokenKind::Amp,
+                            span: self.make_span(start, start_line, start_col),
                         });
                     }
                 }
@@ -628,6 +628,13 @@ impl Lexer {
                         span: self.make_span(start, start_line, start_col),
                     });
                 }
+                Some('#') => {
+                    self.advance();
+                    tokens.push(Token {
+                        kind: TokenKind::Hash,
+                        span: self.make_span(start, start_line, start_col),
+                    });
+                }
                 Some(ch) => {
                     let c = ch;
                     self.advance();
@@ -703,13 +710,14 @@ mod tests {
 
     #[test]
     fn test_lex_keywords() {
-        let src = "let state const fn return if else for in while match";
+        let src = "let state const fn system return if else for in while match";
         let got = kinds(src);
         let expected = vec![
             TokenKind::Let,
             TokenKind::State,
             TokenKind::Const,
             TokenKind::Fn,
+            TokenKind::System,
             TokenKind::Return,
             TokenKind::If,
             TokenKind::Else,
@@ -876,17 +884,17 @@ mod tests {
     #[test]
     fn test_lex_unknown_char() {
         // @ は現在 At トークンとして認識されるので、別の未知文字でテスト
-        let result = lex("#");
+        let result = lex("$");
         assert!(matches!(
             result,
-            Err(LexError::UnexpectedChar { ch: '#', .. })
+            Err(LexError::UnexpectedChar { ch: '$', .. })
         ));
     }
 
     #[test]
     fn test_lex_at_token() {
-        let kinds = kinds("@");
-        assert_eq!(kinds, vec![TokenKind::At, TokenKind::Eof]);
+        let kinds = kinds("@ #");
+        assert_eq!(kinds, vec![TokenKind::At, TokenKind::Hash, TokenKind::Eof]);
     }
 
     #[test]

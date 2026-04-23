@@ -1,0 +1,15 @@
+use forge/validator.{ Validator }
+
+data RegistrationForm {
+    email: string
+    password: string
+}
+
+let registration_validator = Validator::new("RegistrationForm")
+    .rule("email", (r) => r.required().matches("^[^@]+@[^@]+$"), "email invalid")
+    .rule("password", (r) => r.required().min_length(8), "password invalid")
+
+@validate(RegistrationForm, using: registration_validator)
+fn register_handler(req) {
+    ok({ status: 201, body: "created" })
+}

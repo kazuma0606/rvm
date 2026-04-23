@@ -182,6 +182,23 @@ impl TypeChecker {
                 self.define(name, fn_ty);
             }
 
+            Stmt::System {
+                name, params, body, ..
+            } => {
+                self.push_scope();
+                for param in params {
+                    let ty = param
+                        .type_ann
+                        .as_ref()
+                        .map(Type::from_ann)
+                        .unwrap_or(Type::Unknown);
+                    self.define(&param.name, ty);
+                }
+                let body_ty = self.infer_expr(body);
+                self.pop_scope();
+                self.define(name, body_ty);
+            }
+
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
                     self.infer_expr(e);

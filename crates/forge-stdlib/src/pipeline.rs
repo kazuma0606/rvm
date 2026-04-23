@@ -231,7 +231,7 @@ fn value_to_json_value(value: &Value) -> JsonValue {
         Value::Option(Some(inner)) => value_to_json_value(inner),
         Value::Option(None) => JsonValue::Null,
         Value::Result(Ok(inner)) => value_to_json_value(inner),
-        Value::Result(Err(err)) => JsonValue::String(err.clone()),
+        Value::Result(Err(err)) => value_to_json_value(err),
         Value::List(list) => {
             JsonValue::Array(list.borrow().iter().map(value_to_json_value).collect())
         }

@@ -230,9 +230,8 @@ impl DebugHook for DapDebugHook {
                 }
                 StepMode::Continue => {
                     let bps = self.ctrl.breakpoints.lock().unwrap();
-                    bps.iter().any(|bp| {
-                        bp.line == span.line as i64 && paths_match(&span.file, &bp.file)
-                    })
+                    bps.iter()
+                        .any(|bp| bp.line == span.line as i64 && paths_match(&span.file, &bp.file))
                 }
                 StepMode::Next { depth } => call_depth <= depth,
                 StepMode::StepIn => true,
@@ -950,9 +949,7 @@ impl DapServer {
             // スパンに正しいファイルパスが埋め込まれるよう parse_source_with_file を使う
             let run_result = forge_compiler::parser::parse_source_with_file(&source, file_str)
                 .map_err(|e| format!("parse error: {}", e))
-                .and_then(|module| {
-                    interp.eval(&module).map_err(|e| format!("{}", e))
-                });
+                .and_then(|module| interp.eval(&module).map_err(|e| format!("{}", e)));
 
             if let Err(e) = run_result {
                 let _ = sender.send(HookEvent::Output {
@@ -1020,6 +1017,18 @@ impl DapServer {
     #[cfg(test)]
     pub fn inject_stopped_locals(&mut self, locals: Vec<(String, JsonValue)>) {
         self.stopped_locals = locals;
+    }
+
+    #[cfg(test)]
+    pub fn handle_request<R: std::io::BufRead, W: Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> std::io::Result<bool> {
+        match read_message(reader)? {
+            Some(msg) => self.process_message(writer, msg),
+            None => Ok(false),
+        }
     }
 
     #[cfg(test)]

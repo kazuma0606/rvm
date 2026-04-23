@@ -32,7 +32,7 @@ fn forge_value_to_json_value(value: &Value) -> Result<serde_json::Value, String>
         Value::Option(Some(inner)) => forge_value_to_json_value(inner),
         Value::Option(None) => Ok(serde_json::Value::Null),
         Value::Result(Ok(inner)) => forge_value_to_json_value(inner),
-        Value::Result(Err(err)) => Ok(serde_json::Value::String(format!("err({})", err))),
+        Value::Result(Err(err)) => forge_value_to_json_value(err),
         Value::List(items) => {
             let converted = items
                 .borrow()

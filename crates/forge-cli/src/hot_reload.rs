@@ -834,7 +834,9 @@ fn increment() { state.count += 2 }
              \r\n",
             ws_port, key
         );
-        stream.write_all(request.as_bytes()).expect("send WS request");
+        stream
+            .write_all(request.as_bytes())
+            .expect("send WS request");
 
         // HTTP 101 レスポンスを読み捨て
         let mut buf = [0u8; 512];
@@ -846,7 +848,9 @@ fn increment() { state.count += 2 }
 
         // WebSocket フレームを受信（最大 5 秒待機）
         let mut frame_buf = [0u8; 64];
-        let n = stream.read(&mut frame_buf).expect("WebSocket フレームの受信");
+        let n = stream
+            .read(&mut frame_buf)
+            .expect("WebSocket フレームの受信");
         assert!(n >= 2, "WebSocket フレームが短すぎます");
 
         // ペイロードを取り出す（マスクなし / サーバー → クライアント）

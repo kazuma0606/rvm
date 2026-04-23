@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::{any::Any, fmt::Debug};
 
 use forge_compiler::ast::{Expr, TypeAnn};
 
@@ -25,6 +26,11 @@ impl Clone for NativeFn {
     fn clone(&self) -> Self {
         NativeFn(Rc::clone(&self.0))
     }
+}
+
+pub trait NativeObject: Debug {
+    fn type_name(&self) -> &'static str;
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// enum バリアントが保持するデータ
@@ -54,8 +60,8 @@ pub enum Value {
     Unit,
     /// Option<Value>
     Option(Option<Box<Value>>),
-    /// Result<Value, String>
-    Result(Result<Box<Value>, String>),
+    /// Result<Value, Value>
+    Result(Result<Box<Value>, Box<Value>>),
     /// 共有可変リスト
     List(Rc<RefCell<Vec<Value>>>),
     /// 順序付きマップ
@@ -72,6 +78,8 @@ pub enum Value {
     },
     /// ネイティブ（Rust）関数
     NativeFunction(NativeFn),
+    /// ネイティブ（Rust）オブジェクト
+    NativeObject(Rc<dyn NativeObject>),
     /// struct インスタンス
     Struct {
         type_name: String,
@@ -139,6 +147,7 @@ impl PartialEq for Value {
                     fields: fb,
                 },
             ) => ta == tb && sa == sb && *fa.borrow() == *fb.borrow(),
+            (Value::NativeObject(a), Value::NativeObject(b)) => Rc::ptr_eq(a, b),
             // クロージャ・ネイティブ関数は参照等価性なし
             _ => false,
         }
@@ -230,6 +239,10 @@ impl Hash for Value {
             // クロージャ・ネイティブ関数はハッシュ不可 → ポインタアドレスで代替
             Value::Closure { .. } => 0_u8.hash(state),
             Value::NativeFunction(_) => 1_u8.hash(state),
+            Value::NativeObject(obj) => {
+                2_u8.hash(state);
+                std::ptr::hash(Rc::as_ptr(obj), state);
+            }
         }
     }
 }
@@ -279,6 +292,7 @@ impl std::fmt::Display for Value {
             }
             Value::Closure { .. } => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<function>"),
+            Value::NativeObject(obj) => write!(f, "<native {}>", obj.type_name()),
             Value::Enum {
                 type_name,
                 variant,
@@ -348,6 +362,7 @@ impl Value {
             Value::Set(_) => "set",
             Value::Closure { .. } => "closure",
             Value::NativeFunction(_) => "function",
+            Value::NativeObject(obj) => obj.type_name(),
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
             Value::Typestate { .. } => "typestate",
@@ -357,6 +372,7 @@ impl Value {
     /// struct / enum の場合、型名を動的に返す
     pub fn dynamic_type_name(&self) -> String {
         match self {
+            Value::NativeObject(obj) => obj.type_name().to_string(),
             Value::Struct { type_name, .. } => type_name.clone(),
             Value::Enum { type_name, .. } => type_name.clone(),
             Value::Typestate { type_name, .. } => type_name.clone(),

@@ -144,10 +144,14 @@ fn main() {
                 .position(|s| s == "-o")
                 .and_then(|i| args.get(i + 1));
             let web = args.iter().any(|arg| arg == "--web");
+            let game = args.iter().any(|arg| arg == "--game");
+            let wasm = args.iter().any(|arg| arg == "--wasm");
             let dump_ast = args.iter().any(|arg| arg == "--dump-ast");
             let dump_forge = args.iter().any(|arg| arg == "--dump-forge");
             let path = build_path_arg(&args);
-            if web {
+            if game && wasm {
+                build_game_wasm_entry(path, output.map(|s| s.as_str()));
+            } else if web {
                 build_web_entry(
                     path,
                     output.map(|s| s.as_str()),
@@ -286,6 +290,9 @@ fn build_path_arg(args: &[String]) -> Option<&str> {
             continue;
         }
         if arg == "--web" {
+            continue;
+        }
+        if arg == "--game" || arg == "--wasm" {
             continue;
         }
         if !arg.starts_with('-') {
@@ -1980,6 +1987,23 @@ fn build_entry(path: Option<&str>, output: Option<&str>) {
     }
 }
 
+fn build_game_wasm_entry(path: Option<&str>, output: Option<&str>) {
+    match resolve_build_request(path) {
+        Ok(BuildRequest::Project {
+            project_dir,
+            forge_toml,
+        }) => build_game_wasm_project(&project_dir, &forge_toml, output),
+        Ok(BuildRequest::File(_)) => {
+            eprintln!("エラー: forge build --game --wasm は forge.toml を持つプロジェクトを指定してください");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct BloomDumpOptions {
     dump_ast: bool,
@@ -2445,6 +2469,192 @@ fn build_generated_project(
     }
 }
 
+fn build_game_wasm_project(project_dir: &Path, forge_toml: &ForgeToml, output: Option<&str>) {
+    let project_dir_abs = if project_dir.is_absolute() {
+        project_dir.to_path_buf()
+    } else {
+        match env::current_dir() {
+            Ok(cwd) => cwd.join(project_dir),
+            Err(e) => {
+                eprintln!("エラー: カレントディレクトリを取得できませんでした: {}", e);
+                std::process::exit(1);
+            }
+        }
+    };
+    let entry_path = project_dir_abs.join(&forge_toml.package.entry);
+    let edition = forge_toml
+        .build
+        .as_ref()
+        .map(|build| build.edition.as_str())
+        .unwrap_or("2024");
+    let out_dir = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir_abs.join("target").join("game-wasm"));
+    let out_dir_abs = if out_dir.is_absolute() {
+        out_dir
+    } else {
+        project_dir_abs.join(out_dir)
+    };
+
+    let mut proj_dir = std::env::temp_dir();
+    proj_dir.push(format!(
+        "forge_game_wasm_{}_{}",
+        forge_toml.package.name,
+        unique_suffix()
+    ));
+
+    if let Err(e) = fs::create_dir_all(proj_dir.join("src")) {
+        eprintln!("エラー: WASM 一時プロジェクトを作成できませんでした: {}", e);
+        std::process::exit(1);
+    }
+
+    let cargo_toml = build_generated_cargo_toml(
+        &forge_toml.package.name,
+        &forge_toml.package.version,
+        edition,
+        Some(&forge_toml.dependencies),
+    );
+    if let Err(e) = fs::write(proj_dir.join("Cargo.toml"), cargo_toml) {
+        eprintln!("エラー: WASM Cargo.toml を書き込めませんでした: {}", e);
+        let _ = fs::remove_dir_all(&proj_dir);
+        std::process::exit(1);
+    }
+
+    let local_dep_paths = forge_toml.local_dep_paths(&project_dir_abs);
+    if let Err(e) = write_transpiled_project(&entry_path, &proj_dir.join("src"), &local_dep_paths) {
+        eprintln!("エラー: WASM 生成プロジェクトの作成に失敗しました: {}", e);
+        let _ = fs::remove_dir_all(&proj_dir);
+        std::process::exit(1);
+    }
+    if let Err(e) = prepare_game_wasm_project(&proj_dir) {
+        eprintln!("エラー: WASM 生成プロジェクトの設定に失敗しました: {}", e);
+        let _ = fs::remove_dir_all(&proj_dir);
+        std::process::exit(1);
+    }
+
+    format_generated_project(&proj_dir);
+
+    if let Err(e) = fs::create_dir_all(&out_dir_abs) {
+        eprintln!("エラー: WASM 出力先を作成できませんでした: {}", e);
+        let _ = fs::remove_dir_all(&proj_dir);
+        std::process::exit(1);
+    }
+
+    let status = Command::new("wasm-pack")
+        .args([
+            "build",
+            "--target",
+            "web",
+            "--release",
+            "--out-dir",
+            out_dir_abs.to_str().unwrap_or("pkg"),
+            "--out-name",
+            &forge_toml.package.name,
+        ])
+        .current_dir(&proj_dir)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            if let Err(e) = write_game_wasm_index_html(&out_dir_abs, &forge_toml.package.name) {
+                eprintln!("エラー: index.html を生成できませんでした: {}", e);
+                let _ = fs::remove_dir_all(&proj_dir);
+                std::process::exit(1);
+            }
+            let _ = fs::remove_dir_all(&proj_dir);
+            println!("WASM ビルド成功: {}", out_dir_abs.display());
+        }
+        Ok(s) => {
+            let _ = fs::remove_dir_all(&proj_dir);
+            eprintln!(
+                "wasm-pack build がエラーを返しました (exit code: {:?})",
+                s.code()
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&proj_dir);
+            eprintln!("エラー: wasm-pack を呼び出せませんでした: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn prepare_game_wasm_project(proj_dir: &Path) -> Result<(), String> {
+    let cargo_toml_path = proj_dir.join("Cargo.toml");
+    let mut cargo_toml = fs::read_to_string(&cargo_toml_path).map_err(|e| e.to_string())?;
+    cargo_toml = cargo_toml.replace("edition = \"2024\"", "edition = \"2024\"\nautobins = false");
+    let native_dep = ember_runtime_dependency_line();
+    let wasm_dep = ember_runtime_wasm_dependency_line();
+    cargo_toml = cargo_toml.replace(&native_dep, &wasm_dep);
+    let forge_std_dep = forge_std_dependency_line();
+    cargo_toml = cargo_toml.replace(&format!("{}\n", forge_std_dep), "");
+    if !cargo_toml.contains("\nwasm-bindgen = ") {
+        cargo_toml.push_str("wasm-bindgen = \"0.2\"\n");
+    }
+    cargo_toml.push_str(
+        r#"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/main.rs"
+"#,
+    );
+    fs::write(&cargo_toml_path, cargo_toml).map_err(|e| e.to_string())?;
+
+    let main_rs = proj_dir.join("src").join("main.rs");
+    let mut rust_code = fs::read_to_string(&main_rs).map_err(|e| e.to_string())?;
+    rust_code.push_str(
+        r#"
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn ember_wasm_start() -> Result<(), wasm_bindgen::JsValue> {
+    main().map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
+"#,
+    );
+    fs::write(main_rs, rust_code).map_err(|e| e.to_string())
+}
+
+fn write_game_wasm_index_html(out_dir: &Path, package_name: &str) -> Result<(), String> {
+    let js_name = package_name.replace('-', "_");
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{package_name}</title>
+  <style>
+    html, body {{ margin: 0; width: 100%; height: 100%; background: #05050d; overflow: hidden; }}
+    canvas#ember {{ display: block; width: 100vw; height: 100vh; outline: none; }}
+  </style>
+</head>
+<body>
+  <canvas id="ember" tabindex="0"></canvas>
+  <script type="module">
+    if (globalThis.GPUAdapter?.prototype?.requestDevice) {{
+      const requestDevice = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = function(descriptor) {{
+        if (descriptor?.requiredLimits?.maxInterStageShaderComponents !== undefined) {{
+          descriptor = {{ ...descriptor, requiredLimits: {{ ...descriptor.requiredLimits }} }};
+          delete descriptor.requiredLimits.maxInterStageShaderComponents;
+        }}
+        return requestDevice.call(this, descriptor);
+      }};
+    }}
+    import init from "./{js_name}.js";
+    await init();
+    document.getElementById("ember")?.focus();
+  </script>
+</body>
+</html>
+"#
+    );
+    fs::write(out_dir.join("index.html"), html).map_err(|e| e.to_string())
+}
+
 fn normalized_binary_output_path(mut output_path: PathBuf, src_bin: &Path) -> PathBuf {
     let src_is_windows_exe = src_bin
         .extension()
@@ -2605,6 +2815,28 @@ fn forge_std_dependency_line() -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     format!(
         "forge_std = {{ package = \"forge-stdlib\", path = \"{}\" }}",
+        path
+    )
+}
+
+fn ember_runtime_dependency_line() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("ember-runtime");
+    let path = path.to_string_lossy().replace('\\', "/");
+    format!(
+        "ember-runtime = {{ package = \"ember-runtime\", path = \"{}\" }}",
+        path
+    )
+}
+
+fn ember_runtime_wasm_dependency_line() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("ember-runtime");
+    let path = path.to_string_lossy().replace('\\', "/");
+    format!(
+        "ember-runtime = {{ package = \"ember-runtime\", path = \"{}\", default-features = false, features = [\"wasm\"] }}",
         path
     )
 }
@@ -3170,6 +3402,10 @@ fn collect_external_deps(
             ..
         } = stmt
         {
+            if crate_name == "ember" || crate_name.starts_with("ember/") {
+                deps.add("ember-runtime");
+                continue;
+            }
             let current_dir = source_root.join(
                 file.rel_path
                     .parent()
@@ -3207,6 +3443,9 @@ fn collect_codegen_deps(rust_code: &str, deps: &mut DepsManager) {
     if rust_code.contains("scopeguard::defer") {
         deps.add("scopeguard");
     }
+    if rust_code.contains("ember_runtime::") {
+        deps.add("ember-runtime");
+    }
 }
 
 fn generated_bytes_to_str_helper() -> &'static str {
@@ -3242,11 +3481,17 @@ fn update_generated_cargo_toml(cargo_toml_path: &Path, deps: &DepsManager) -> Re
     if crates.contains("reqwest") && !content.contains("\nreqwest = ") {
         extra_lines.push("reqwest = { version = \"0.12\", features = [\"json\"] }".to_string());
     }
+    if crates.contains("ember-runtime") && !content.contains("\nember-runtime = ") {
+        extra_lines.push(ember_runtime_dependency_line());
+    }
 
     let mut others = crates
         .iter()
         .filter(|name| {
-            name.as_str() != "once_cell" && name.as_str() != "serde" && name.as_str() != "tokio"
+            !matches!(
+                name.as_str(),
+                "once_cell" | "serde" | "tokio" | "scopeguard" | "reqwest" | "ember-runtime"
+            )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -3853,6 +4098,55 @@ mod tests {
         let output = PathBuf::from("target/demo");
         let src = PathBuf::from("tmp/target/release/demo");
         assert_eq!(normalized_binary_output_path(output.clone(), &src), output);
+    }
+
+    #[test]
+    #[ignore]
+    fn breakout_example_generated_tests_pass() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root")
+            .to_path_buf();
+        let project_dir = repo_root.join("examples").join("breakout");
+        let entry_path = project_dir.join("src").join("main.forge");
+        let forge_toml = ForgeToml::load(&project_dir).expect("load breakout forge.toml");
+        let output_dir = repo_root
+            .join("target")
+            .join(format!("forge_breakout_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&output_dir);
+        fs::create_dir_all(output_dir.join("src")).expect("create generated project");
+
+        let cargo_toml = build_generated_cargo_toml(
+            "breakout_generated_test",
+            "0.1.0",
+            "2024",
+            Some(&forge_toml.dependencies),
+        );
+        fs::write(output_dir.join("Cargo.toml"), cargo_toml).expect("write Cargo.toml");
+        let local_dep_paths = forge_toml.local_dep_paths(&project_dir);
+        write_transpiled_project(&entry_path, &output_dir.join("src"), &local_dep_paths)
+            .expect("write transpiled breakout");
+        let cargo_toml_path = output_dir.join("Cargo.toml");
+        let mut cargo_toml = fs::read_to_string(&cargo_toml_path).expect("read Cargo.toml");
+        cargo_toml.push_str("\n[workspace]\n");
+        fs::write(&cargo_toml_path, cargo_toml).expect("write Cargo.toml workspace");
+        format_generated_project(&output_dir);
+
+        let status = std::process::Command::new("cargo")
+            .args([
+                "test",
+                "--manifest-path",
+                output_dir.join("Cargo.toml").to_str().expect("utf-8 path"),
+                "--offline",
+                "--",
+                "--nocapture",
+            ])
+            .status()
+            .expect("run cargo test");
+
+        let _ = fs::remove_dir_all(&output_dir);
+        assert!(status.success());
     }
 
     #[test]

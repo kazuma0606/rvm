@@ -1,0 +1,335 @@
+use ember.*
+
+use raw {
+const WIDTH: f32 = 800.0;
+const HEIGHT: f32 = 600.0;
+const PADDLE_W: f32 = 110.0;
+const PADDLE_H: f32 = 18.0;
+const BALL_R: f32 = 8.0;
+
+pub struct Paddle;
+pub struct Ball;
+pub struct Block;
+pub struct Wall;
+
+pub struct GameState {
+    pub score: i64,
+    pub lives: i64,
+    pub cleared: bool,
+    pub game_over: bool,
+}
+
+fn setup(world: &mut World) {
+    world.insert_resource(GameState {
+        score: 0,
+        lives: 3,
+        cleared: false,
+        game_over: false,
+    });
+
+    world.spawn()
+        .with(Position::new(WIDTH * 0.5, HEIGHT - 48.0))
+        .with(Rect::new(PADDLE_W, PADDLE_H, Color::cyan()))
+        .with(Collider::rect(PADDLE_W, PADDLE_H))
+        .with(StaticBody {})
+        .with(Paddle)
+        .build();
+
+    world.spawn()
+        .with(Position::new(WIDTH * 0.5, HEIGHT - 86.0))
+        .with(Circle::new(BALL_R, Color::white()))
+        .with(Collider::circle(BALL_R))
+        .with(DynamicBody {
+            velocity: Vec2::new(190.0, -260.0),
+            restitution: 1.0,
+            friction: 0.0,
+        })
+        .with(Ball)
+        .build();
+
+    spawn_wall(world, WIDTH * 0.5, -8.0, WIDTH, 16.0);
+    spawn_wall(world, -8.0, HEIGHT * 0.5, 16.0, HEIGHT);
+    spawn_wall(world, WIDTH + 8.0, HEIGHT * 0.5, 16.0, HEIGHT);
+
+    let cols = 8;
+    let rows = 6;
+    let block_w = 76.0;
+    let block_h = 22.0;
+    let gap = 10.0;
+    let start_x = 78.0;
+    let start_y = 74.0;
+    for row in 0..rows {
+        for col in 0..cols {
+            let x = start_x + (col as f32) * (block_w + gap);
+            let y = start_y + (row as f32) * (block_h + gap);
+            let color = match row {
+                0 => Color::red(),
+                1 => Color::yellow(),
+                _ => Color::green(),
+            };
+            world.spawn()
+                .with(Position::new(x, y))
+                .with(Rect::new(block_w, block_h, color))
+                .with(Collider::rect(block_w, block_h))
+                .with(StaticBody {})
+                .with(Block)
+                .build();
+        }
+    }
+}
+
+fn spawn_wall(world: &mut World, x: f32, y: f32, w: f32, h: f32) {
+    world.spawn()
+        .with(Position::new(x, y))
+        .with(Collider::rect(w, h))
+        .with(StaticBody {})
+        .with(Wall)
+        .build();
+}
+
+fn paddle_move_impl(world: &mut World) {
+    let (left, right, dt) = {
+        let input = world.resource::<InputState>();
+        let time = world.resource::<Time>();
+        (
+            input.key_held(Key::Left) || input.key_held(Key::A),
+            input.key_held(Key::Right) || input.key_held(Key::D),
+            time.delta(),
+        )
+    };
+    let direction = if left && !right {
+        -1.0
+    } else if right && !left {
+        1.0
+    } else {
+        0.0
+    };
+    for (_, pos, _) in world.query2::<Position, Paddle>() {
+        pos.x = (pos.x + direction * 440.0 * dt).clamp(PADDLE_W * 0.5, WIDTH - PADDLE_W * 0.5);
+    }
+}
+
+fn block_hit_impl(event: CollisionEvent, world: &mut World) {
+    let block = if world.has_component::<Block>(event.entity_a) {
+        Some(event.entity_a)
+    } else if world.has_component::<Block>(event.entity_b) {
+        Some(event.entity_b)
+    } else {
+        None
+    };
+    if let Some(block_id) = block {
+        if world.despawn(block_id) {
+            let state = world.resource_mut::<GameState>();
+            state.score = state.score + 100;
+        }
+    }
+}
+
+fn ball_out_impl(world: &mut World) {
+    let ball_id = match world.query::<Ball>().into_iter().next() {
+        Some((id, _)) => id,
+        None => return,
+    };
+    let out = match world.get_component::<Position>(ball_id) {
+        Some(pos) => pos.y > HEIGHT + 48.0,
+        None => false,
+    };
+    if !out {
+        return;
+    }
+
+    {
+        let state = world.resource_mut::<GameState>();
+        state.lives = state.lives - 1;
+        state.game_over = state.lives <= 0;
+    }
+    if let Some(pos) = world.get_component_mut::<Position>(ball_id) {
+        pos.x = WIDTH * 0.5;
+        pos.y = HEIGHT - 86.0;
+    }
+    if let Some(body) = world.get_component_mut::<DynamicBody>(ball_id) {
+        body.velocity = Vec2::new(190.0, -260.0);
+    }
+}
+
+fn check_clear_impl(world: &mut World) {
+    let remaining = world.query::<Block>().len();
+    world.resource_mut::<GameState>().cleared = remaining == 0;
+}
+
+fn draw_hud_impl(world: &mut World) {
+    let (score, lives, cleared, game_over) = {
+        let state = world.resource::<GameState>();
+        (state.score, state.lives, state.cleared, state.game_over)
+    };
+    let queue = world.resource_mut::<DrawQueue>();
+    queue.draw_rect(62.0, 24.0, (score as f32 / 20.0).min(240.0), 8.0, Color::yellow());
+    for life in 0..lives.max(0).min(3) {
+        queue.draw_circle(WIDTH - 74.0 + (life as f32) * 24.0, 26.0, 7.0, Color::cyan());
+    }
+    if cleared {
+        queue.draw_rect(WIDTH * 0.5, HEIGHT * 0.5, 260.0, 46.0, Color::green());
+    }
+    if game_over {
+        queue.draw_rect(WIDTH * 0.5, HEIGHT * 0.5, 260.0, 46.0, Color::red());
+    }
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    Ember::new()
+        .title("Breakout")
+        .window(WIDTH as u32, HEIGHT as u32)
+        .background(0.02, 0.02, 0.05, 1.0)
+        .startup_system(setup)
+        .system(paddle_move)
+        .physics(PhysicsWorld::new().gravity(0.0, 0.0))
+        .system(ball_out)
+        .system(check_clear)
+        .system(draw_rects)
+        .system(draw_circles)
+        .system(draw_hud)
+        .on_collision(on_collision)
+        .run();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn game_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(Time::default());
+        world.insert_resource(InputState::new());
+        world.insert_resource(DrawQueue::new());
+        setup(&mut world);
+        world
+    }
+
+    fn paddle_x(world: &mut World) -> f32 {
+        world
+            .query2::<Position, Paddle>()
+            .into_iter()
+            .next()
+            .expect("paddle")
+            .1
+            .x
+    }
+
+    fn ball_id(world: &mut World) -> EntityId {
+        world
+            .query::<Ball>()
+            .into_iter()
+            .next()
+            .expect("ball")
+            .0
+    }
+
+    #[test]
+    fn paddle_moves_left_and_right_from_input() {
+        let mut world = game_world();
+        world.resource_mut::<Time>().update(0.1);
+        let start = paddle_x(&mut world);
+
+        world.resource_mut::<InputState>().press(Key::Left);
+        paddle_move_impl(&mut world);
+        let left = paddle_x(&mut world);
+        assert!(left < start);
+
+        world.resource_mut::<InputState>().release(Key::Left);
+        world.resource_mut::<InputState>().press(Key::Right);
+        paddle_move_impl(&mut world);
+        assert!(paddle_x(&mut world) > left);
+    }
+
+    #[test]
+    fn block_hit_removes_block_and_adds_score() {
+        let mut world = game_world();
+        let block_id = world
+            .query::<Block>()
+            .into_iter()
+            .next()
+            .expect("block")
+            .0;
+        let ball_id = ball_id(&mut world);
+
+        block_hit_impl(
+            CollisionEvent {
+                entity_a: ball_id,
+                entity_b: block_id,
+            },
+            &mut world,
+        );
+
+        assert!(!world.contains(block_id));
+        assert_eq!(world.resource::<GameState>().score, 100);
+    }
+
+    #[test]
+    fn clear_state_and_hud_indicator_are_set_after_all_blocks_are_removed() {
+        let mut world = game_world();
+        let blocks = world
+            .query::<Block>()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        for id in blocks {
+            assert!(world.despawn(id));
+        }
+
+        check_clear_impl(&mut world);
+        draw_hud_impl(&mut world);
+
+        assert!(world.resource::<GameState>().cleared);
+        assert!(world
+            .resource::<DrawQueue>()
+            .commands()
+            .iter()
+            .any(|cmd| matches!(
+                cmd,
+                ember_runtime::render::DrawCommand::Rect { color, .. } if *color == Color::green()
+            )));
+    }
+
+    #[test]
+    fn ball_out_reduces_lives_and_sets_game_over_at_zero() {
+        let mut world = game_world();
+        world.resource_mut::<GameState>().lives = 1;
+        let ball_id = ball_id(&mut world);
+        world.get_component_mut::<Position>(ball_id).unwrap().y = HEIGHT + 64.0;
+
+        ball_out_impl(&mut world);
+
+        let state = world.resource::<GameState>();
+        assert_eq!(state.lives, 0);
+        assert!(state.game_over);
+        let pos = world.get_component::<Position>(ball_id).unwrap();
+        assert_eq!(pos.x, WIDTH * 0.5);
+        assert_eq!(pos.y, HEIGHT - 86.0);
+        assert_eq!(
+            world.get_component::<DynamicBody>(ball_id).unwrap().velocity,
+            Vec2::new(190.0, -260.0)
+        );
+    }
+}
+}
+
+system paddle_move() {
+    paddle_move_impl(world)
+}
+
+system on_collision(event: CollisionEvent, world: World) {
+    block_hit_impl(event, world)
+}
+
+system ball_out() {
+    ball_out_impl(world)
+}
+
+system check_clear() {
+    check_clear_impl(world)
+}
+
+system draw_hud() {
+    draw_hud_impl(world)
+}

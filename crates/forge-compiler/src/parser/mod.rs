@@ -58,6 +58,7 @@ fn is_block_start_token(kind: &TokenKind) -> bool {
             | TokenKind::State
             | TokenKind::Const
             | TokenKind::Fn
+            | TokenKind::System
             | TokenKind::Return
             | TokenKind::Struct
             | TokenKind::Trait
@@ -140,6 +141,10 @@ impl Parser {
                 self.advance();
                 Ok((name, tok.span))
             }
+            TokenKind::To => {
+                self.advance();
+                Ok(("to".to_string(), tok.span))
+            }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "identifier".to_string(),
                 found: tok.kind,
@@ -159,6 +164,7 @@ impl Parser {
             TokenKind::Err => "err".to_string(),
             TokenKind::SelfVal => "self".to_string(),
             TokenKind::Use => "use".to_string(),
+            TokenKind::To => "to".to_string(),
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "identifier".to_string(),
@@ -231,6 +237,7 @@ impl Parser {
                 }
             }
             TokenKind::Fn => self.parse_fn(),
+            TokenKind::System => self.parse_system(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Yield => self.parse_yield(),
             TokenKind::Struct => self.parse_struct_def(vec![], vec![]),
@@ -263,6 +270,7 @@ impl Parser {
             TokenKind::At => self.parse_annotated_stmt_with_pub(true),
             TokenKind::Use => self.parse_use_decl(true),
             TokenKind::Fn => self.parse_fn_with_pub(true),
+            TokenKind::System => self.parse_system(),
             TokenKind::Let => self.parse_let_with_pub(true),
             TokenKind::Const => {
                 if matches!(self.kind_at(1), Some(TokenKind::Fn)) {
@@ -354,6 +362,13 @@ impl Parser {
                     annotations.push(format!("@timed(metric: \"{}\")", metric));
                     decorators.push(Decorator::Timed { metric });
                 }
+                "validate" => {
+                    let decorator = self.parse_validate_decorator_arg()?;
+                    if let Decorator::Validate { target, using } = &decorator {
+                        annotations.push(format!("@validate({}, using: {})", target, using));
+                    }
+                    decorators.push(decorator);
+                }
                 _ => {
                     let mut ann_text = format!("@{}", ann_name);
                     if matches!(self.peek_kind(), TokenKind::LParen) {
@@ -393,6 +408,7 @@ impl Parser {
                 if let Stmt::Fn {
                     defer_cleanup: ref mut fn_dc,
                     annotations: ref mut fn_anns,
+                    decorators: ref mut fn_decorators,
                     ..
                 } = stmt
                 {
@@ -400,6 +416,7 @@ impl Parser {
                         *fn_dc = defer_cleanup.clone();
                     }
                     *fn_anns = annotations.clone();
+                    *fn_decorators = decorators.clone();
                 }
                 Ok(stmt)
             }
@@ -915,6 +932,42 @@ impl Parser {
             is_const,
             defer_cleanup: None,
             annotations: Vec::new(),
+            decorators: Vec::new(),
+            span,
+        })
+    }
+
+    fn parse_system(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::System)?;
+        let (name, _) = self.expect_name()?;
+        self.expect_token(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let (param_name, param_span) = self.expect_name()?;
+            let type_ann = if matches!(self.peek_kind(), TokenKind::Colon) {
+                self.advance();
+                Some(self.parse_type_ann()?)
+            } else {
+                None
+            };
+            params.push(Param {
+                name: param_name,
+                type_ann,
+                span: param_span,
+            });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RParen)?;
+
+        let body = self.parse_block()?;
+        Ok(Stmt::System {
+            name,
+            params,
+            body: Box::new(body),
             span,
         })
     }
@@ -1767,7 +1820,8 @@ impl Parser {
             | TokenKind::None
             | TokenKind::Ok
             | TokenKind::Err
-            | TokenKind::SelfVal => {
+            | TokenKind::SelfVal
+            | TokenKind::To => {
                 let tok = self.advance();
                 let name = match &tok.kind {
                     TokenKind::Some => "some",
@@ -1775,6 +1829,7 @@ impl Parser {
                     TokenKind::Ok => "ok",
                     TokenKind::Err => "err",
                     TokenKind::SelfVal => "self",
+                    TokenKind::To => "to",
                     _ => unreachable!(),
                 };
                 Ok(Expr::Ident(name.to_string(), tok.span))
@@ -1852,6 +1907,7 @@ impl Parser {
                 TokenKind::State => stmts.push(self.parse_state()?),
                 TokenKind::Const => stmts.push(self.parse_const()?),
                 TokenKind::Fn => stmts.push(self.parse_fn()?),
+                TokenKind::System => stmts.push(self.parse_system()?),
                 TokenKind::Return => stmts.push(self.parse_return()?),
                 TokenKind::Struct => stmts.push(self.parse_struct_def(vec![], vec![])?),
                 TokenKind::Impl => stmts.push(self.parse_impl_or_impl_trait()?),
@@ -2313,6 +2369,13 @@ impl Parser {
                     annotations.push(format!("@timed(metric: \"{}\")", metric));
                     decorators.push(Decorator::Timed { metric });
                 }
+                "validate" => {
+                    let decorator = self.parse_validate_decorator_arg()?;
+                    if let Decorator::Validate { target, using } = &decorator {
+                        annotations.push(format!("@validate({}, using: {})", target, using));
+                    }
+                    decorators.push(decorator);
+                }
                 _ => {
                     // collect unknown annotation with optional argument list
                     let mut ann_text = format!("@{}", ann_name);
@@ -2353,6 +2416,7 @@ impl Parser {
                 if let Stmt::Fn {
                     defer_cleanup: ref mut fn_dc,
                     annotations: ref mut fn_anns,
+                    decorators: ref mut fn_decorators,
                     ..
                 } = stmt
                 {
@@ -2360,6 +2424,7 @@ impl Parser {
                         *fn_dc = defer_cleanup.clone();
                     }
                     *fn_anns = annotations.clone();
+                    *fn_decorators = decorators.clone();
                 }
                 Ok(stmt)
             }
@@ -2416,6 +2481,24 @@ impl Parser {
         };
         self.expect_token(&TokenKind::RParen)?;
         Ok(metric)
+    }
+
+    fn parse_validate_decorator_arg(&mut self) -> Result<Decorator, ParseError> {
+        self.expect_token(&TokenKind::LParen)?;
+        let (target, _) = self.expect_name()?;
+        self.expect_token(&TokenKind::Comma)?;
+        let (key, _) = self.expect_ident()?;
+        if key != "using" {
+            return Err(ParseError::UnexpectedToken {
+                expected: "using".to_string(),
+                found: TokenKind::Ident(key),
+                span: self.current_span(),
+            });
+        }
+        self.expect_token(&TokenKind::Colon)?;
+        let (using, _) = self.expect_name()?;
+        self.expect_token(&TokenKind::RParen)?;
+        Ok(Decorator::Validate { target, using })
     }
 
     fn parse_container_def(&mut self) -> Result<Stmt, ParseError> {
@@ -3859,6 +3942,7 @@ fn token_kind_to_raw_str(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Ident(s) => format!(" {}", s),
         TokenKind::Int(n) => format!(" {}", n),
+        TokenKind::Float(f) if f.fract() == 0.0 => format!(" {:.1}", f),
         TokenKind::Float(f) => format!(" {}", f),
         TokenKind::Str(s) => format!(" \"{}\"", s),
         TokenKind::Plus => " +".to_string(),
@@ -3873,8 +3957,11 @@ fn token_kind_to_raw_str(kind: &TokenKind) -> String {
         TokenKind::Gt => " >".to_string(),
         TokenKind::LtEq => " <=".to_string(),
         TokenKind::GtEq => " >=".to_string(),
+        TokenKind::Amp => " &".to_string(),
         TokenKind::And => " &&".to_string(),
         TokenKind::Or => " ||".to_string(),
+        TokenKind::Pipe => "|".to_string(),
+        TokenKind::PipeArrow => " |>".to_string(),
         TokenKind::Bang => " !".to_string(),
         TokenKind::Dot => ".".to_string(),
         TokenKind::Comma => ",".to_string(),
@@ -3891,15 +3978,43 @@ fn token_kind_to_raw_str(kind: &TokenKind) -> String {
         TokenKind::DotDot => "..".to_string(),
         TokenKind::DotDotEq => "..=".to_string(),
         TokenKind::Let => " let".to_string(),
+        TokenKind::State => " state".to_string(),
+        TokenKind::Const => " const".to_string(),
         TokenKind::Fn => " fn".to_string(),
+        TokenKind::System => " system".to_string(),
         TokenKind::Return => " return".to_string(),
         TokenKind::If => " if".to_string(),
         TokenKind::Else => " else".to_string(),
+        TokenKind::For => " for".to_string(),
+        TokenKind::In => " in".to_string(),
+        TokenKind::While => " while".to_string(),
+        TokenKind::Match => " match".to_string(),
+        TokenKind::None => " None".to_string(),
+        TokenKind::Some => " Some".to_string(),
+        TokenKind::Ok => " Ok".to_string(),
+        TokenKind::Err => " Err".to_string(),
+        TokenKind::Struct => " struct".to_string(),
+        TokenKind::Impl => " impl".to_string(),
+        TokenKind::SelfVal => " self".to_string(),
+        TokenKind::SelfType => " Self".to_string(),
+        TokenKind::Trait => " trait".to_string(),
+        TokenKind::Mixin => " mixin".to_string(),
+        TokenKind::Data => " data".to_string(),
+        TokenKind::Typestate => " typestate".to_string(),
+        TokenKind::Operator => " operator".to_string(),
+        TokenKind::Defer => " defer".to_string(),
+        TokenKind::Spawn => " spawn".to_string(),
+        TokenKind::Yield => " yield".to_string(),
+        TokenKind::Loop => " loop".to_string(),
+        TokenKind::Break => " break".to_string(),
         TokenKind::True => " true".to_string(),
         TokenKind::False => " false".to_string(),
         TokenKind::Use => " use".to_string(),
         TokenKind::Pub => " pub".to_string(),
+        TokenKind::As => " as".to_string(),
+        TokenKind::Test => " test".to_string(),
         TokenKind::At => "@".to_string(),
+        TokenKind::Hash => "#".to_string(),
         _ => " ".to_string(),
     }
 }
@@ -4011,6 +4126,36 @@ mod tests {
                 assert_eq!(params[1].name, "b");
             }
             other => panic!("expected Fn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_decl() {
+        match first_stmt(
+            "system draw(pos: Position, rect: Rect) { Renderer::draw_rect(0, 0, 1, 1, Color::white()) }",
+        ) {
+            Stmt::System { name, params, .. } => {
+                assert_eq!(name, "draw");
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "pos");
+                assert_eq!(params[1].name, "rect");
+            }
+            other => panic!("expected System, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_raw_preserves_rust_refs_and_keywords() {
+        match first_stmt("use raw { #[cfg(test)] pub struct Paddle; fn setup(world: &mut World) { let v = Some(1); for i in 0..3 { let x = i as f32; } } }") {
+            Stmt::UseRaw { rust_code, .. } => {
+                assert!(rust_code.contains("#[ cfg( test)]"), "got: {}", rust_code);
+                assert!(rust_code.contains("& mut World"), "got: {}", rust_code);
+                assert!(rust_code.contains("struct Paddle"), "got: {}", rust_code);
+                assert!(rust_code.contains("Some"), "got: {}", rust_code);
+                assert!(rust_code.contains("for"), "got: {}", rust_code);
+                assert!(rust_code.contains("as f32"), "got: {}", rust_code);
+            }
+            other => panic!("expected UseRaw, got {:?}", other),
         }
     }
 
@@ -4541,6 +4686,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_validate_decorator_on_fn() {
+        match first_stmt(
+            "@validate(RegistrationForm, using: registration_validator)\nfn register(req) { req }",
+        ) {
+            Stmt::Fn {
+                decorators,
+                annotations,
+                ..
+            } => {
+                assert_eq!(
+                    decorators,
+                    vec![Decorator::Validate {
+                        target: "RegistrationForm".to_string(),
+                        using: "registration_validator".to_string()
+                    }]
+                );
+                assert_eq!(
+                    annotations,
+                    vec!["@validate(RegistrationForm, using: registration_validator)".to_string()]
+                );
+            }
+            other => panic!("expected Fn, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_container_basic() {
         match first_stmt("container { bind UserRepository to PostgresUserRepository }") {
             Stmt::ContainerDef { bindings, .. } => {
@@ -4624,6 +4795,33 @@ let app = App::new<Unconfigured>().configure(container {
                 );
             }
             other => panic!("expected function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_to_identifier() {
+        match first_stmt("fn send(to: string) -> unit {}") {
+            Stmt::Fn { params, .. } => {
+                assert_eq!(params[0].name, "to");
+            }
+            other => panic!("expected function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_to_identifier_in_interpolation() {
+        match first_stmt(r#"let msg = "hello {to}""#) {
+            Stmt::Let {
+                value: Expr::Interpolation { parts, .. },
+                ..
+            } => {
+                assert!(matches!(
+                    &parts[1],
+                    InterpPart::Expr(expr)
+                        if matches!(expr.as_ref(), Expr::Ident(name, _) if name == "to")
+                ));
+            }
+            other => panic!("expected interpolated string, got {:?}", other),
         }
     }
 

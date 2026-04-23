@@ -55,6 +55,7 @@ pub enum Decorator {
     Repository,
     On { event_type: String },
     Timed { metric: String },
+    Validate { target: String, using: String },
 }
 
 /// 分割代入パターン (E2-1)
@@ -109,6 +110,14 @@ pub enum Stmt {
         is_const: bool,
         defer_cleanup: Option<String>,
         annotations: Vec<String>,
+        decorators: Vec<Decorator>,
+        span: Span,
+    },
+    /// system name(params) { body } — Ember ECS system declaration
+    System {
+        name: String,
+        params: Vec<Param>,
+        body: Box<Expr>,
         span: Span,
     },
     /// return expr
@@ -223,6 +232,7 @@ impl Stmt {
             | Stmt::State { span, .. }
             | Stmt::Const { span, .. }
             | Stmt::Fn { span, .. }
+            | Stmt::System { span, .. }
             | Stmt::Yield { span, .. }
             | Stmt::StructDef { span, .. }
             | Stmt::ImplBlock { span, .. }

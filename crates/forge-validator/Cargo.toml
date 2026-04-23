@@ -1,0 +1,8 @@
+[package]
+name = "forge-validator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-vm = { path = "../forge-vm" }
+regex = "1"

@@ -555,7 +555,9 @@ fn runtime_value_to_json(value: &Value) -> serde_json::Value {
         Value::Option(Some(value)) => runtime_value_to_json(value),
         Value::Option(None) => serde_json::Value::Null,
         Value::Result(Ok(value)) => runtime_value_to_json(value),
-        Value::Result(Err(message)) => serde_json::json!({ "error": message }),
+        Value::Result(Err(message)) => {
+            serde_json::json!({ "error": runtime_value_to_json(message) })
+        }
         Value::List(items) => {
             serde_json::Value::Array(items.borrow().iter().map(runtime_value_to_json).collect())
         }
@@ -588,6 +590,9 @@ fn runtime_value_to_json(value: &Value) -> serde_json::Value {
         }),
         Value::Closure { .. } => serde_json::Value::String("<closure>".to_string()),
         Value::NativeFunction(_) => serde_json::Value::String("<native_fn>".to_string()),
+        Value::NativeObject(object) => {
+            serde_json::Value::String(format!("<native_object:{}>", object.type_name()))
+        }
     }
 }
 

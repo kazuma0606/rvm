@@ -1031,6 +1031,14 @@ impl CodeGenerator {
                 }
                 self.scan_expr_codegen_requirements(body);
             }
+            Stmt::System { params, body, .. } => {
+                for p in params {
+                    if let Some(ann) = &p.type_ann {
+                        self.scan_type_ann_codegen_requirements(ann);
+                    }
+                }
+                self.scan_expr_codegen_requirements(body);
+            }
             Stmt::Yield { value, .. } => {
                 self.scan_expr_codegen_requirements(value);
             }
@@ -1423,7 +1431,9 @@ impl CodeGenerator {
             | Stmt::State { value, .. }
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.ensure_no_await_in_closure(value),
-            Stmt::Fn { body, .. } => self.ensure_no_await_in_closure(body),
+            Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
+                self.ensure_no_await_in_closure(body)
+            }
             Stmt::Return(Some(expr), _) => self.ensure_no_await_in_closure(expr),
             Stmt::Return(None, _) => Ok(()),
             Stmt::Yield { value, .. } => self.ensure_no_await_in_closure(value),
@@ -1789,7 +1799,7 @@ impl CodeGenerator {
             | Stmt::State { value, .. }
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.expr_contains_await(value),
-            Stmt::Fn { body, .. } => self.expr_contains_await(body),
+            Stmt::Fn { body, .. } | Stmt::System { body, .. } => self.expr_contains_await(body),
             Stmt::Return(Some(expr), _) => self.expr_contains_await(expr),
             Stmt::Return(None, _) => false,
             Stmt::Yield { value, .. } => self.expr_contains_await(value),
@@ -1991,7 +2001,9 @@ impl CodeGenerator {
             | Stmt::State { value, .. }
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.collect_called_fns_expr(value, names),
-            Stmt::Fn { body, .. } => self.collect_called_fns_expr(body, names),
+            Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
+                self.collect_called_fns_expr(body, names)
+            }
             Stmt::Return(Some(expr), _) => self.collect_called_fns_expr(expr, names),
             Stmt::Return(None, _) => {}
             Stmt::Yield { value, .. } => self.collect_called_fns_expr(value, names),
@@ -2166,7 +2178,7 @@ impl CodeGenerator {
             | Stmt::State { value, .. }
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.expr_calls_fn(value, fn_name),
-            Stmt::Fn { body, .. } => self.expr_calls_fn(body, fn_name),
+            Stmt::Fn { body, .. } | Stmt::System { body, .. } => self.expr_calls_fn(body, fn_name),
             Stmt::Return(Some(expr), _) => self.expr_calls_fn(expr, fn_name),
             Stmt::Return(None, _) => false,
             Stmt::Yield { value, .. } => self.expr_calls_fn(value, fn_name),
@@ -2512,6 +2524,12 @@ impl CodeGenerator {
                 ));
                 out
             }
+            Stmt::System {
+                name, params, body, ..
+            } => {
+                self.declare_var(name, false, None);
+                self.gen_system_fn(name, params, body)
+            }
             Stmt::Return(Some(expr), _) => {
                 format!(
                     "{}return {};\n",
@@ -2779,6 +2797,148 @@ impl CodeGenerator {
             out.push_str(&self.indent_str());
             out.push_str("}\n");
             out
+        }
+    }
+
+    fn gen_system_fn(&mut self, name: &str, params: &[Param], body: &Expr) -> String {
+        let fn_name = self.rust_fn_name(name);
+        if Self::is_collision_system_signature(params) {
+            let event_name = &params[0].name;
+            let world_name = &params[1].name;
+            let mut out = format!(
+                "{}fn {}({}: ember_runtime::CollisionEvent, {}: &mut ember_runtime::World) {{\n",
+                self.indent_str(),
+                fn_name,
+                event_name,
+                world_name
+            );
+            self.indent += 1;
+            self.push_scope();
+            self.declare_var(event_name, false, params[0].type_ann.clone());
+            self.declare_var(world_name, false, params[1].type_ann.clone());
+            out.push_str(&self.gen_block_body_as_statements(body));
+            self.pop_scope();
+            self.indent -= 1;
+            out.push_str(&format!("{}}}\n", self.indent_str()));
+            return out;
+        }
+
+        let mut out = format!(
+            "{}fn {}(world: &mut ember_runtime::World) {{\n",
+            self.indent_str(),
+            fn_name
+        );
+
+        self.indent += 1;
+        self.push_scope();
+        self.declare_var("world", false, None);
+
+        if params.is_empty() {
+            out.push_str(&self.gen_block_body_as_statements(body));
+        } else {
+            let query = match params.len() {
+                1 => {
+                    let ty = params[0]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string());
+                    format!("world.query::<{}>()", ty)
+                }
+                2 => format!(
+                    "world.query2::<{}, {}>()",
+                    params[0]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string()),
+                    params[1]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string())
+                ),
+                3 => format!(
+                    "world.query3::<{}, {}, {}>()",
+                    params[0]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string()),
+                    params[1]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string()),
+                    params[2]
+                        .type_ann
+                        .as_ref()
+                        .map(type_ann_to_rust)
+                        .unwrap_or_else(|| "_".to_string())
+                ),
+                _ => {
+                    out.push_str(&format!(
+                        "{}compile_error!(\"Ember systems currently support up to 3 component parameters\");\n",
+                        self.indent_str()
+                    ));
+                    self.pop_scope();
+                    self.indent -= 1;
+                    out.push_str(&format!("{}}}\n", self.indent_str()));
+                    return out;
+                }
+            };
+            let names = params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            out.push_str(&format!(
+                "{}for (_, {}) in {} {{\n",
+                self.indent_str(),
+                names,
+                query
+            ));
+            self.indent += 1;
+            self.push_scope();
+            for param in params {
+                self.declare_var(&param.name, false, param.type_ann.clone());
+            }
+            out.push_str(&self.gen_block_body_as_statements(body));
+            self.pop_scope();
+            self.indent -= 1;
+            out.push_str(&format!("{}}}\n", self.indent_str()));
+        }
+
+        self.pop_scope();
+        self.indent -= 1;
+        out.push_str(&format!("{}}}\n", self.indent_str()));
+        out
+    }
+
+    fn is_collision_system_signature(params: &[Param]) -> bool {
+        params.len() == 2
+            && Self::type_ann_is_named(&params[0].type_ann, "CollisionEvent")
+            && Self::type_ann_is_named(&params[1].type_ann, "World")
+    }
+
+    fn type_ann_is_named(ann: &Option<TypeAnn>, expected: &str) -> bool {
+        matches!(ann, Some(TypeAnn::Named(name)) if name == expected)
+    }
+
+    fn gen_block_body_as_statements(&mut self, expr: &Expr) -> String {
+        match expr {
+            Expr::Block { stmts, tail, .. } => {
+                let mut out = String::new();
+                for stmt in stmts {
+                    out.push_str(&self.gen_stmt(stmt));
+                }
+                if let Some(tail) = tail {
+                    out.push_str(&self.gen_stmt(&Stmt::Expr((**tail).clone())));
+                }
+                out
+            }
+            other => self.gen_stmt(&Stmt::Expr(other.clone())),
         }
     }
 
@@ -3862,6 +4022,11 @@ impl CodeGenerator {
         let prefix = Self::vis(is_pub);
         let base = match path {
             UsePath::Local(path) => format!("crate::{}", path.replace('/', "::")),
+            UsePath::External(path) if path == "ember" => "ember_runtime".to_string(),
+            UsePath::External(path) if path.starts_with("ember/") => {
+                let suffix = path.trim_start_matches("ember/");
+                format!("ember_runtime::{}", suffix.replace('/', "::"))
+            }
             UsePath::External(path) => path.replace('/', "::"),
             UsePath::Stdlib(path) => format!("forge_std::{}", path.replace('/', "::")),
         };
@@ -5261,6 +5426,29 @@ impl CodeGenerator {
                 );
                 local_scopes.pop();
             }
+            Stmt::System {
+                name, params, body, ..
+            } => {
+                if let Some(scope) = local_scopes.last_mut() {
+                    scope.insert(name.clone());
+                }
+                local_scopes.push(
+                    params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect::<HashSet<_>>(),
+                );
+                self.analyze_closure_expr(
+                    body,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+                local_scopes.pop();
+            }
             Stmt::Return(Some(expr), _) | Stmt::Expr(expr) => self.analyze_closure_expr(
                 expr,
                 outer_names,
@@ -6427,7 +6615,9 @@ fn collect_inline_container_bindings_stmt(stmt: &Stmt) -> Option<Vec<Binding>> {
         | Stmt::Const { value, .. }
         | Stmt::Expr(value)
         | Stmt::Return(Some(value), _) => collect_inline_container_bindings_expr(value),
-        Stmt::Fn { body, .. } => collect_inline_container_bindings_expr(body),
+        Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
+            collect_inline_container_bindings_expr(body)
+        }
         Stmt::Return(None, _) => None,
         Stmt::Yield { value, .. } => collect_inline_container_bindings_expr(value),
         Stmt::Defer { body, .. } => match body {
@@ -6817,6 +7007,19 @@ fn collect_anon_structs_stmt(
             if let Some(ann) = return_type {
                 register_anon_ann(ann, out);
             }
+            scopes.push(HashMap::new());
+            if let Some(scope) = scopes.last_mut() {
+                for param in params {
+                    if let Some(ann) = &param.type_ann {
+                        register_anon_ann(ann, out);
+                        scope.insert(param.name.clone(), ann.clone());
+                    }
+                }
+            }
+            collect_anon_structs_expr(body, named_struct_defs, scopes, out);
+            scopes.pop();
+        }
+        Stmt::System { params, body, .. } => {
             scopes.push(HashMap::new());
             if let Some(scope) = scopes.last_mut() {
                 for param in params {
@@ -7284,6 +7487,13 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
             }
             if let Some(ann) = return_type {
                 collect_utility_types_ann(ann, out);
+            }
+        }
+        Stmt::System { params, .. } => {
+            for p in params {
+                if let Some(ann) = &p.type_ann {
+                    collect_utility_types_ann(ann, out);
+                }
             }
         }
         Stmt::StructDef { fields, .. } | Stmt::DataDef { fields, .. } => {
@@ -8321,6 +8531,21 @@ use serde.{Serialize}
     }
 
     #[test]
+    fn use_ember_snapshot() {
+        let src = r#"
+use ember.*
+use ember/input.{InputState, Key}
+"#;
+        let out = transpile(src);
+        assert!(out.contains("use ember_runtime::*;"), "got: {}", out);
+        assert!(
+            out.contains("use ember_runtime::input::{InputState, Key};"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
     fn use_stdlib_crypto_snapshot() {
         let src = r#"
 use forge/std/crypto.{ hash, hmac_verify, HashAlgo }
@@ -8459,6 +8684,45 @@ test "math works" {
         assert!(out.contains("#[test]"), "got: {}", out);
         assert!(out.contains("assert_eq!("), "got: {}", out);
         assert!(out.contains("assert!("), "got: {}", out);
+    }
+
+    #[test]
+    fn ember_system_snapshot_queries_components() {
+        let src = r#"
+struct Position { x: number, y: number }
+struct Rect { w: number, h: number }
+system draw(pos: Position, rect: Rect) {
+    pos.x = pos.x + 1
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("fn draw(world: &mut ember_runtime::World)"),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("for (_, pos, rect) in world.query2::<Position, Rect>()"),
+            "got: {}",
+            out
+        );
+        assert!(out.contains("pos.x = pos.x + 1;"), "got: {}", out);
+    }
+
+    #[test]
+    fn ember_collision_system_snapshot_accepts_event_and_world() {
+        let src = r#"
+system on_collision(event: CollisionEvent, world: World) {
+    let first = event.entity_a
+}
+"#;
+        let out = transpile(src);
+        assert!(
+            out.contains("fn on_collision(event: ember_runtime::CollisionEvent, world: &mut ember_runtime::World)"),
+            "got: {}",
+            out
+        );
+        assert!(out.contains("let first = event.entity_a;"), "got: {}", out);
     }
 
     #[test]
