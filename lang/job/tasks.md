@@ -1,7 +1,7 @@
 # `job` 実装タスク
 
 > 参照: `lang/job/spec.md`, `lang/job/plan.md`
-> 進捗: 0/52
+> 進捗: 0/56
 
 ---
 
@@ -79,19 +79,22 @@
 
 ## JOB-3: RunContext / `runs/` ディレクトリ
 
-### JOB-3-A: RunContext (0/4)
+### JOB-3-A: RunContext (0/5)
 
-- [ ] `RunContext { run_id, job_name, started_at, args, event_queue }` 構造体を定義
+- [ ] `RunContext { run_id, job_name, started_at, finished_at, args, event_queue }` 構造体を定義
 - [ ] `run_id` の生成: `YYYY-MM-DDTHH-MM-SS` 形式
 - [ ] job 実行前に RunContext を初期化
+- [ ] job 完了時に `finished_at` を記録
 - [ ] RunContext テスト: run_id フォーマット検証
 
-### JOB-3-B: `runs/` ディレクトリ出力 (0/4)
+### JOB-3-B: `runs/` ディレクトリ出力 (0/6)
 
 - [ ] `runs/<run_id>/` ディレクトリを自動作成
-- [ ] job 完了時に `result.json` を書き出す
+- [ ] job 完了時に `result.json` を書き出す（`{ status, started_at, finished_at, args }`）
 - [ ] `runs/latest` → 最新 run_id へのポインタファイルを更新
+- [ ] `--no-log` フラグで `runs/` 記録を無効化
 - [ ] ディレクトリ出力テスト
+- [ ] `--no-log` テスト: ディレクトリが作成されないことを確認
 
 ### JOB-3-C: `Run.events` API (0/3)
 
