@@ -18,8 +18,8 @@
 | Ember ECS | ✅ 104/104 | ゲームエンジン、WASM対応 |
 | DAP デバッガー | ✅ 111/111 | VS Code ブレークポイント |
 | Bloom / SSR | ✅ 157/158 | WASM + ホットリロード |
-| `extends` / mixin | 🔄 84/102 | 一部残 |
-| `generics` | ❌ 0/103 | 未着手 |
+| `extends` / mixin / defer | ✅ 102/102 | pipe / `?.` / operator / spawn / yield / defer |
+| `generics` | ✅ 103/103 | コレクション型・ユーティリティ型・トランスパイラ |
 
 ---
 
