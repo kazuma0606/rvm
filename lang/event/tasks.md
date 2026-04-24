@@ -1,7 +1,7 @@
 # `event` / `emit` 実装タスク
 
 > 参照: `lang/event/spec.md`, `lang/event/plan.md`
-> 進捗: 0/54
+> 進捗: 0/55
 
 ---
 
@@ -85,7 +85,7 @@
 
 ## EVT-4: `Run.events` API
 
-### EVT-4-A: RunContext へのアクセサ (0/5)
+### EVT-4-A: RunContext へのアクセサ (0/6)
 
 - [ ] `Run` グローバルオブジェクトをインタープリターに登録
 - [ ] `Run.events.count(EventType)` — EventType 名の件数を返す

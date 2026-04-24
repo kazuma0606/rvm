@@ -1,7 +1,7 @@
 # `app` / `forge explain` 実装タスク
 
 > 参照: `lang/app/spec.md`, `lang/app/plan.md`
-> 進捗: 0/62
+> 進捗: 0/65
 
 ---
 
@@ -57,9 +57,10 @@
 
 ## APP-2: CLI 統合
 
-### APP-2-A: `app.forge` 自動検出 (0/5)
+### APP-2-A: `app.forge` 自動検出 (0/6)
 
 - [ ] `forge job <name>` 実行時にカレントディレクトリから `app.forge` を検索
+- [ ] `forge test` 実行時も `app.forge` を起点にする
 - [ ] 上位ディレクトリへの再帰的な検索（`forge.toml` がある階層まで）
 - [ ] 見つかった場合は AppConfig を構築して job に適用
 - [ ] 見つからない場合は AppConfig なしで job のみ実行
@@ -72,7 +73,13 @@
 - [ ] 未指定時のデフォルト選択（唯一なら自動、複数なら `Production` or 最初）
 - [ ] `--app` フラグテスト: 環境切り替えが正しく動作する
 
-### APP-2-C: `provide` の job への自動供給 (0/4)
+### APP-2-C: `forge test` コマンド (0/3)
+
+- [ ] `forge test` サブコマンドを追加
+- [ ] `--app test` 相当の AppConfig（Test 環境）を自動選択
+- [ ] `forge test` テスト: Test 環境の provide/bind が正しく適用される
+
+### APP-2-D: `provide` の job への自動供給 (0/4)
 
 - [ ] AppConfig の `provides` から `RunContext.provided` を構築
 - [ ] job の `input` を走査して `provided` のキーと一致するものを補完
