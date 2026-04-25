@@ -1,49 +1,49 @@
 # `event` / `emit` 実装タスク
 
 > 参照: `lang/event/spec.md`, `lang/event/plan.md`
-> 進捗: 0/55
+> 進捗: 24/55
 
 ---
 
 ## EVT-1: 言語拡張
 
-### EVT-1-A: レキサー (0/3)
+### EVT-1-A: レキサー (3/3)
 
-- [ ] `event` キーワードトークンを追加
-- [ ] `emit` キーワードトークンを追加
-- [ ] レキサーテスト: `event`, `emit` が正しくトークン化される
+- [x] `event` キーワードトークンを追加
+- [x] `emit` キーワードトークンを追加
+- [x] レキサーテスト: `event`, `emit` が正しくトークン化される
 
-### EVT-1-B: AST (0/5)
+### EVT-1-B: AST (4/5)
 
-- [ ] `Stmt::Event { name, fields, span }` を定義（`data` と同じ Field 構造を流用）
-- [ ] `Stmt::Emit { event_name, fields, span }` を定義
-- [ ] `fields: Vec<(String, Box<Expr>)>` の型を定義
+- [x] `Stmt::Event { name, fields, span }` を定義（`data` と同じ Field 構造を流用）
+- [x] `Stmt::Emit { event_name, fields, span }` を定義
+- [x] `fields: Vec<(String, Box<Expr>)>` の型を定義
 - [ ] AST の Display / Debug 実装
-- [ ] AST テスト: ノード構造が正しく構築される
+- [x] AST テスト: ノード構造が正しく構築される
 
-### EVT-1-C: パーサー (0/6)
+### EVT-1-C: パーサー (5/6)
 
-- [ ] `event PascalName { field: Type, ... }` のパース
-- [ ] `emit EventName { key: expr, ... }` のパース
-- [ ] 末尾カンマの許容
-- [ ] パーサーテスト: event 宣言の正常ケース
-- [ ] パーサーテスト: emit 文の正常ケース
+- [x] `event PascalName { field: Type, ... }` のパース
+- [x] `emit EventName { key: expr, ... }` のパース
+- [x] 末尾カンマの許容
+- [x] パーサーテスト: event 宣言の正常ケース
+- [x] パーサーテスト: emit 文の正常ケース
 - [ ] パーサーテスト: エラーケース（フィールド不足等）
 
-### EVT-1-D: 型チェッカー (0/6)
+### EVT-1-D: 型チェッカー (6/6)
 
-- [ ] `event` 宣言をスコープにイベント型として登録（`EventType` マーカー付き）
-- [ ] `emit EventName { ... }` 時に EventName が存在することを検証
-- [ ] emit のフィールドと event 宣言の過不足検証
-- [ ] emit の各フィールドの型一致検証
-- [ ] 型チェッカーテスト: フィールド不一致エラー
-- [ ] 型チェッカーテスト: 存在しない event 名エラー
+- [x] `event` 宣言をスコープにイベント型として登録（`EventType` マーカー付き）
+- [x] `emit EventName { ... }` 時に EventName が存在することを検証
+- [x] emit のフィールドと event 宣言の過不足検証
+- [x] emit の各フィールドの型一致検証
+- [x] 型チェッカーテスト: フィールド不一致エラー
+- [x] 型チェッカーテスト: 存在しない event 名エラー
 
-### EVT-1-E: インタープリター（emit 評価） (0/4)
+### EVT-1-E: インタープリター（emit 評価） (3/4)
 
-- [ ] `emit EventName { ... }` でフィールドを `Value::Struct` に組み立てる
-- [ ] `RunContext.event_queue.push((event_name, value))` で EventQueue に積む
-- [ ] `emit` の戻り値は `Value::Unit`
+- [x] `emit EventName { ... }` でフィールドを `Value::Struct` に組み立てる
+- [x] `RunContext.event_queue.push((event_name, value))` で EventQueue に積む
+- [x] `emit` の戻り値は `Value::Unit`
 - [ ] インタープリターテスト: emit 後に EventQueue に積まれることを確認
 
 ---

@@ -1039,6 +1039,34 @@ impl CodeGenerator {
                 }
                 self.scan_expr_codegen_requirements(body);
             }
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                for provide in provides {
+                    self.scan_expr_codegen_requirements(&provide.value);
+                }
+                if let Some(bindings) = container {
+                    for binding in bindings {
+                        self.scan_expr_codegen_requirements(&binding.implementation);
+                    }
+                }
+            }
+            Stmt::Job { inputs, body, .. } => {
+                for input in inputs {
+                    self.scan_type_ann_codegen_requirements(&input.type_ann);
+                    if let Some(default) = &input.default {
+                        self.scan_expr_codegen_requirements(default);
+                    }
+                }
+                self.scan_expr_codegen_requirements(body);
+            }
+            Stmt::RunJob { args, .. } => {
+                for (_, expr) in args {
+                    self.scan_expr_codegen_requirements(expr);
+                }
+            }
             Stmt::Yield { value, .. } => {
                 self.scan_expr_codegen_requirements(value);
             }
@@ -1177,6 +1205,7 @@ impl CodeGenerator {
                 }
             }
             Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
+            Stmt::Event { .. } | Stmt::Emit { .. } => {}
         }
     }
 
@@ -1434,6 +1463,35 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
                 self.ensure_no_await_in_closure(body)
             }
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                for provide in provides {
+                    self.ensure_no_await_in_closure(&provide.value)?;
+                }
+                if let Some(bindings) = container {
+                    for binding in bindings {
+                        self.ensure_no_await_in_closure(&binding.implementation)?;
+                    }
+                }
+                Ok(())
+            }
+            Stmt::Job { inputs, body, .. } => {
+                for input in inputs {
+                    if let Some(default) = &input.default {
+                        self.ensure_no_await_in_closure(default)?;
+                    }
+                }
+                self.ensure_no_await_in_closure(body)
+            }
+            Stmt::RunJob { args, .. } => {
+                for (_, expr) in args {
+                    self.ensure_no_await_in_closure(expr)?;
+                }
+                Ok(())
+            }
             Stmt::Return(Some(expr), _) => self.ensure_no_await_in_closure(expr),
             Stmt::Return(None, _) => Ok(()),
             Stmt::Yield { value, .. } => self.ensure_no_await_in_closure(value),
@@ -1484,7 +1542,9 @@ impl CodeGenerator {
             | Stmt::DataDef { .. }
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
-            | Stmt::UseRaw { .. } => Ok(()),
+            | Stmt::UseRaw { .. }
+            | Stmt::Event { .. }
+            | Stmt::Emit { .. } => Ok(()),
         }
     }
 
@@ -1800,6 +1860,30 @@ impl CodeGenerator {
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.expr_contains_await(value),
             Stmt::Fn { body, .. } | Stmt::System { body, .. } => self.expr_contains_await(body),
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                provides
+                    .iter()
+                    .any(|provide| self.expr_contains_await(&provide.value))
+                    || container.as_ref().is_some_and(|bindings| {
+                        bindings
+                            .iter()
+                            .any(|binding| self.expr_contains_await(&binding.implementation))
+                    })
+            }
+            Stmt::Job { inputs, body, .. } => {
+                inputs
+                    .iter()
+                    .filter_map(|input| input.default.as_ref())
+                    .any(|expr| self.expr_contains_await(expr))
+                    || self.expr_contains_await(body)
+            }
+            Stmt::RunJob { args, .. } => {
+                args.iter().any(|(_, expr)| self.expr_contains_await(expr))
+            }
             Stmt::Return(Some(expr), _) => self.expr_contains_await(expr),
             Stmt::Return(None, _) => false,
             Stmt::Yield { value, .. } => self.expr_contains_await(value),
@@ -1834,7 +1918,9 @@ impl CodeGenerator {
             | Stmt::DataDef { .. }
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
-            | Stmt::UseRaw { .. } => false,
+            | Stmt::UseRaw { .. }
+            | Stmt::Event { .. }
+            | Stmt::Emit { .. } => false,
         }
     }
 
@@ -2004,6 +2090,33 @@ impl CodeGenerator {
             Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
                 self.collect_called_fns_expr(body, names)
             }
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                for provide in provides {
+                    self.collect_called_fns_expr(&provide.value, names);
+                }
+                if let Some(bindings) = container {
+                    for binding in bindings {
+                        self.collect_called_fns_expr(&binding.implementation, names);
+                    }
+                }
+            }
+            Stmt::Job { inputs, body, .. } => {
+                for input in inputs {
+                    if let Some(default) = &input.default {
+                        self.collect_called_fns_expr(default, names);
+                    }
+                }
+                self.collect_called_fns_expr(body, names);
+            }
+            Stmt::RunJob { args, .. } => {
+                for (_, expr) in args {
+                    self.collect_called_fns_expr(expr, names);
+                }
+            }
             Stmt::Return(Some(expr), _) => self.collect_called_fns_expr(expr, names),
             Stmt::Return(None, _) => {}
             Stmt::Yield { value, .. } => self.collect_called_fns_expr(value, names),
@@ -2049,7 +2162,9 @@ impl CodeGenerator {
             | Stmt::DataDef { .. }
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
-            | Stmt::UseRaw { .. } => {}
+            | Stmt::UseRaw { .. }
+            | Stmt::Event { .. }
+            | Stmt::Emit { .. } => {}
         }
     }
 
@@ -2179,6 +2294,30 @@ impl CodeGenerator {
             | Stmt::Const { value, .. }
             | Stmt::Expr(value) => self.expr_calls_fn(value, fn_name),
             Stmt::Fn { body, .. } | Stmt::System { body, .. } => self.expr_calls_fn(body, fn_name),
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                provides
+                    .iter()
+                    .any(|provide| self.expr_calls_fn(&provide.value, fn_name))
+                    || container.as_ref().is_some_and(|bindings| {
+                        bindings
+                            .iter()
+                            .any(|binding| self.expr_calls_fn(&binding.implementation, fn_name))
+                    })
+            }
+            Stmt::Job { inputs, body, .. } => {
+                inputs
+                    .iter()
+                    .filter_map(|input| input.default.as_ref())
+                    .any(|expr| self.expr_calls_fn(expr, fn_name))
+                    || self.expr_calls_fn(body, fn_name)
+            }
+            Stmt::RunJob { args, .. } => args
+                .iter()
+                .any(|(_, expr)| self.expr_calls_fn(expr, fn_name)),
             Stmt::Return(Some(expr), _) => self.expr_calls_fn(expr, fn_name),
             Stmt::Return(None, _) => false,
             Stmt::Yield { value, .. } => self.expr_calls_fn(value, fn_name),
@@ -2211,7 +2350,9 @@ impl CodeGenerator {
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
             | Stmt::UseRaw { .. }
-            | Stmt::Defer { .. } => false,
+            | Stmt::Defer { .. }
+            | Stmt::Event { .. }
+            | Stmt::Emit { .. } => false,
         }
     }
 
@@ -2659,6 +2800,13 @@ impl CodeGenerator {
                 condition, body, ..
             } => self.gen_when(condition, body),
             Stmt::TestBlock { name, body, .. } => self.gen_test_block(name, body),
+            Stmt::App { .. } | Stmt::Job { .. } | Stmt::RunJob { .. } => {
+                format!(
+                    "{}// TODO(app/job): transpiler support pending\n",
+                    self.indent_str()
+                )
+            }
+            Stmt::Event { .. } | Stmt::Emit { .. } => format!(""),
         }
     }
 
@@ -5449,6 +5597,85 @@ impl CodeGenerator {
                 );
                 local_scopes.pop();
             }
+            Stmt::App {
+                provides,
+                container,
+                ..
+            } => {
+                for provide in provides {
+                    self.analyze_closure_expr(
+                        &provide.value,
+                        outer_names,
+                        local_scopes,
+                        captured,
+                        mutated,
+                        consumed,
+                        false,
+                    );
+                }
+                if let Some(bindings) = container {
+                    for binding in bindings {
+                        self.analyze_closure_expr(
+                            &binding.implementation,
+                            outer_names,
+                            local_scopes,
+                            captured,
+                            mutated,
+                            consumed,
+                            false,
+                        );
+                    }
+                }
+            }
+            Stmt::Job {
+                name, inputs, body, ..
+            } => {
+                if let Some(scope) = local_scopes.last_mut() {
+                    scope.insert(name.clone());
+                }
+                local_scopes.push(
+                    inputs
+                        .iter()
+                        .map(|input| input.name.clone())
+                        .collect::<HashSet<_>>(),
+                );
+                for input in inputs {
+                    if let Some(default) = &input.default {
+                        self.analyze_closure_expr(
+                            default,
+                            outer_names,
+                            local_scopes,
+                            captured,
+                            mutated,
+                            consumed,
+                            false,
+                        );
+                    }
+                }
+                self.analyze_closure_expr(
+                    body,
+                    outer_names,
+                    local_scopes,
+                    captured,
+                    mutated,
+                    consumed,
+                    false,
+                );
+                local_scopes.pop();
+            }
+            Stmt::RunJob { args, .. } => {
+                for (_, expr) in args {
+                    self.analyze_closure_expr(
+                        expr,
+                        outer_names,
+                        local_scopes,
+                        captured,
+                        mutated,
+                        consumed,
+                        false,
+                    );
+                }
+            }
             Stmt::Return(Some(expr), _) | Stmt::Expr(expr) => self.analyze_closure_expr(
                 expr,
                 outer_names,
@@ -5590,7 +5817,9 @@ impl CodeGenerator {
             | Stmt::TypestateDef { .. }
             | Stmt::UseDecl { .. }
             | Stmt::UseRaw { .. }
-            | Stmt::Defer { .. } => {}
+            | Stmt::Defer { .. }
+            | Stmt::Event { .. }
+            | Stmt::Emit { .. } => {}
         }
     }
 
@@ -6618,6 +6847,32 @@ fn collect_inline_container_bindings_stmt(stmt: &Stmt) -> Option<Vec<Binding>> {
         Stmt::Fn { body, .. } | Stmt::System { body, .. } => {
             collect_inline_container_bindings_expr(body)
         }
+        Stmt::App {
+            provides,
+            container,
+            ..
+        } => provides
+            .iter()
+            .find_map(|provide| collect_inline_container_bindings_expr(&provide.value))
+            .or_else(|| {
+                container.as_ref().and_then(|bindings| {
+                    bindings.iter().find_map(|binding| {
+                        collect_inline_container_bindings_expr(&binding.implementation)
+                    })
+                })
+            }),
+        Stmt::Job { inputs, body, .. } => inputs
+            .iter()
+            .find_map(|input| {
+                input
+                    .default
+                    .as_ref()
+                    .and_then(collect_inline_container_bindings_expr)
+            })
+            .or_else(|| collect_inline_container_bindings_expr(body)),
+        Stmt::RunJob { args, .. } => args
+            .iter()
+            .find_map(|(_, expr)| collect_inline_container_bindings_expr(expr)),
         Stmt::Return(None, _) => None,
         Stmt::Yield { value, .. } => collect_inline_container_bindings_expr(value),
         Stmt::Defer { body, .. } => match body {
@@ -6665,7 +6920,9 @@ fn collect_inline_container_bindings_stmt(stmt: &Stmt) -> Option<Vec<Binding>> {
         | Stmt::DataDef { .. }
         | Stmt::UseDecl { .. }
         | Stmt::UseRaw { .. }
-        | Stmt::ContainerDef { .. } => None,
+        | Stmt::ContainerDef { .. }
+        | Stmt::Event { .. }
+        | Stmt::Emit { .. } => None,
     }
 }
 
@@ -7032,6 +7289,46 @@ fn collect_anon_structs_stmt(
             collect_anon_structs_expr(body, named_struct_defs, scopes, out);
             scopes.pop();
         }
+        Stmt::App {
+            provides,
+            container,
+            ..
+        } => {
+            for provide in provides {
+                collect_anon_structs_expr(&provide.value, named_struct_defs, scopes, out);
+            }
+            if let Some(bindings) = container {
+                for binding in bindings {
+                    collect_anon_structs_expr(
+                        &binding.implementation,
+                        named_struct_defs,
+                        scopes,
+                        out,
+                    );
+                }
+            }
+        }
+        Stmt::Job { inputs, body, .. } => {
+            scopes.push(HashMap::new());
+            if let Some(scope) = scopes.last_mut() {
+                for input in inputs {
+                    register_anon_ann(&input.type_ann, out);
+                    scope.insert(input.name.clone(), input.type_ann.clone());
+                }
+            }
+            for input in inputs {
+                if let Some(default) = &input.default {
+                    collect_anon_structs_expr(default, named_struct_defs, scopes, out);
+                }
+            }
+            collect_anon_structs_expr(body, named_struct_defs, scopes, out);
+            scopes.pop();
+        }
+        Stmt::RunJob { args, .. } => {
+            for (_, expr) in args {
+                collect_anon_structs_expr(expr, named_struct_defs, scopes, out);
+            }
+        }
         Stmt::Expr(expr) => collect_anon_structs_expr(expr, named_struct_defs, scopes, out),
         Stmt::Return(Some(expr), _) => {
             collect_anon_structs_expr(expr, named_struct_defs, scopes, out)
@@ -7126,6 +7423,7 @@ fn collect_anon_structs_stmt(
             }
         }
         Stmt::UseDecl { .. } | Stmt::UseRaw { .. } | Stmt::Yield { .. } | Stmt::Defer { .. } => {}
+        Stmt::Event { .. } | Stmt::Emit { .. } => {}
     }
 }
 
@@ -7496,6 +7794,13 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
                 }
             }
         }
+        Stmt::App { .. } => {}
+        Stmt::Job { inputs, .. } => {
+            for input in inputs {
+                collect_utility_types_ann(&input.type_ann, out);
+            }
+        }
+        Stmt::RunJob { .. } => {}
         Stmt::StructDef { fields, .. } | Stmt::DataDef { fields, .. } => {
             for (_, ann) in fields {
                 collect_utility_types_ann(ann, out);
@@ -7593,6 +7898,7 @@ fn collect_utility_types_stmt(stmt: &Stmt, out: &mut Vec<UtilitySpec>) {
         Stmt::Yield { .. } => {}
         Stmt::Return(_, _) | Stmt::Expr(_) | Stmt::UseDecl { .. } | Stmt::UseRaw { .. } => {}
         Stmt::Defer { .. } => {}
+        Stmt::Event { .. } | Stmt::Emit { .. } => {}
     }
 }
 

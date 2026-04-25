@@ -31,6 +31,10 @@ impl std::fmt::Display for TypeError {
 pub struct TypeChecker {
     /// スコープスタック（変数名 → 型）
     env: Vec<HashMap<String, Type>>,
+    /// job 名 → input 一覧
+    jobs: HashMap<String, Vec<JobInput>>,
+    /// event 名 → フィールド一覧
+    events: HashMap<String, Vec<(String, TypeAnn)>>,
     /// 発見した型エラーの一覧
     pub errors: Vec<TypeError>,
     generator_stack: Vec<Option<Type>>,
@@ -40,6 +44,8 @@ impl TypeChecker {
     pub fn new() -> Self {
         Self {
             env: vec![HashMap::new()],
+            jobs: HashMap::new(),
+            events: HashMap::new(),
             errors: Vec::new(),
             generator_stack: Vec::new(),
         }
@@ -199,6 +205,87 @@ impl TypeChecker {
                 self.define(name, body_ty);
             }
 
+            Stmt::Job {
+                name, inputs, body, ..
+            } => {
+                self.jobs.insert(name.clone(), inputs.clone());
+                self.define(name, Type::Unknown);
+                self.push_scope();
+                for input in inputs {
+                    let declared_ty = Type::from_ann(&input.type_ann);
+                    self.define(&input.name, declared_ty.clone());
+                    if let Some(default) = &input.default {
+                        let default_ty = self.infer_expr(default);
+                        if declared_ty != Type::Unknown
+                            && default_ty != Type::Unknown
+                            && declared_ty != default_ty
+                        {
+                            self.add_error(
+                                format!(
+                                    "job '{}' の input '{}' の default 型が不一致: 宣言 {} / 実際 {}",
+                                    name, input.name, declared_ty, default_ty
+                                ),
+                                Some(input.span.clone()),
+                            );
+                        }
+                    }
+                }
+                self.infer_expr(body);
+                self.pop_scope();
+            }
+
+            Stmt::RunJob { name, args, span } => {
+                let Some(inputs) = self.jobs.get(name).cloned() else {
+                    self.add_error(
+                        format!("未定義の job '{}' を実行しています", name),
+                        Some(span.clone()),
+                    );
+                    return;
+                };
+
+                let mut provided = HashMap::new();
+                for (arg_name, arg_expr) in args {
+                    let Some(input) = inputs.iter().find(|input| input.name == *arg_name) else {
+                        self.add_error(
+                            format!(
+                                "job '{}' に input '{}' は定義されていません",
+                                name, arg_name
+                            ),
+                            Some(span.clone()),
+                        );
+                        continue;
+                    };
+
+                    let actual = self.infer_expr(arg_expr);
+                    let expected = Type::from_ann(&input.type_ann);
+                    if expected != Type::Unknown && actual != Type::Unknown && expected != actual {
+                        self.add_error(
+                            format!(
+                                "job '{}' の input '{}' の型が不一致: expected {} / actual {}",
+                                name, arg_name, expected, actual
+                            ),
+                            Some(span.clone()),
+                        );
+                    }
+                    provided.insert(arg_name.clone(), actual);
+                }
+
+                for input in &inputs {
+                    if input.source() == JobInputSource::Cli
+                        && input.default.is_none()
+                        && !provided.contains_key(&input.name)
+                    {
+                        self.add_error(
+                            format!(
+                                "job '{}' の必須 input '{}' が不足しています",
+                                name, input.name
+                            ),
+                            Some(span.clone()),
+                        );
+                    }
+                }
+            }
+
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
                     self.infer_expr(e);
@@ -250,8 +337,98 @@ impl TypeChecker {
             Stmt::When { .. } => {}
             // FT-1: test ブロックは型チェッカーでは現在スキップ
             Stmt::TestBlock { .. } => {}
+            Stmt::App {
+                loads,
+                provides,
+                container,
+                wires,
+                span,
+                ..
+            } => {
+                for provide in provides {
+                    self.infer_expr(&provide.value);
+                }
+
+                for load in loads {
+                    if !is_valid_app_load_pattern(load) {
+                        self.add_error(
+                            format!("無効な load pattern '{}'", load),
+                            Some(span.clone()),
+                        );
+                    }
+                }
+
+                for wire in wires {
+                    let Some(bindings) = container.as_ref() else {
+                        self.add_error(
+                            format!(
+                                "wire '{}' は container bindings なしでは service を解決できません",
+                                wire.job_name
+                            ),
+                            Some(wire.span.clone()),
+                        );
+                        continue;
+                    };
+
+                    for (_, service_name) in &wire.bindings {
+                        if !bindings
+                            .iter()
+                            .any(|binding| binding.trait_name == *service_name)
+                        {
+                            self.add_error(
+                                format!(
+                                    "wire '{}' が未知の service '{}' を参照しています",
+                                    wire.job_name, service_name
+                                ),
+                                Some(wire.span.clone()),
+                            );
+                        }
+                    }
+                }
+            }
             // DI-4: container 定義は型チェッカーでは現在スキップ
             Stmt::ContainerDef { .. } => {}
+
+            Stmt::Event { name, fields, .. } => {
+                self.events.insert(name.clone(), fields.clone());
+                self.define(name, Type::Unknown);
+            }
+
+            Stmt::Emit { event_name, fields, span } => {
+                let Some(decl_fields) = self.events.get(event_name).cloned() else {
+                    self.add_error(
+                        format!("未定義のイベント '{}' を emit しています", event_name),
+                        Some(span.clone()),
+                    );
+                    return;
+                };
+
+                // 過不足チェック
+                for (field_name, _) in &decl_fields {
+                    if !fields.iter().any(|(n, _)| n == field_name) {
+                        self.add_error(
+                            format!(
+                                "emit '{}' に必須フィールド '{}' が不足しています",
+                                event_name, field_name
+                            ),
+                            Some(span.clone()),
+                        );
+                    }
+                }
+                for (field_name, field_expr) in fields {
+                    if !decl_fields.iter().any(|(n, _)| n == field_name) {
+                        self.add_error(
+                            format!(
+                                "emit '{}' に未定義フィールド '{}' があります",
+                                event_name, field_name
+                            ),
+                            Some(span.clone()),
+                        );
+                    } else {
+                        self.infer_expr(field_expr);
+                    }
+                }
+            }
         }
     }
 
@@ -564,6 +741,13 @@ fn infer_literal(lit: &Literal) -> Type {
     }
 }
 
+fn is_valid_app_load_pattern(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && pattern
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | '*'))
+}
+
 /// ソースコードを型チェックしてエラーリストを返す（CLI 用）
 pub fn type_check_source(source: &str) -> Vec<TypeError> {
     use crate::parser::parse_source;
@@ -611,7 +795,6 @@ mod tests {
 
     #[test]
     fn test_type_check_binop() {
-        // 数値 + 文字列 → 型エラーが発生する
         let tc = checker_for(r#"1 + "hello""#);
         assert!(!tc.errors.is_empty(), "型エラーが検出されるはず");
         assert!(
@@ -623,7 +806,6 @@ mod tests {
 
     #[test]
     fn test_type_check_fn_return() {
-        // 戻り値型が宣言と一致しない場合にエラー
         let src = r#"
 fn double(n: number) -> string {
     n * 2
@@ -635,7 +817,6 @@ fn double(n: number) -> string {
 
     #[test]
     fn test_type_check_option_match() {
-        // none アームなし → 網羅性エラー
         let src = r#"
 let v: number? = some(1)
 match v {
@@ -653,7 +834,6 @@ match v {
 
     #[test]
     fn test_type_check_result_match() {
-        // err アームなし → 網羅性エラー
         let src = r#"
 let r: number! = ok(1)
 match r {
@@ -665,6 +845,149 @@ match r {
         assert!(
             has_err_err,
             "err アーム欠如のエラーが検出されるはず: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_run_job_arg_mismatch() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    run { path }
+}
+
+run ImportUsers {
+    path: 42
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors.iter().any(|e| e.message.contains("input 'path'")
+                && e.message.contains("expected string / actual number")),
+            "job input 型不一致エラーが必要: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_run_job_missing_required_input() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    input dry_run: bool = true
+    run { path }
+}
+
+run ImportUsers
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors
+                .iter()
+                .any(|e| e.message.contains("必須 input 'path' が不足")),
+            "job 必須 input 欠如エラーが必要: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_run_job_allows_missing_di_input() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    input notifier: Notifier
+    run { path }
+}
+
+run ImportUsers {
+    path: "users.csv"
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            !tc.errors
+                .iter()
+                .any(|e| e.message.contains("input 'notifier'")),
+            "DI input は app/wire で補完される前提なので型チェッカーで必須扱いしない: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_app_wire_requires_container_binding() {
+        let src = r#"
+app Production {
+    wire ImportUsers {
+        notifier: Notifier
+    }
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors.iter().any(|e| {
+                e.message.contains("container bindings") && e.message.contains("ImportUsers")
+            }),
+            "wire と container の不整合エラーが必要: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_app_invalid_load_pattern() {
+        let src = r#"
+app Production {
+    load "jobs/[bad]"
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors
+                .iter()
+                .any(|e| e.message.contains("load pattern") && e.message.contains("[bad]")),
+            "無効な load パターンエラーが必要: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_emit_unknown_event() {
+        let src = r#"
+emit RowInvalid {
+    row: 42,
+    message: "bad",
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors
+                .iter()
+                .any(|e| e.message.contains("RowInvalid")),
+            "未定義イベントエラーが必要: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_type_check_emit_missing_field() {
+        let src = r#"
+event RowInvalid {
+    row: number
+    field: string
+    message: string
+}
+
+emit RowInvalid {
+    row: 42,
+    message: "bad",
+}
+"#;
+        let tc = checker_for(src);
+        assert!(
+            tc.errors
+                .iter()
+                .any(|e| e.message.contains("field") && e.message.contains("不足")),
+            "フィールド不足エラーが必要: {:?}",
             tc.errors
         );
     }

@@ -219,6 +219,40 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// app AppName { load ..., provide ..., container { ... }, wire ... }
+    App {
+        name: String,
+        loads: Vec<String>,
+        provides: Vec<ProvideDecl>,
+        container: Option<Vec<Binding>>,
+        wires: Vec<WireDecl>,
+        span: Span,
+    },
+    /// job JobName { input ..., run { ... } }
+    Job {
+        name: String,
+        inputs: Vec<JobInput>,
+        body: Box<Expr>,
+        span: Span,
+    },
+    /// run JobName { key: expr, ... }
+    RunJob {
+        name: String,
+        args: Vec<(String, Expr)>,
+        span: Span,
+    },
+    /// event EventName { field: Type, ... }
+    Event {
+        name: String,
+        fields: Vec<(String, TypeAnn)>,
+        span: Span,
+    },
+    /// emit EventName { key: expr, ... }
+    Emit {
+        event_name: String,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    },
     /// defer expr / defer { block } （E-7）
     Defer { body: DeferBody, span: Span },
     /// container { bind Trait to Impl }
@@ -246,6 +280,11 @@ impl Stmt {
             | Stmt::UseRaw { span, .. }
             | Stmt::When { span, .. }
             | Stmt::TestBlock { span, .. }
+            | Stmt::App { span, .. }
+            | Stmt::Job { span, .. }
+            | Stmt::RunJob { span, .. }
+            | Stmt::Event { span, .. }
+            | Stmt::Emit { span, .. }
             | Stmt::Defer { span, .. }
             | Stmt::ContainerDef { span, .. } => span,
             Stmt::Return(_, span) => span,
@@ -299,6 +338,54 @@ pub struct ValidateRule {
 pub struct Binding {
     pub trait_name: String,
     pub implementation: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProvideDecl {
+    pub name: String,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct WireDecl {
+    pub job_name: String,
+    pub bindings: Vec<(String, String)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobInput {
+    pub name: String,
+    pub type_ann: TypeAnn,
+    pub default: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobInputSource {
+    Cli,
+    Di,
+}
+
+impl TypeAnn {
+    pub fn is_job_cli_input_type(&self) -> bool {
+        match self {
+            TypeAnn::Number | TypeAnn::Float | TypeAnn::String | TypeAnn::Bool => true,
+            TypeAnn::Option(inner) => inner.is_job_cli_input_type(),
+            _ => false,
+        }
+    }
+}
+
+impl JobInput {
+    pub fn source(&self) -> JobInputSource {
+        if self.type_ann.is_job_cli_input_type() {
+            JobInputSource::Cli
+        } else {
+            JobInputSource::Di
+        }
+    }
 }
 
 /// バリデーション制約の種類
@@ -781,9 +868,106 @@ pub enum UnaryOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::Span;
 
     #[test]
     fn test_ast_stub_compiles() {
         let _module = Module { stmts: vec![] };
+    }
+
+    #[test]
+    fn test_job_input_source_cli_and_di() {
+        let span = Span {
+            file: "<test>".to_string(),
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
+        };
+        let cli_input = JobInput {
+            name: "path".to_string(),
+            type_ann: TypeAnn::String,
+            default: None,
+            span: span.clone(),
+        };
+        let optional_cli_input = JobInput {
+            name: "since".to_string(),
+            type_ann: TypeAnn::Option(Box::new(TypeAnn::String)),
+            default: None,
+            span: span.clone(),
+        };
+        let di_input = JobInput {
+            name: "notifier".to_string(),
+            type_ann: TypeAnn::Named("Notifier".to_string()),
+            default: None,
+            span,
+        };
+
+        assert_eq!(cli_input.source(), JobInputSource::Cli);
+        assert_eq!(optional_cli_input.source(), JobInputSource::Cli);
+        assert_eq!(di_input.source(), JobInputSource::Di);
+    }
+
+    #[test]
+    fn test_app_ast_nodes_compile() {
+        let span = Span {
+            file: "<test>".to_string(),
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
+        };
+        let stmt = Stmt::App {
+            name: "Production".to_string(),
+            loads: vec!["jobs/*".to_string()],
+            provides: vec![ProvideDecl {
+                name: "db".to_string(),
+                value: Expr::Ident("connect".to_string(), span.clone()),
+                span: span.clone(),
+            }],
+            container: Some(vec![Binding {
+                trait_name: "Notifier".to_string(),
+                implementation: Expr::Ident("SlackNotifier".to_string(), span.clone()),
+            }]),
+            wires: vec![WireDecl {
+                job_name: "ImportUsers".to_string(),
+                bindings: vec![("notifier".to_string(), "Notifier".to_string())],
+                span: span.clone(),
+            }],
+            span: span.clone(),
+        };
+
+        assert_eq!(stmt.span(), &span);
+    }
+
+    #[test]
+    fn test_event_emit_ast_nodes_compile() {
+        let span = Span {
+            file: "<test>".to_string(),
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
+        };
+        let event_stmt = Stmt::Event {
+            name: "RowInvalid".to_string(),
+            fields: vec![
+                ("row".to_string(), TypeAnn::Number),
+                ("field".to_string(), TypeAnn::String),
+                ("message".to_string(), TypeAnn::String),
+            ],
+            span: span.clone(),
+        };
+        assert_eq!(event_stmt.span(), &span);
+
+        let emit_stmt = Stmt::Emit {
+            event_name: "RowInvalid".to_string(),
+            fields: vec![
+                ("row".to_string(), Expr::Literal(Literal::Int(42), span.clone())),
+                ("field".to_string(), Expr::Literal(Literal::String("email".to_string()), span.clone())),
+            ],
+            span: span.clone(),
+        };
+        assert_eq!(emit_stmt.span(), &span);
     }
 }

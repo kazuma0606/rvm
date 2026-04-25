@@ -125,6 +125,20 @@ struct TypestateInfo {
     state_infos: HashMap<String, TypestateStateInfo>,
 }
 
+#[derive(Debug, Clone)]
+struct JobInfo {
+    inputs: Vec<JobInput>,
+    body: Box<Expr>,
+    env: CapturedEnv,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AppRuntimeConfig {
+    provides: HashMap<String, Value>,
+    container_bindings: HashMap<String, Expr>,
+    wires: HashMap<String, HashMap<String, String>>,
+}
+
 /// 型レジストリ（struct / enum / trait / mixin / typestate 定義とメソッドを格納）
 #[derive(Default)]
 struct TypeRegistry {
@@ -419,6 +433,15 @@ pub struct Interpreter {
     pub deps_manager: DepsManager,
     /// container { bind Trait to Impl } の登録情報
     container_bindings: HashMap<String, Expr>,
+    /// app Name { ... } の実行時構成
+    apps: HashMap<String, AppRuntimeConfig>,
+    active_app: Option<String>,
+    /// job 宣言の登録情報
+    jobs: HashMap<String, JobInfo>,
+    /// event 宣言の登録情報（event_name → fields）
+    event_decls: HashMap<String, Vec<(String, Value)>>,
+    /// emit されたイベントキュー（job 実行中に蓄積）
+    pub event_queue: Vec<(String, Value)>,
     /// インポートされたシンボルの追跡（未使用インポート検出用）（M-4-C）
     pub imported_symbols: HashMap<String, ImportInfo>,
     /// 現在ロード中のモジュールパスのスタック（循環参照検出用）（M-4-B）
@@ -457,6 +480,11 @@ impl Interpreter {
             module_loader: None,
             deps_manager: DepsManager::new(),
             container_bindings: HashMap::new(),
+            apps: HashMap::new(),
+            active_app: None,
+            jobs: HashMap::new(),
+            event_decls: HashMap::new(),
+            event_queue: Vec::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -755,6 +783,11 @@ impl Interpreter {
             module_loader: Some(ModuleLoader::from_file_path(path)),
             deps_manager: DepsManager::new(),
             container_bindings: HashMap::new(),
+            apps: HashMap::new(),
+            active_app: None,
+            jobs: HashMap::new(),
+            event_decls: HashMap::new(),
+            event_queue: Vec::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -785,6 +818,11 @@ impl Interpreter {
             module_loader: Some(ModuleLoader::new(project_root)),
             deps_manager: DepsManager::new(),
             container_bindings: HashMap::new(),
+            apps: HashMap::new(),
+            active_app: None,
+            jobs: HashMap::new(),
+            event_decls: HashMap::new(),
+            event_queue: Vec::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -822,6 +860,11 @@ impl Interpreter {
             module_loader: Some(loader),
             deps_manager: DepsManager::new(),
             container_bindings: HashMap::new(),
+            apps: HashMap::new(),
+            active_app: None,
+            jobs: HashMap::new(),
+            event_decls: HashMap::new(),
+            event_queue: Vec::new(),
             imported_symbols: HashMap::new(),
             loading_stack: Vec::new(),
             generator_stack: Vec::new(),
@@ -1667,6 +1710,22 @@ impl Interpreter {
                 self.define(name, closure, false);
                 Ok(Value::Unit)
             }
+            Stmt::Job {
+                name, inputs, body, ..
+            } => {
+                let captured = self.capture_env();
+                self.jobs.insert(
+                    name.clone(),
+                    JobInfo {
+                        inputs: inputs.clone(),
+                        body: body.clone(),
+                        env: Rc::clone(&captured),
+                    },
+                );
+                self.define(name, Value::String(name.clone()), false);
+                Ok(Value::Unit)
+            }
+            Stmt::RunJob { name, args, .. } => self.eval_run_job(name, args),
             Stmt::Return(expr, _) => {
                 let v = match expr {
                     Some(e) => self.eval_expr(e)?,
@@ -1752,6 +1811,13 @@ impl Interpreter {
             Stmt::When {
                 condition, body, ..
             } => self.eval_when(condition, body),
+            Stmt::App {
+                name,
+                provides,
+                container,
+                wires,
+                ..
+            } => self.eval_app_decl(name, provides, container.as_deref(), wires),
             Stmt::TestBlock { .. } => {
                 // `forge run` では TestBlock をスキップ（FT-1-D）
                 // `forge test` では run_tests() が直接処理する
@@ -1767,6 +1833,24 @@ impl Interpreter {
                     self.container_bindings
                         .insert(binding.trait_name.clone(), binding.implementation.clone());
                 }
+                Ok(Value::Unit)
+            }
+            Stmt::Event { name, .. } => {
+                // event 宣言をレジストリに登録（型情報はコンパイル時のみ）
+                self.event_decls.insert(name.clone(), Vec::new());
+                Ok(Value::Unit)
+            }
+            Stmt::Emit { event_name, fields, .. } => {
+                let mut field_map: HashMap<String, Value> = HashMap::new();
+                for (field_name, field_expr) in fields {
+                    let value = self.eval_expr(field_expr)?;
+                    field_map.insert(field_name.clone(), value);
+                }
+                let struct_value = Value::Struct {
+                    type_name: event_name.clone(),
+                    fields: Rc::new(RefCell::new(field_map)),
+                };
+                self.event_queue.push((event_name.clone(), struct_value));
                 Ok(Value::Unit)
             }
         };
@@ -1807,6 +1891,108 @@ impl Interpreter {
         } else {
             Ok(Value::Unit)
         }
+    }
+
+    fn eval_app_decl(
+        &mut self,
+        name: &str,
+        provides: &[ProvideDecl],
+        container: Option<&[forge_compiler::ast::Binding]>,
+        wires: &[WireDecl],
+    ) -> Result<Value, RuntimeError> {
+        let mut config = AppRuntimeConfig::default();
+
+        for provide in provides {
+            let value = self.eval_expr(&provide.value)?;
+            config.provides.insert(provide.name.clone(), value);
+        }
+
+        if let Some(bindings) = container {
+            for binding in bindings {
+                config
+                    .container_bindings
+                    .insert(binding.trait_name.clone(), binding.implementation.clone());
+            }
+        }
+
+        for wire in wires {
+            let job_wires = config.wires.entry(wire.job_name.clone()).or_default();
+            for (input_name, service_name) in &wire.bindings {
+                job_wires.insert(input_name.clone(), service_name.clone());
+            }
+        }
+
+        self.apps.insert(name.to_string(), config);
+        self.active_app = Some(name.to_string());
+        Ok(Value::Unit)
+    }
+
+    fn active_app_config(&self) -> Option<&AppRuntimeConfig> {
+        self.active_app
+            .as_ref()
+            .and_then(|name| self.apps.get(name))
+    }
+
+    fn eval_run_job(&mut self, name: &str, args: &[(String, Expr)]) -> Result<Value, RuntimeError> {
+        let Some(job) = self.jobs.get(name).cloned() else {
+            return Err(RuntimeError::Custom(format!(
+                "未定義の job '{}' を実行しています",
+                name
+            )));
+        };
+
+        let mut evaluated_args: HashMap<String, Value> = HashMap::new();
+        for (arg_name, arg_expr) in args {
+            if !job.inputs.iter().any(|input| input.name == *arg_name) {
+                return Err(RuntimeError::Custom(format!(
+                    "job '{}' に input '{}' は定義されていません",
+                    name, arg_name
+                )));
+            }
+            evaluated_args.insert(arg_name.clone(), self.eval_expr(arg_expr)?);
+        }
+
+        let mut ordered_args = Vec::with_capacity(job.inputs.len());
+        let app_config = self.active_app_config().cloned();
+        for input in &job.inputs {
+            if let Some(value) = evaluated_args.remove(&input.name) {
+                ordered_args.push(value);
+            } else if let Some(default) = &input.default {
+                ordered_args.push(self.eval_expr(default)?);
+            } else if let Some(app) = &app_config {
+                if let Some(value) = app.provides.get(&input.name) {
+                    ordered_args.push(value.clone());
+                    continue;
+                }
+
+                if let Some(job_wires) = app.wires.get(name) {
+                    if let Some(service_name) = job_wires.get(&input.name) {
+                        let Some(binding_expr) = app.container_bindings.get(service_name).cloned()
+                        else {
+                            return Err(RuntimeError::Custom(format!(
+                                "app の wire '{}' -> '{}' に対応する container binding がありません",
+                                input.name, service_name
+                            )));
+                        };
+                        ordered_args.push(self.eval_container_binding_expr(&binding_expr)?);
+                        continue;
+                    }
+                }
+
+                return Err(RuntimeError::Custom(format!(
+                    "job '{}' の必須 input '{}' が不足しています",
+                    name, input.name
+                )));
+            } else {
+                return Err(RuntimeError::Custom(format!(
+                    "job '{}' の必須 input '{}' が不足しています",
+                    name, input.name
+                )));
+            }
+        }
+
+        let params: Vec<String> = job.inputs.iter().map(|input| input.name.clone()).collect();
+        self.call_closure(Some(name), &params, &job.body, &job.env, None, ordered_args)
     }
 
     // ── テスト実行（FT-1-D）──────────────────────────────────────────────
@@ -10626,6 +10812,113 @@ mod tests {
                 single => vec![single],
             },
             other => panic!("expected validation error result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_run_job_executes_with_args() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    run {
+        path
+    }
+}
+
+run ImportUsers {
+    path: "users.csv"
+}
+"#;
+        match run(src).expect("job should run") {
+            Value::String(path) => assert_eq!(path, "users.csv"),
+            other => panic!("expected string result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_run_job_uses_default_input() {
+        let src = r#"
+job ImportUsers {
+    input dry_run: bool = true
+    run {
+        dry_run
+    }
+}
+
+run ImportUsers
+"#;
+        match run(src).expect("job should run") {
+            Value::Bool(flag) => assert!(flag),
+            other => panic!("expected bool result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_run_job_requires_missing_input() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    run {
+        path
+    }
+}
+
+run ImportUsers
+"#;
+        let result = run(src);
+        assert!(
+            matches!(result, Err(RuntimeError::Custom(ref msg)) if msg.contains("必須 input 'path' が不足"))
+        );
+    }
+
+    #[test]
+    fn test_run_job_uses_app_provide_for_missing_input() {
+        let src = r#"
+struct AppDb {}
+
+app Production {
+    provide db = AppDb {}
+}
+
+job ImportUsers {
+    input db: Db
+    run {
+        db
+    }
+}
+
+run ImportUsers
+"#;
+        match run(src).expect("job should use app provide") {
+            Value::Struct { type_name, .. } => assert_eq!(type_name, "AppDb"),
+            other => panic!("expected struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_run_job_uses_app_wire_for_missing_input() {
+        let src = r#"
+app Production {
+    container {
+        bind Notifier to SlackNotifier
+    }
+    wire ImportUsers {
+        notifier: Notifier
+    }
+}
+
+job ImportUsers {
+    input notifier: Notifier
+    run {
+        notifier
+    }
+}
+
+run ImportUsers
+"#;
+        match run(src).expect("job should use app wire") {
+            Value::Struct { type_name, .. } => assert_eq!(type_name, "SlackNotifier"),
+            other => panic!("expected struct, got {:?}", other),
         }
     }
 

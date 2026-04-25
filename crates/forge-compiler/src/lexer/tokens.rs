@@ -55,9 +55,18 @@ pub enum TokenKind {
     Yield,
     Loop,  // loop
     Break, // break
+    Job,
+    Input,
+    Run,
+    App,
+    Load,
+    Provide,
+    Wire,
     Container,
     Bind,
     To,
+    Event,
+    Emit,
     // ── モジュールキーワード (Phase M-0) ─────
     Use,  // use
     Pub,  // pub

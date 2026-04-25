@@ -59,6 +59,9 @@ fn is_block_start_token(kind: &TokenKind) -> bool {
             | TokenKind::Const
             | TokenKind::Fn
             | TokenKind::System
+            | TokenKind::App
+            | TokenKind::Job
+            | TokenKind::Run
             | TokenKind::Return
             | TokenKind::Struct
             | TokenKind::Trait
@@ -113,6 +116,63 @@ impl Parser {
         self.peek().span.clone()
     }
 
+    fn is_app_decl_start(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::App)
+            && matches!(
+                self.kind_at(1),
+                Some(
+                    TokenKind::Ident(_)
+                        | TokenKind::Input
+                        | TokenKind::Run
+                        | TokenKind::Job
+                        | TokenKind::App
+                        | TokenKind::Load
+                        | TokenKind::Provide
+                        | TokenKind::Wire
+                        | TokenKind::To
+                )
+            )
+            && matches!(self.kind_at(2), Some(TokenKind::LBrace))
+    }
+
+    fn is_job_decl_start(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::Job)
+            && matches!(
+                self.kind_at(1),
+                Some(
+                    TokenKind::Ident(_)
+                        | TokenKind::Input
+                        | TokenKind::Run
+                        | TokenKind::Job
+                        | TokenKind::App
+                        | TokenKind::Load
+                        | TokenKind::Provide
+                        | TokenKind::Wire
+                        | TokenKind::To
+                )
+            )
+            && matches!(self.kind_at(2), Some(TokenKind::LBrace))
+    }
+
+    fn is_run_job_stmt_start(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::Run)
+            && matches!(
+                self.kind_at(1),
+                Some(
+                    TokenKind::Ident(_)
+                        | TokenKind::Input
+                        | TokenKind::Run
+                        | TokenKind::Job
+                        | TokenKind::App
+                        | TokenKind::Load
+                        | TokenKind::Provide
+                        | TokenKind::Wire
+                        | TokenKind::To
+                )
+            )
+            && !matches!(self.kind_at(2), Some(TokenKind::Dot))
+    }
+
     fn skip_sep(&mut self) {
         while matches!(self.peek_kind(), TokenKind::Semicolon) {
             self.advance();
@@ -141,9 +201,45 @@ impl Parser {
                 self.advance();
                 Ok((name, tok.span))
             }
+            TokenKind::Input => {
+                self.advance();
+                Ok(("input".to_string(), tok.span))
+            }
+            TokenKind::Run => {
+                self.advance();
+                Ok(("run".to_string(), tok.span))
+            }
+            TokenKind::Job => {
+                self.advance();
+                Ok(("job".to_string(), tok.span))
+            }
+            TokenKind::App => {
+                self.advance();
+                Ok(("app".to_string(), tok.span))
+            }
+            TokenKind::Load => {
+                self.advance();
+                Ok(("load".to_string(), tok.span))
+            }
+            TokenKind::Provide => {
+                self.advance();
+                Ok(("provide".to_string(), tok.span))
+            }
+            TokenKind::Wire => {
+                self.advance();
+                Ok(("wire".to_string(), tok.span))
+            }
             TokenKind::To => {
                 self.advance();
                 Ok(("to".to_string(), tok.span))
+            }
+            TokenKind::Event => {
+                self.advance();
+                Ok(("event".to_string(), tok.span))
+            }
+            TokenKind::Emit => {
+                self.advance();
+                Ok(("emit".to_string(), tok.span))
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "identifier".to_string(),
@@ -163,8 +259,17 @@ impl Parser {
             TokenKind::Ok => "ok".to_string(),
             TokenKind::Err => "err".to_string(),
             TokenKind::SelfVal => "self".to_string(),
+            TokenKind::Input => "input".to_string(),
+            TokenKind::Run => "run".to_string(),
+            TokenKind::Job => "job".to_string(),
+            TokenKind::App => "app".to_string(),
+            TokenKind::Load => "load".to_string(),
+            TokenKind::Provide => "provide".to_string(),
+            TokenKind::Wire => "wire".to_string(),
             TokenKind::Use => "use".to_string(),
             TokenKind::To => "to".to_string(),
+            TokenKind::Event => "event".to_string(),
+            TokenKind::Emit => "emit".to_string(),
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "identifier".to_string(),
@@ -238,6 +343,11 @@ impl Parser {
             }
             TokenKind::Fn => self.parse_fn(),
             TokenKind::System => self.parse_system(),
+            TokenKind::App if self.is_app_decl_start() => self.parse_app_decl(),
+            TokenKind::Job if self.is_job_decl_start() => self.parse_job_decl(),
+            TokenKind::Run if self.is_run_job_stmt_start() => self.parse_run_job_stmt(),
+            TokenKind::Event => self.parse_event_decl(),
+            TokenKind::Emit => self.parse_emit_stmt(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Yield => self.parse_yield(),
             TokenKind::Struct => self.parse_struct_def(vec![], vec![]),
@@ -503,6 +613,277 @@ impl Parser {
         self.skip_sep();
 
         Ok(Stmt::TestBlock { name, body, span })
+    }
+
+    fn parse_app_decl(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::App)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut loads = Vec::new();
+        let mut provides = Vec::new();
+        let mut container = None;
+        let mut wires = Vec::new();
+
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+
+            match self.peek_kind() {
+                TokenKind::Load => loads.push(self.parse_app_load_decl()?),
+                TokenKind::Provide => provides.push(self.parse_app_provide_decl()?),
+                TokenKind::Container => {
+                    self.expect_token(&TokenKind::Container)?;
+                    container = Some(self.parse_container_bindings()?);
+                }
+                TokenKind::Wire => wires.push(self.parse_app_wire_decl()?),
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "load / provide / container / wire".to_string(),
+                        found: other.clone(),
+                        span: self.current_span(),
+                    });
+                }
+            }
+            self.skip_sep();
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::App {
+            name,
+            loads,
+            provides,
+            container,
+            wires,
+            span,
+        })
+    }
+
+    fn parse_app_load_decl(&mut self) -> Result<String, ParseError> {
+        self.expect_token(&TokenKind::Load)?;
+        match self.peek_kind().clone() {
+            TokenKind::Str(path) => {
+                self.advance();
+                Ok(path)
+            }
+            _ => {
+                let mut path = String::new();
+                loop {
+                    match self.peek_kind() {
+                        TokenKind::Ident(segment) => {
+                            path.push_str(segment);
+                            self.advance();
+                        }
+                        TokenKind::Slash => {
+                            path.push('/');
+                            self.advance();
+                        }
+                        TokenKind::Star => {
+                            path.push('*');
+                            self.advance();
+                        }
+                        TokenKind::Dot => {
+                            path.push('.');
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                if path.is_empty() {
+                    Err(ParseError::UnexpectedToken {
+                        expected: "load パターン".to_string(),
+                        found: self.peek_kind().clone(),
+                        span: self.current_span(),
+                    })
+                } else {
+                    Ok(path)
+                }
+            }
+        }
+    }
+
+    fn parse_app_provide_decl(&mut self) -> Result<ProvideDecl, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Provide)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::Eq)?;
+        let value = self.parse_expr()?;
+        Ok(ProvideDecl { name, value, span })
+    }
+
+    fn parse_app_wire_decl(&mut self) -> Result<WireDecl, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Wire)?;
+        let (job_name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+        let mut bindings = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (input_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let (service_name, _) = self.expect_ident()?;
+            bindings.push((input_name, service_name));
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(WireDecl {
+            job_name,
+            bindings,
+            span,
+        })
+    }
+
+    fn parse_event_decl(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Event)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let type_ann = self.parse_type_ann()?;
+            fields.push((field_name, type_ann));
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::Event { name, fields, span })
+    }
+
+    fn parse_emit_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Emit)?;
+        let (event_name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let (field_name, _) = self.expect_ident()?;
+            self.expect_token(&TokenKind::Colon)?;
+            let value = self.parse_expr()?;
+            fields.push((field_name, value));
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+        Ok(Stmt::Emit { event_name, fields, span })
+    }
+
+    fn parse_job_decl(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Job)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::LBrace)?;
+
+        let mut inputs = Vec::new();
+        let mut body: Option<Box<Expr>> = None;
+
+        loop {
+            self.skip_sep();
+            if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+
+            match self.peek_kind() {
+                TokenKind::Input => inputs.push(self.parse_job_input()?),
+                TokenKind::Run => {
+                    self.advance();
+                    body = Some(Box::new(self.parse_block()?));
+                }
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "input または run".to_string(),
+                        found: other.clone(),
+                        span: self.current_span(),
+                    });
+                }
+            }
+
+            self.skip_sep();
+        }
+
+        self.expect_token(&TokenKind::RBrace)?;
+
+        let body = body.ok_or_else(|| ParseError::UnexpectedEof {
+            expected: "run ブロック".to_string(),
+        })?;
+
+        Ok(Stmt::Job {
+            name,
+            inputs,
+            body,
+            span,
+        })
+    }
+
+    fn parse_job_input(&mut self) -> Result<JobInput, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Input)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect_token(&TokenKind::Colon)?;
+        let type_ann = self.parse_type_ann()?;
+        let default = if matches!(self.peek_kind(), TokenKind::Eq) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(JobInput {
+            name,
+            type_ann,
+            default,
+            span,
+        })
+    }
+
+    fn parse_run_job_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        self.expect_token(&TokenKind::Run)?;
+        let (name, _) = self.expect_ident()?;
+        let mut args = Vec::new();
+
+        if matches!(self.peek_kind(), TokenKind::LBrace) {
+            self.expect_token(&TokenKind::LBrace)?;
+            loop {
+                self.skip_sep();
+                if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                let (key, _) = self.expect_ident()?;
+                self.expect_token(&TokenKind::Colon)?;
+                let value = self.parse_expr()?;
+                args.push((key, value));
+                if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Semicolon) {
+                    self.advance();
+                }
+            }
+            self.expect_token(&TokenKind::RBrace)?;
+        }
+
+        self.skip_sep();
+        Ok(Stmt::RunJob { name, args, span })
     }
 
     /// `when` の後に続く条件をパース
@@ -1821,6 +2202,13 @@ impl Parser {
             | TokenKind::Ok
             | TokenKind::Err
             | TokenKind::SelfVal
+            | TokenKind::App
+            | TokenKind::Load
+            | TokenKind::Provide
+            | TokenKind::Wire
+            | TokenKind::Input
+            | TokenKind::Run
+            | TokenKind::Job
             | TokenKind::To => {
                 let tok = self.advance();
                 let name = match &tok.kind {
@@ -1829,6 +2217,13 @@ impl Parser {
                     TokenKind::Ok => "ok",
                     TokenKind::Err => "err",
                     TokenKind::SelfVal => "self",
+                    TokenKind::App => "app",
+                    TokenKind::Load => "load",
+                    TokenKind::Provide => "provide",
+                    TokenKind::Wire => "wire",
+                    TokenKind::Input => "input",
+                    TokenKind::Run => "run",
+                    TokenKind::Job => "job",
                     TokenKind::To => "to",
                     _ => unreachable!(),
                 };
@@ -4007,6 +4402,15 @@ fn token_kind_to_raw_str(kind: &TokenKind) -> String {
         TokenKind::Yield => " yield".to_string(),
         TokenKind::Loop => " loop".to_string(),
         TokenKind::Break => " break".to_string(),
+        TokenKind::Job => " job".to_string(),
+        TokenKind::Input => " input".to_string(),
+        TokenKind::Run => " run".to_string(),
+        TokenKind::App => " app".to_string(),
+        TokenKind::Load => " load".to_string(),
+        TokenKind::Provide => " provide".to_string(),
+        TokenKind::Wire => " wire".to_string(),
+        TokenKind::Event => " event".to_string(),
+        TokenKind::Emit => " emit".to_string(),
         TokenKind::True => " true".to_string(),
         TokenKind::False => " false".to_string(),
         TokenKind::Use => " use".to_string(),
@@ -5034,6 +5438,229 @@ let app = App::new<Unconfigured>().configure(container {
                 assert_eq!(body.len(), 0);
             }
             other => panic!("expected TestBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_job_decl() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+    input dry_run: bool = true
+
+    run {
+        path
+    }
+}
+"#;
+        match first_stmt(src) {
+            Stmt::Job {
+                name, inputs, body, ..
+            } => {
+                assert_eq!(name, "ImportUsers");
+                assert_eq!(inputs.len(), 2);
+                assert_eq!(inputs[0].name, "path");
+                assert_eq!(inputs[0].type_ann, TypeAnn::String);
+                assert!(inputs[0].default.is_none());
+                assert_eq!(inputs[1].name, "dry_run");
+                assert_eq!(inputs[1].type_ann, TypeAnn::Bool);
+                assert!(matches!(
+                    inputs[1].default,
+                    Some(Expr::Literal(Literal::Bool(true), _))
+                ));
+                assert!(matches!(body.as_ref(), Expr::Block { .. }));
+            }
+            other => panic!("expected Job, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_job_optional_input() {
+        let src = r#"
+job SyncOrders {
+    input since: string?
+    run { since }
+}
+"#;
+        match first_stmt(src) {
+            Stmt::Job { inputs, .. } => {
+                assert_eq!(inputs.len(), 1);
+                assert_eq!(
+                    inputs[0].type_ann,
+                    TypeAnn::Option(Box::new(TypeAnn::String))
+                );
+            }
+            other => panic!("expected Job, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_run_job_stmt() {
+        let src = r#"
+run ImportUsers {
+    path: "users.csv",
+    dry_run: false,
+}
+"#;
+        match first_stmt(src) {
+            Stmt::RunJob { name, args, .. } => {
+                assert_eq!(name, "ImportUsers");
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0].0, "path");
+                assert_eq!(args[1].0, "dry_run");
+            }
+            other => panic!("expected RunJob, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_run_job_stmt_without_args() {
+        match first_stmt("run GenerateReport") {
+            Stmt::RunJob { name, args, .. } => {
+                assert_eq!(name, "GenerateReport");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected RunJob, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_job_requires_run_block() {
+        let src = r#"
+job ImportUsers {
+    input path: string
+}
+"#;
+        let result = parse_source(src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_app_decl() {
+        let src = r#"
+app Production {
+    load validators/*
+    load jobs/*
+    provide db = Crucible::connect(env("DATABASE_URL"))
+    container {
+        bind Notifier to SlackNotifier
+    }
+    wire ImportUsers {
+        notifier: Notifier
+    }
+}
+"#;
+        match first_stmt(src) {
+            Stmt::App {
+                name,
+                loads,
+                provides,
+                container,
+                wires,
+                ..
+            } => {
+                assert_eq!(name, "Production");
+                assert_eq!(
+                    loads,
+                    vec!["validators/*".to_string(), "jobs/*".to_string()]
+                );
+                assert_eq!(provides.len(), 1);
+                assert_eq!(provides[0].name, "db");
+                assert!(container.is_some());
+                assert_eq!(container.unwrap().len(), 1);
+                assert_eq!(wires.len(), 1);
+                assert_eq!(wires[0].job_name, "ImportUsers");
+                assert_eq!(
+                    wires[0].bindings,
+                    vec![("notifier".to_string(), "Notifier".to_string())]
+                );
+            }
+            other => panic!("expected App, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_app_load_string_literal() {
+        let src = r#"
+app Test {
+    load "jobs/*"
+}
+"#;
+        match first_stmt(src) {
+            Stmt::App { loads, .. } => {
+                assert_eq!(loads, vec!["jobs/*".to_string()]);
+            }
+            other => panic!("expected App, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_app_requires_known_members() {
+        let src = r#"
+app Production {
+    let x = 1
+}
+"#;
+        let result = parse_source(src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_event_decl() {
+        let src = r#"
+event RowInvalid {
+    row: number
+    field: string
+    message: string
+}
+"#;
+        match first_stmt(src) {
+            Stmt::Event { name, fields, .. } => {
+                assert_eq!(name, "RowInvalid");
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0], ("row".to_string(), TypeAnn::Number));
+                assert_eq!(fields[1], ("field".to_string(), TypeAnn::String));
+                assert_eq!(fields[2], ("message".to_string(), TypeAnn::String));
+            }
+            other => panic!("expected Event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_emit_stmt() {
+        let src = r#"
+emit RowInvalid {
+    row: 42,
+    field: "email",
+    message: "invalid format",
+}
+"#;
+        match first_stmt(src) {
+            Stmt::Emit { event_name, fields, .. } => {
+                assert_eq!(event_name, "RowInvalid");
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0].0, "row");
+                assert_eq!(fields[1].0, "field");
+                assert_eq!(fields[2].0, "message");
+            }
+            other => panic!("expected Emit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_with_trailing_comma() {
+        let src = r#"
+event ImportFinished {
+    total: number,
+    failed: number,
+}
+"#;
+        match first_stmt(src) {
+            Stmt::Event { name, fields, .. } => {
+                assert_eq!(name, "ImportFinished");
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("expected Event, got {:?}", other),
         }
     }
 }

@@ -346,6 +346,15 @@ impl Lexer {
                         "yield" => TokenKind::Yield,
                         "loop" => TokenKind::Loop,
                         "break" => TokenKind::Break,
+                        "job" => TokenKind::Job,
+                        "input" => TokenKind::Input,
+                        "run" => TokenKind::Run,
+                        "app" => TokenKind::App,
+                        "load" => TokenKind::Load,
+                        "provide" => TokenKind::Provide,
+                        "wire" => TokenKind::Wire,
+                        "event" => TokenKind::Event,
+                        "emit" => TokenKind::Emit,
                         "container" => TokenKind::Container,
                         "bind" => TokenKind::Bind,
                         "to" => TokenKind::To,
@@ -758,6 +767,44 @@ mod tests {
     fn test_lex_operator_keyword() {
         let got = kinds("operator");
         assert_eq!(got, vec![TokenKind::Operator, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_lex_job_keywords() {
+        let got = kinds("job input run");
+        assert_eq!(
+            got,
+            vec![
+                TokenKind::Job,
+                TokenKind::Input,
+                TokenKind::Run,
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lex_app_keywords() {
+        let got = kinds("app load provide wire");
+        assert_eq!(
+            got,
+            vec![
+                TokenKind::App,
+                TokenKind::Load,
+                TokenKind::Provide,
+                TokenKind::Wire,
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lex_event_keywords() {
+        let got = kinds("event emit");
+        assert_eq!(
+            got,
+            vec![TokenKind::Event, TokenKind::Emit, TokenKind::Eof]
+        );
     }
 
     #[test]
